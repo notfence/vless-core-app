@@ -49,6 +49,16 @@ launchctl load /Library/LaunchDaemons/com.vlesscore.vpnctld.plist
 killall -9 SpringBoard
 ```
 
+If you already downloaded `.deb` directly on iPhone (for example in `/var/mobile/Downloads`):
+
+```bash
+dpkg -i /var/mobile/Downloads/com.vlesscore.app_iphoneos-arm.deb
+su mobile -c "uicache" || uicache
+launchctl unload /Library/LaunchDaemons/com.vlesscore.vpnctld.plist >/dev/null 2>&1
+launchctl load /Library/LaunchDaemons/com.vlesscore.vpnctld.plist
+killall -9 SpringBoard
+```
+
 ## Runtime paths
 
 - App: `/Applications/vless-core.app`
