@@ -37,22 +37,22 @@ Package uses `gzip` compression for old iOS 6 `dpkg` compatibility.
 
 ## Install on iOS
 
+### Install from latest release (.deb)
+
+1. Download `.deb` from [latest release](https://github.com/notfence/vless-core-app/releases/latest).
+2. Put the `.deb` file on your device (for example: `/var/mobile/`).
+3. In iFile, find the `.deb`, tap it, and press `Install`.
+4. Device should respring.
+
+### Install your own build via SSH (scp + dpkg)
+
+
 ```bash
 # on build machine
 scp build/com.vlesscore.app_iphoneos-arm.deb root@<iphone-ip>:/var/root/
 
 # on iPhone
 dpkg -i com.vlesscore.app_iphoneos-arm.deb
-su mobile -c "uicache" || uicache
-launchctl unload /Library/LaunchDaemons/com.vlesscore.vpnctld.plist >/dev/null 2>&1
-launchctl load /Library/LaunchDaemons/com.vlesscore.vpnctld.plist
-killall -9 SpringBoard
-```
-
-If you already downloaded `.deb` directly on iPhone (for example in `/var/mobile/Downloads`):
-
-```bash
-dpkg -i /var/mobile/Downloads/com.vlesscore.app_iphoneos-arm.deb
 su mobile -c "uicache" || uicache
 launchctl unload /Library/LaunchDaemons/com.vlesscore.vpnctld.plist >/dev/null 2>&1
 launchctl load /Library/LaunchDaemons/com.vlesscore.vpnctld.plist
