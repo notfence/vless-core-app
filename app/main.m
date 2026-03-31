@@ -1573,6 +1573,116 @@ static UIImage *MakeIconImage(VCIconType type, CGFloat size, BOOL active) {
     return (section == 0) ? @"Configurations" : @"Subscriptions";
 }
 
+- (BOOL)tableView:(UITableView *)tableView canEditRowAtIndexPath:(NSIndexPath *)indexPath {
+    (void)tableView;
+    if (indexPath.section == 0) {
+        return YES;
+    }
+
+    NSInteger subIdx = -1;
+    NSInteger itemIdx = -1;
+    BOOL isHeader = YES;
+    return [self mapSubscriptionRow:indexPath.row toSubIndex:&subIdx itemIndex:&itemIdx isHeader:&isHeader];
+}
+
+- (UITableViewCellEditingStyle)tableView:(UITableView *)tableView editingStyleForRowAtIndexPath:(NSIndexPath *)indexPath {
+    (void)tableView;
+    (void)indexPath;
+    return UITableViewCellEditingStyleDelete;
+}
+
+- (void)tableView:(UITableView *)tableView commitEditingStyle:(UITableViewCellEditingStyle)editingStyle forRowAtIndexPath:(NSIndexPath *)indexPath {
+    if (editingStyle != UITableViewCellEditingStyleDelete) return;
+
+    if (indexPath.section == 0) {
+        if (indexPath.row < 0 || indexPath.row >= (NSInteger)[_configs count]) return;
+
+        [_configs removeObjectAtIndex:indexPath.row];
+
+        if (_selectedConfigIndex == indexPath.row) {
+            if ([_configs count] > 0) {
+                NSInteger fallback = indexPath.row;
+                if (fallback >= (NSInteger)[_configs count]) fallback = (NSInteger)[_configs count] - 1;
+                _selectedConfigIndex = fallback;
+            } else {
+                _selectedConfigIndex = -1;
+            }
+        } else if (_selectedConfigIndex > indexPath.row) {
+            _selectedConfigIndex--;
+        }
+
+        [self normalizeSelection];
+        [self saveData];
+        [_tableView reloadData];
+        [self showStatus:@"Configuration deleted" ok:YES];
+        return;
+    }
+
+    NSInteger subIdx = -1;
+    NSInteger itemIdx = -1;
+    BOOL isHeader = YES;
+    if (![self mapSubscriptionRow:indexPath.row toSubIndex:&subIdx itemIndex:&itemIdx isHeader:&isHeader]) {
+        return;
+    }
+
+    if (isHeader) {
+        if (subIdx < 0 || subIdx >= (NSInteger)[_subscriptions count]) return;
+
+        [_subscriptions removeObjectAtIndex:subIdx];
+
+        if (_expandedSubscription == subIdx) {
+            _expandedSubscription = -1;
+        } else if (_expandedSubscription > subIdx) {
+            _expandedSubscription--;
+        }
+
+        if (_selectedSubIndex == subIdx) {
+            _selectedSubIndex = -1;
+            _selectedSubItemIndex = -1;
+        } else if (_selectedSubIndex > subIdx) {
+            _selectedSubIndex--;
+        }
+
+        [self normalizeSelection];
+        [self saveData];
+        [_tableView reloadData];
+        [self showStatus:@"Subscription deleted" ok:YES];
+        return;
+    }
+
+    if (subIdx < 0 || subIdx >= (NSInteger)[_subscriptions count]) return;
+    NSDictionary *sub = [_subscriptions objectAtIndex:subIdx];
+    NSArray *items = [sub objectForKey:@"items"];
+    if (![items isKindOfClass:[NSArray class]]) return;
+    if (itemIdx < 0 || itemIdx >= (NSInteger)[items count]) return;
+
+    NSMutableArray *updatedItems = [NSMutableArray arrayWithArray:items];
+    [updatedItems removeObjectAtIndex:itemIdx];
+
+    NSMutableDictionary *updatedSub = [NSMutableDictionary dictionaryWithDictionary:sub];
+    [updatedSub setObject:updatedItems forKey:@"items"];
+    [_subscriptions replaceObjectAtIndex:subIdx withObject:updatedSub];
+
+    if (_selectedSubIndex == subIdx) {
+        if (_selectedSubItemIndex == itemIdx) {
+            if ([updatedItems count] == 0) {
+                _selectedSubItemIndex = -1;
+            } else {
+                NSInteger fallback = itemIdx;
+                if (fallback >= (NSInteger)[updatedItems count]) fallback = (NSInteger)[updatedItems count] - 1;
+                _selectedSubItemIndex = fallback;
+            }
+        } else if (_selectedSubItemIndex > itemIdx) {
+            _selectedSubItemIndex--;
+        }
+    }
+
+    [self normalizeSelection];
+    [self saveData];
+    [_tableView reloadData];
+    [self showStatus:@"Subscription config deleted" ok:YES];
+}
+
 - (UITableViewCell *)tableView:(UITableView *)tableView cellForRowAtIndexPath:(NSIndexPath *)indexPath {
     static NSString *kCellId = @"VCItemCell";
     UITableViewCell *cell = [tableView dequeueReusableCellWithIdentifier:kCellId];
