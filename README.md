@@ -1,6 +1,8 @@
-# vless-core-app (jailbreak)
+# vless-core-app
 
 `vless-core-app` is an iOS 6.x app + root daemon for full-device VLESS Reality routing.
+
+**Jailbreak required**
 
 ## Tested Device/OS
 
