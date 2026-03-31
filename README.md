@@ -9,6 +9,15 @@ Compatibility with other iOS versions/devices is not guaranteed.
 
 ## Build
 
+Need `vless-core-cli` first.
+
+Download it from:
+
+- Repo: https://github.com/notfence/vless-core-cli
+- Latest release: https://github.com/notfence/vless-core-cli/releases/latest
+
+For iOS package build, use `vless-core-darwin-amrv7` from `vless-core-cli` release (or build `vless-core-cli` from source).
+
 ```bash
 # build core binary first
 cd /path/to/vless-core-cli
