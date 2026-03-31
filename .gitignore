@@ -1,0 +1,7 @@
+# Build outputs
+build/
+
+# Local clutter
+.DS_Store
+*.swp
+*.swo

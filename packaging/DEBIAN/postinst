@@ -1,0 +1,24 @@
+#!/bin/sh
+set -e
+chown -R root:wheel /Applications/vless-core.app || true
+chown root:wheel /Library/LaunchDaemons/com.vlesscore.vpnctld.plist || true
+chown root:wheel /usr/bin/vpnctld-bootstrap || true
+chown root:wheel /Library/MobileSubstrate/DynamicLibraries/vlesscorevpnicon.dylib /Library/MobileSubstrate/DynamicLibraries/vlesscorevpnicon.plist || true
+chmod 644 /Library/LaunchDaemons/com.vlesscore.vpnctld.plist || true
+chmod 644 /Library/MobileSubstrate/DynamicLibraries/vlesscorevpnicon.plist || true
+chmod 755 /Library/MobileSubstrate/DynamicLibraries/vlesscorevpnicon.dylib || true
+chmod 755 /Applications/vless-core.app/vless-core || true
+chmod 755 /usr/bin/vpnctld /usr/bin/vless-core-darwin-amrv7 /usr/bin/redsocks-v2ray || true
+chmod 4755 /usr/bin/vpnctld-bootstrap || true
+mkdir -p /var/mobile/Library/Preferences || true
+touch /var/mobile/Library/Preferences/com.vlesscore.vpnicon.state || true
+chown mobile:mobile /var/mobile/Library/Preferences/com.vlesscore.vpnicon.state >/dev/null 2>&1 || true
+launchctl unload /Library/LaunchDaemons/com.vlesscore.vpnctld.plist >/dev/null 2>&1 || true
+launchctl load /Library/LaunchDaemons/com.vlesscore.vpnctld.plist >/dev/null 2>&1 || true
+if id mobile >/dev/null 2>&1; then
+  su mobile -c "uicache" >/dev/null 2>&1 || uicache >/dev/null 2>&1 || true
+else
+  uicache >/dev/null 2>&1 || true
+fi
+killall -9 SpringBoard >/dev/null 2>&1 || true
+exit 0
