@@ -14,7 +14,7 @@ DAEMON_BIN := $(BUILD_DIR)/vpnctld
 BOOTSTRAP_BIN := $(BUILD_DIR)/vpnctld-bootstrap
 VPNICON_TWEAK_BIN := $(BUILD_DIR)/vlesscorevpnicon.dylib
 PKG_ROOT := $(BUILD_DIR)/pkgroot
-DEB_OUT := $(BUILD_DIR)/com.vlesscore.app_0.2.13-1_iphoneos-arm.deb
+DEB_OUT := $(BUILD_DIR)/com.vlesscore.app_iphoneos-arm.deb
 
 APP_SRC := app/main.m
 DAEMON_SRC := daemon/vpnctld.c
@@ -29,7 +29,7 @@ TWEAK_CFLAGS := -fno-objc-arc -Wall -Wextra -O2 -arch armv7 -miphoneos-version-m
 TWEAK_LDFLAGS := -dynamiclib -install_name /Library/MobileSubstrate/DynamicLibraries/vlesscorevpnicon.dylib -framework Foundation -framework UIKit -framework CoreFoundation
 
 VLESS_CORE_BIN ?= $(abspath ../vless-core-cli/vless-core-darwin-amrv7)
-REDSOCKS_BIN ?= $(ROOT)/third_party/redsocks-v2ray
+REDSOCKS_BIN ?= $(ROOT)/third_party/redsocks-vless-core
 
 all: deb
 
@@ -80,21 +80,21 @@ package-root: check-package-inputs $(APP_BIN) $(DAEMON_BIN) $(BOOTSTRAP_BIN) $(V
 	cp $(BOOTSTRAP_BIN) $(PKG_ROOT)/usr/bin/vpnctld-bootstrap
 	cp $(VPNICON_TWEAK_BIN) $(PKG_ROOT)/Library/MobileSubstrate/DynamicLibraries/vlesscorevpnicon.dylib
 	cp $(VLESS_CORE_BIN) $(PKG_ROOT)/usr/bin/vless-core-darwin-amrv7
-	cp $(REDSOCKS_BIN) $(PKG_ROOT)/usr/bin/redsocks-v2ray
+	cp $(REDSOCKS_BIN) $(PKG_ROOT)/usr/bin/redsocks-vless-core
 	find $(PKG_ROOT) -type d -exec chmod 755 {} \;
 	find $(PKG_ROOT) -type f -exec chmod 644 {} \;
 	chmod 755 $(PKG_ROOT)/Applications/vless-core.app/vless-core
 	chmod 755 $(PKG_ROOT)/usr/bin/vpnctld
 	chmod 4755 $(PKG_ROOT)/usr/bin/vpnctld-bootstrap
 	chmod 755 $(PKG_ROOT)/usr/bin/vless-core-darwin-amrv7
-	chmod 755 $(PKG_ROOT)/usr/bin/redsocks-v2ray
+	chmod 755 $(PKG_ROOT)/usr/bin/redsocks-vless-core
 	chmod 755 $(PKG_ROOT)/Library/MobileSubstrate/DynamicLibraries/vlesscorevpnicon.dylib
 	chmod 755 $(PKG_ROOT)/DEBIAN/postinst $(PKG_ROOT)/DEBIAN/prerm
 	$(LDID) -S $(PKG_ROOT)/Applications/vless-core.app/vless-core
 	$(LDID) -S $(PKG_ROOT)/usr/bin/vpnctld
 	$(LDID) -S $(PKG_ROOT)/usr/bin/vpnctld-bootstrap
 	$(LDID) -S $(PKG_ROOT)/usr/bin/vless-core-darwin-amrv7
-	$(LDID) -S $(PKG_ROOT)/usr/bin/redsocks-v2ray
+	$(LDID) -S $(PKG_ROOT)/usr/bin/redsocks-vless-core
 	$(LDID) -S $(PKG_ROOT)/Library/MobileSubstrate/DynamicLibraries/vlesscorevpnicon.dylib
 	chmod 4755 $(PKG_ROOT)/usr/bin/vpnctld-bootstrap
 
@@ -102,7 +102,7 @@ tarball: package-root
 	cd $(BUILD_DIR) && tar -czf vless-core-app-bundle.tar.gz -C pkgroot .
 
 deb: package-root
-	rm -f $(BUILD_DIR)/com.vlesscore.app_*_iphoneos-arm.deb
+	rm -f $(BUILD_DIR)/com.vlesscore.app*_iphoneos-arm.deb
 	dpkg-deb --uniform-compression -Zgzip -z6 --root-owner-group -b $(PKG_ROOT) $(DEB_OUT)
 
 clean:

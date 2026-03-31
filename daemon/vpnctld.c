@@ -34,7 +34,7 @@ typedef struct {
     int connected;
     int socks_port;
     int redir_port;
-    pid_t v2_pid;
+    pid_t core_pid;
     pid_t tun_pid;
     pid_t redsocks_pid;
     vpn_mode_t mode;
@@ -165,8 +165,7 @@ static const char *find_pfctl_bin(void) {
 }
 
 static const char *find_redsocks_bin(void) {
-    if (can_exec("/usr/bin/redsocks-v2ray")) return "/usr/bin/redsocks-v2ray";
-    if (can_exec("/usr/bin/redsocks")) return "/usr/bin/redsocks";
+    if (can_exec("/usr/bin/redsocks-vless-core")) return "/usr/bin/redsocks-vless-core";
     return NULL;
 }
 
@@ -176,7 +175,7 @@ static const char *find_vless_core_bin(void) {
 }
 
 static const char *find_tun2socks_bin(void) {
-    if (can_exec("/usr/bin/tun2socks-v2ray")) return "/usr/bin/tun2socks-v2ray";
+    if (can_exec("/usr/bin/tun2socks-vless-core")) return "/usr/bin/tun2socks-vless-core";
     if (can_exec("/usr/bin/tun2socks")) return "/usr/bin/tun2socks";
     return NULL;
 }
@@ -405,7 +404,7 @@ static int spawn_logged(const char *bin, char *const argv[], pid_t *pid_out) {
     return 0;
 }
 
-static int spawn_v2ray(const char *uri, int port, pid_t *pid_out) {
+static int spawn_core(const char *uri, int port, pid_t *pid_out) {
     const char *core_bin = find_vless_core_bin();
     if (!core_bin) return -2;
 
@@ -553,7 +552,6 @@ static void truncate_log_file(const char *path) {
 static void clear_logs(void) {
     truncate_log_file("/var/log/vpnctld.log");
     truncate_log_file("/var/log/vless-core.log");
-    truncate_log_file("/var/log/v2rayios6.log");
 }
 
 static void update_vpn_icon_state(int enabled) {
@@ -947,7 +945,7 @@ static void disconnect_all(void) {
     }
 
     stop_pid(&g.redsocks_pid);
-    stop_pid(&g.v2_pid);
+    stop_pid(&g.core_pid);
 
     unlink("/var/run/vlesscore-redsocks.conf");
 
@@ -1089,8 +1087,8 @@ static int connect_all(const char *uri, int requested_port, char *msg, size_t ms
 
     log_msg("resolved server host %s -> %s", host, g.server_ips);
 
-    if (spawn_v2ray(uri, port, &g.v2_pid) != 0) {
-        snprintf(msg, msg_cap, "ERR failed to start vless-core core binary");
+    if (spawn_core(uri, port, &g.core_pid) != 0) {
+        snprintf(msg, msg_cap, "ERR failed to start vless-core binary");
         disconnect_all();
         return -1;
     }
