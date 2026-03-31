@@ -44,6 +44,9 @@ Package uses `gzip` compression for old iOS 6 `dpkg` compatibility.
 3. In iFile, find the `.deb`, tap it, and press `Install`.
 4. Device should respring.
 
+Also you can use terminal app to install it: 
+`dpkg -i com.vlesscore.app_iphoneos-arm.deb`
+
 ### Install your own build via SSH (scp + dpkg)
 
 
@@ -53,10 +56,6 @@ scp build/com.vlesscore.app_iphoneos-arm.deb root@<iphone-ip>:/var/root/
 
 # on iPhone
 dpkg -i com.vlesscore.app_iphoneos-arm.deb
-su mobile -c "uicache" || uicache
-launchctl unload /Library/LaunchDaemons/com.vlesscore.vpnctld.plist >/dev/null 2>&1
-launchctl load /Library/LaunchDaemons/com.vlesscore.vpnctld.plist
-killall -9 SpringBoard
 ```
 
 ## Runtime paths
