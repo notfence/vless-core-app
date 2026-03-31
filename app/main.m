@@ -13,6 +13,8 @@
 #include <string.h>
 #include <math.h>
 #include <stdio.h>
+#include <signal.h>
+#include <sys/wait.h>
 
 static NSString *const kDefaultsConfigsKey = @"vlesscore.configs";
 static NSString *const kDefaultsSubsKey = @"vlesscore.subscriptions";
@@ -157,6 +159,275 @@ static int ConnectLatencyMs(const char *host, uint16_t port, int timeout_ms, int
 
     freeaddrinfo(res);
     return rc_out;
+}
+
+static int write_all(int fd, const void *buf, size_t len) {
+    const unsigned char *p = (const unsigned char *)buf;
+    size_t left = len;
+    while (left > 0) {
+        ssize_t wr = write(fd, p, left);
+        if (wr < 0) {
+            if (errno == EINTR) continue;
+            return -1;
+        }
+        if (wr == 0) return -1;
+        p += (size_t)wr;
+        left -= (size_t)wr;
+    }
+    return 0;
+}
+
+static int read_full(int fd, void *buf, size_t len) {
+    unsigned char *p = (unsigned char *)buf;
+    size_t left = len;
+    while (left > 0) {
+        ssize_t rd = read(fd, p, left);
+        if (rd < 0) {
+            if (errno == EINTR) continue;
+            return -1;
+        }
+        if (rd == 0) return -1;
+        p += (size_t)rd;
+        left -= (size_t)rd;
+    }
+    return 0;
+}
+
+static int pick_free_loopback_port(void) {
+    int fd = socket(AF_INET, SOCK_STREAM, 0);
+    if (fd < 0) return -1;
+
+    struct sockaddr_in sa;
+    memset(&sa, 0, sizeof(sa));
+    sa.sin_family = AF_INET;
+    sa.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+    sa.sin_port = htons(0);
+
+    if (bind(fd, (struct sockaddr *)&sa, sizeof(sa)) != 0) {
+        close(fd);
+        return -1;
+    }
+
+    socklen_t sl = (socklen_t)sizeof(sa);
+    if (getsockname(fd, (struct sockaddr *)&sa, &sl) != 0) {
+        close(fd);
+        return -1;
+    }
+    close(fd);
+    return (int)ntohs(sa.sin_port);
+}
+
+static int connect_loopback_port(uint16_t port, int timeout_ms) {
+    int fd = socket(AF_INET, SOCK_STREAM, 0);
+    if (fd < 0) return -1;
+
+    struct timeval tv;
+    tv.tv_sec = timeout_ms / 1000;
+    tv.tv_usec = (timeout_ms % 1000) * 1000;
+    setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
+    setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv));
+
+    struct sockaddr_in sa;
+    memset(&sa, 0, sizeof(sa));
+    sa.sin_family = AF_INET;
+    sa.sin_port = htons(port);
+    sa.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+
+    if (connect(fd, (struct sockaddr *)&sa, sizeof(sa)) != 0) {
+        close(fd);
+        return -1;
+    }
+    return fd;
+}
+
+static int wait_for_loopback_listener(uint16_t port, pid_t pid, int timeout_ms) {
+    int waited = 0;
+    while (waited < timeout_ms) {
+        int ms = 0;
+        if (ConnectLatencyMs("127.0.0.1", port, 250, &ms) == 0) {
+            return 0;
+        }
+        if (pid > 0) {
+            int st = 0;
+            pid_t wr = waitpid(pid, &st, WNOHANG);
+            if (wr == pid) return -2;
+        }
+        usleep(100 * 1000);
+        waited += 100;
+    }
+    return -1;
+}
+
+static void stop_child_process(pid_t pid) {
+    if (pid <= 0) return;
+
+    int st = 0;
+    pid_t wr = waitpid(pid, &st, WNOHANG);
+    if (wr == pid) return;
+    if (wr < 0 && errno == ECHILD) return;
+
+    kill(pid, SIGTERM);
+    for (int i = 0; i < 20; i++) {
+        wr = waitpid(pid, &st, WNOHANG);
+        if (wr == pid) return;
+        if (wr < 0 && errno == ECHILD) return;
+        usleep(50 * 1000);
+    }
+    kill(pid, SIGKILL);
+    wr = waitpid(pid, &st, 0);
+    if (wr < 0 && errno == ECHILD) return;
+}
+
+static pid_t spawn_temp_core_for_ping(const char *uri, uint16_t port) {
+    if (!uri || !*uri) return -1;
+    const char *core = "/usr/bin/vless-core-darwin-amrv7";
+    if (access(core, X_OK) != 0) {
+        return -1;
+    }
+
+    char port_str[16];
+    snprintf(port_str, sizeof(port_str), "%u", (unsigned)port);
+
+    pid_t pid = fork();
+    if (pid < 0) return -1;
+    if (pid == 0) {
+        int dn = open("/dev/null", O_RDWR);
+        if (dn >= 0) {
+            (void)dup2(dn, STDOUT_FILENO);
+            (void)dup2(dn, STDERR_FILENO);
+            if (dn > STDERR_FILENO) close(dn);
+        }
+        execl(core, "vless-core-darwin-amrv7", "--uri", uri, "--listen-port", port_str, (char *)NULL);
+        _exit(127);
+    }
+    return pid;
+}
+
+static int socks5_negotiate_noauth(int fd) {
+    unsigned char hello[3] = {0x05, 0x01, 0x00};
+    if (write_all(fd, hello, sizeof(hello)) != 0) return -1;
+
+    unsigned char hello_resp[2];
+    if (read_full(fd, hello_resp, sizeof(hello_resp)) != 0) return -1;
+    if (hello_resp[0] != 0x05 || hello_resp[1] != 0x00) return -1;
+    return 0;
+}
+
+static int socks5_connect_ipv4(int fd, uint32_t ipv4_be, uint16_t port) {
+    if (socks5_negotiate_noauth(fd) != 0) return -1;
+
+    unsigned char req[10];
+    size_t n = 0;
+    req[n++] = 0x05;
+    req[n++] = 0x01;
+    req[n++] = 0x00;
+    req[n++] = 0x01;
+    memcpy(&req[n], &ipv4_be, 4);
+    n += 4;
+    req[n++] = (unsigned char)((port >> 8) & 0xFF);
+    req[n++] = (unsigned char)(port & 0xFF);
+
+    if (write_all(fd, req, n) != 0) return -1;
+
+    unsigned char resp[4];
+    if (read_full(fd, resp, sizeof(resp)) != 0) return -1;
+    if (resp[0] != 0x05 || resp[1] != 0x00) return -1;
+
+    size_t tail = 0;
+    if (resp[3] == 0x01) {
+        tail = 4 + 2;
+    } else if (resp[3] == 0x04) {
+        tail = 16 + 2;
+    } else if (resp[3] == 0x03) {
+        unsigned char dsz = 0;
+        if (read_full(fd, &dsz, 1) != 0) return -1;
+        tail = (size_t)dsz + 2;
+    } else {
+        return -1;
+    }
+    if (tail > 0) {
+        unsigned char tmp[300];
+        if (tail > sizeof(tmp)) return -1;
+        if (read_full(fd, tmp, tail) != 0) return -1;
+    }
+    return 0;
+}
+
+static int wait_fd_readable(int fd, int timeout_ms) {
+    fd_set rfds;
+    FD_ZERO(&rfds);
+    FD_SET(fd, &rfds);
+    struct timeval tv;
+    tv.tv_sec = timeout_ms / 1000;
+    tv.tv_usec = (timeout_ms % 1000) * 1000;
+    int rc = select(fd + 1, &rfds, NULL, NULL, &tv);
+    if (rc <= 0) return -1;
+    if (!FD_ISSET(fd, &rfds)) return -1;
+    return 0;
+}
+
+static int verify_http_probe(int fd, int timeout_ms) {
+    const char *req =
+        "HEAD / HTTP/1.1\r\n"
+        "Host: 1.1.1.1\r\n"
+        "Connection: close\r\n"
+        "\r\n";
+    if (write_all(fd, req, strlen(req)) != 0) return -1;
+    if (wait_fd_readable(fd, timeout_ms) != 0) return -1;
+
+    unsigned char ch = 0;
+    ssize_t n = recv(fd, &ch, 1, 0);
+    if (n <= 0) return -1;
+    return 0;
+}
+
+static int RealPingViaTempCoreMs(const char *uri, int timeout_ms, int *latency_ms) {
+    if (!uri || !*uri) return -1;
+
+    int port = pick_free_loopback_port();
+    if (port <= 0 || port > 65535) return -2;
+
+    pid_t pid = spawn_temp_core_for_ping(uri, (uint16_t)port);
+    if (pid <= 0) return -3;
+
+    int rc = -4;
+    if (wait_for_loopback_listener((uint16_t)port, pid, 6000) != 0) {
+        stop_child_process(pid);
+        return rc;
+    }
+
+    int fd = connect_loopback_port((uint16_t)port, timeout_ms);
+    if (fd < 0) {
+        stop_child_process(pid);
+        return -5;
+    }
+
+    struct timeval t0, t1;
+    gettimeofday(&t0, NULL);
+
+    uint32_t target = inet_addr("1.1.1.1");
+    if (target == INADDR_NONE || socks5_connect_ipv4(fd, target, 80) != 0) {
+        close(fd);
+        stop_child_process(pid);
+        return -6;
+    }
+
+    gettimeofday(&t1, NULL);
+    long ms = (long)((t1.tv_sec - t0.tv_sec) * 1000L + (t1.tv_usec - t0.tv_usec) / 1000L);
+    if (ms < 0) ms = 0;
+    if (latency_ms) *latency_ms = (int)ms;
+
+    if (verify_http_probe(fd, 3000) != 0) {
+        close(fd);
+        stop_child_process(pid);
+        return -7;
+    }
+
+    rc = 0;
+
+    close(fd);
+    stop_child_process(pid);
+    return rc;
 }
 
 static NSString *RunCommandFirstLine(const char *cmdLine) {
@@ -822,17 +1093,16 @@ static UIImage *MakeIconImage(VCIconType type, CGFloat size, BOOL active) {
     NSString *title = [payload objectForKey:@"title"];
 
     NSString *host = nil;
-    uint16_t port = 0;
     NSString *result = nil;
-    if (![self parseVLESSHost:&host port:&port fromURI:uri]) {
+    if (![self parseVLESSHost:&host port:NULL fromURI:uri]) {
         result = [NSString stringWithFormat:@"Ping failed (%@): invalid URI", title ? title : @"config"];
     } else {
         int ms = 0;
-        int rc = ConnectLatencyMs([host UTF8String], port, 3500, &ms);
-        if (rc == 0) {
-            result = [NSString stringWithFormat:@"Ping %@:%u = %d ms", host, (unsigned)port, ms];
+        int rcReal = RealPingViaTempCoreMs([uri UTF8String], 7000, &ms);
+        if (rcReal == 0) {
+            result = [NSString stringWithFormat:@"Ping %@ = %d ms", title ? title : host, ms];
         } else {
-            result = [NSString stringWithFormat:@"Ping %@:%u failed", host, (unsigned)port];
+            result = [NSString stringWithFormat:@"Ping %@ failed", title ? title : host];
         }
     }
 
