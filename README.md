@@ -35,7 +35,7 @@ make deb VLESS_CORE_BIN=/abs/path/to/vless-core-darwin-amrv7
 
 Package uses `gzip` compression for old iOS 6 `dpkg` compatibility.
 
-## Install on iPhone
+## Install on iOS
 
 ```bash
 # on build machine
