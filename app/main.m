@@ -20,6 +20,7 @@
 static NSString *const kDefaultsConfigsKey = @"vlesscore.configs";
 static NSString *const kDefaultsSubsKey = @"vlesscore.subscriptions";
 static NSString *const kDefaultsAutoUpdateSubsKey = @"vlesscore.auto_update_subs";
+static NSString *const kDefaultsSubHWIDKey = @"vlesscore.subscription_hwid";
 
 typedef NS_ENUM(NSInteger, VCAlertTag) {
     VCAlertTagImportManual = 1001,
@@ -473,6 +474,36 @@ static NSString *ReadTextFileBestEffort(NSString *path) {
     return txt;
 }
 
+static NSString *SubscriptionHWID(void) {
+    NSUserDefaults *ud = [NSUserDefaults standardUserDefaults];
+    NSString *hwid = [ud objectForKey:kDefaultsSubHWIDKey];
+    if ([hwid isKindOfClass:[NSString class]] && [hwid length] > 0) {
+        return hwid;
+    }
+
+    NSString *generated = nil;
+    CFUUIDRef uuid = CFUUIDCreate(kCFAllocatorDefault);
+    if (uuid) {
+        CFStringRef cf = CFUUIDCreateString(kCFAllocatorDefault, uuid);
+        if (cf) {
+            generated = [NSString stringWithString:(NSString *)cf];
+            CFRelease(cf);
+        }
+        CFRelease(uuid);
+    }
+
+    if (![generated isKindOfClass:[NSString class]] || [generated length] == 0) {
+        generated = [NSString stringWithFormat:@"%u-%u-%u",
+                     (unsigned)arc4random(),
+                     (unsigned)arc4random(),
+                     (unsigned)getpid()];
+    }
+
+    [ud setObject:generated forKey:kDefaultsSubHWIDKey];
+    [ud synchronize];
+    return generated;
+}
+
 static NSData *FetchURLViaVlessCoreCurl(NSString *urlString, NSString **errOut) {
     const char *curl_path = "/usr/bin/vless-core-curl";
     const char *ca_bundle_path = "/usr/share/vless-core/cacert.pem";
@@ -491,6 +522,14 @@ static NSData *FetchURLViaVlessCoreCurl(NSString *urlString, NSString **errOut) 
     if (!url_c || !*url_c) {
         if (errOut) *errOut = @"Invalid subscription URL";
         return nil;
+    }
+
+    NSString *hwid = TrimSimpleString(SubscriptionHWID());
+    char hwid_header[256];
+    memset(hwid_header, 0, sizeof(hwid_header));
+    const char *hwid_c = [hwid UTF8String];
+    if (hwid_c && *hwid_c) {
+        snprintf(hwid_header, sizeof(hwid_header), "X-HWID: %s", hwid_c);
     }
 
     char out_tmpl[] = "/tmp/vlesscore-sub-out-XXXXXX";
@@ -531,7 +570,20 @@ static NSData *FetchURLViaVlessCoreCurl(NSString *urlString, NSString **errOut) 
         close(out_fd);
         close(err_fd);
 
-        if (access(ca_bundle_path, R_OK) == 0) {
+        if (access(ca_bundle_path, R_OK) == 0 && hwid_header[0] != '\0') {
+            execl(curl_path, "vless-core-curl",
+                  "--fail",
+                  "--location",
+                  "--silent",
+                  "--show-error",
+                  "--connect-timeout", "10",
+                  "--max-time", "25",
+                  "--proto", "=https,http",
+                  "-H", hwid_header,
+                  "--cacert", ca_bundle_path,
+                  url_c,
+                  (char *)NULL);
+        } else if (access(ca_bundle_path, R_OK) == 0) {
             execl(curl_path, "vless-core-curl",
                   "--fail",
                   "--location",
@@ -541,6 +593,18 @@ static NSData *FetchURLViaVlessCoreCurl(NSString *urlString, NSString **errOut) 
                   "--max-time", "25",
                   "--proto", "=https,http",
                   "--cacert", ca_bundle_path,
+                  url_c,
+                  (char *)NULL);
+        } else if (hwid_header[0] != '\0') {
+            execl(curl_path, "vless-core-curl",
+                  "--fail",
+                  "--location",
+                  "--silent",
+                  "--show-error",
+                  "--connect-timeout", "10",
+                  "--max-time", "25",
+                  "--proto", "=https,http",
+                  "-H", hwid_header,
                   url_c,
                   (char *)NULL);
         } else {
@@ -1436,7 +1500,7 @@ static UIImage *MakeIconImage(VCIconType type, CGFloat size, BOOL active) {
     NSArray *uris = [NSArray array];
     if (raw) {
         uris = [self extractVLESSURIsFromText:raw];
-        if ([uris count] > 0) return uris;
+        if ([uris count] > 0) return [self sanitizeSubscriptionURIs:uris];
 
         NSString *b64 = [[raw componentsSeparatedByCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]] componentsJoinedByString:@""];
         NSData *decoded = DecodeBase64String(b64);
@@ -1445,12 +1509,46 @@ static UIImage *MakeIconImage(VCIconType type, CGFloat size, BOOL active) {
             if (!decodedText) decodedText = [[[NSString alloc] initWithData:decoded encoding:NSISOLatin1StringEncoding] autorelease];
             if (decodedText) {
                 uris = [self extractVLESSURIsFromText:decodedText];
-                if ([uris count] > 0) return uris;
+                if ([uris count] > 0) return [self sanitizeSubscriptionURIs:uris];
             }
         }
     }
 
     return [NSArray array];
+}
+
+- (BOOL)isLikelySubscriptionPlaceholderURI:(NSString *)uri {
+    if (![uri isKindOfClass:[NSString class]] || [uri length] == 0) return NO;
+    return [uri rangeOfString:@"@0.0.0.0:1?"].location != NSNotFound;
+}
+
+- (NSArray *)sanitizeSubscriptionURIs:(NSArray *)uris {
+    if (![uris isKindOfClass:[NSArray class]] || [uris count] == 0) {
+        return [NSArray array];
+    }
+
+    NSMutableArray *clean = [NSMutableArray array];
+    BOOL hasReal = NO;
+    for (id it in uris) {
+        if (![it isKindOfClass:[NSString class]]) continue;
+        NSString *uri = (NSString *)it;
+        if ([uri length] == 0) continue;
+        [clean addObject:uri];
+        if (![self isLikelySubscriptionPlaceholderURI:uri]) {
+            hasReal = YES;
+        }
+    }
+
+    if (!hasReal) return clean;
+
+    NSMutableArray *filtered = [NSMutableArray array];
+    for (NSString *uri in clean) {
+        if (![self isLikelySubscriptionPlaceholderURI:uri]) {
+            [filtered addObject:uri];
+        }
+    }
+
+    return ([filtered count] > 0) ? filtered : clean;
 }
 
 - (BOOL)refreshSubscriptionAtIndex:(NSInteger)idx showStatus:(BOOL)showStatus {
@@ -1466,9 +1564,13 @@ static UIImage *MakeIconImage(VCIconType type, CGFloat size, BOOL active) {
     NSString *fetchErr = nil;
     NSData *data = FetchURLViaVlessCoreCurl(urlString, &fetchErr);
     if (!data && (!fetchErr || [fetchErr hasPrefix:@"vless-core-curl not found"])) {
-        NSURLRequest *req = [NSURLRequest requestWithURL:url
-                                             cachePolicy:NSURLRequestReloadIgnoringLocalCacheData
-                                         timeoutInterval:20.0];
+        NSMutableURLRequest *req = [NSMutableURLRequest requestWithURL:url
+                                                           cachePolicy:NSURLRequestReloadIgnoringLocalCacheData
+                                                       timeoutInterval:20.0];
+        NSString *hwid = SubscriptionHWID();
+        if ([hwid isKindOfClass:[NSString class]] && [hwid length] > 0) {
+            [req setValue:hwid forHTTPHeaderField:@"X-HWID"];
+        }
         NSURLResponse *resp = nil;
         NSError *err = nil;
         data = [NSURLConnection sendSynchronousRequest:req returningResponse:&resp error:&err];
