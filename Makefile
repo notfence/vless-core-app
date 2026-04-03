@@ -5,8 +5,20 @@ IOS_TOOLCHAIN ?= $(HOME)/toolchains/ios6
 IOS_SDK ?= $(IOS_TOOLCHAIN)/SDK/iPhoneOS6.1.sdk
 IOS_BIN ?= $(IOS_TOOLCHAIN)/bin
 IOS_CC ?= $(IOS_BIN)/arm-apple-darwin11-clang
+IOS_AR ?= $(IOS_BIN)/arm-apple-darwin11-ar
+IOS_RANLIB ?= $(IOS_BIN)/arm-apple-darwin11-ranlib
 IOS_STRIP ?= $(IOS_BIN)/arm-apple-darwin11-strip
 LDID ?= $(IOS_BIN)/ldid
+IOS_BLOCKS_RUNTIME_LIB ?= libBlocksRuntime.so
+IOS_BLOCKS_RUNTIME_DIR ?= $(shell \
+	if [ -f "$(IOS_TOOLCHAIN)/lib/$(IOS_BLOCKS_RUNTIME_LIB)" ]; then \
+		echo "$(IOS_TOOLCHAIN)/lib"; \
+	elif [ -f "$(IOS_TOOLCHAIN)/lib64/$(IOS_BLOCKS_RUNTIME_LIB)" ]; then \
+		echo "$(IOS_TOOLCHAIN)/lib64"; \
+	else \
+		find "$(IOS_TOOLCHAIN)" -maxdepth 5 -type f -name "$(IOS_BLOCKS_RUNTIME_LIB)" -print -quit 2>/dev/null | sed 's#/$(IOS_BLOCKS_RUNTIME_LIB)$$##'; \
+	fi)
+IOS_RUNTIME_ENV = LD_LIBRARY_PATH="$(IOS_BLOCKS_RUNTIME_DIR)$${LD_LIBRARY_PATH:+:$$LD_LIBRARY_PATH}"
 
 APP_NAME := vless-core
 APP_BIN := $(BUILD_DIR)/$(APP_NAME)
@@ -37,7 +49,11 @@ all: deb
 
 check-ios-toolchain:
 	@test -x "$(IOS_CC)" || (echo "Missing iOS compiler: $(IOS_CC)"; echo "Set IOS_TOOLCHAIN=/path/to/ios6/toolchain"; exit 1)
+	@test -x "$(IOS_AR)" || (echo "Missing iOS archiver: $(IOS_AR)"; echo "Set IOS_TOOLCHAIN=/path/to/ios6/toolchain"; exit 1)
+	@test -x "$(IOS_RANLIB)" || (echo "Missing iOS ranlib: $(IOS_RANLIB)"; echo "Set IOS_TOOLCHAIN=/path/to/ios6/toolchain"; exit 1)
+	@test -x "$(IOS_STRIP)" || (echo "Missing iOS strip: $(IOS_STRIP)"; echo "Set IOS_TOOLCHAIN=/path/to/ios6/toolchain"; exit 1)
 	@test -d "$(IOS_SDK)" || (echo "Missing iOS SDK: $(IOS_SDK)"; echo "Set IOS_SDK=/path/to/iPhoneOS6.1.sdk"; exit 1)
+	@test -n "$(IOS_BLOCKS_RUNTIME_DIR)" || (echo "Missing $(IOS_BLOCKS_RUNTIME_LIB) under $(IOS_TOOLCHAIN)"; echo "Add it to the toolchain or set IOS_BLOCKS_RUNTIME_DIR=/path/to/runtime/lib"; exit 1)
 	@test -x "$(LDID)" || (echo "Missing ldid tool: $(LDID)"; echo "Set IOS_TOOLCHAIN correctly or override LDID"; exit 1)
 
 check-package-inputs:
@@ -48,19 +64,19 @@ check-package-inputs:
 
 $(APP_BIN): check-ios-toolchain $(APP_SRC)
 	mkdir -p $(BUILD_DIR)
-	PATH="$(IOS_BIN):$$PATH" $(IOS_CC) $(APP_CFLAGS) $(APP_SRC) -o $@ $(APP_LDFLAGS)
+	PATH="$(IOS_BIN):$$PATH" $(IOS_RUNTIME_ENV) $(IOS_CC) $(APP_CFLAGS) $(APP_SRC) -o $@ $(APP_LDFLAGS)
 
 $(DAEMON_BIN): check-ios-toolchain $(DAEMON_SRC)
 	mkdir -p $(BUILD_DIR)
-	PATH="$(IOS_BIN):$$PATH" $(IOS_CC) $(DAEMON_CFLAGS) $(DAEMON_SRC) -o $@
+	PATH="$(IOS_BIN):$$PATH" $(IOS_RUNTIME_ENV) $(IOS_CC) $(DAEMON_CFLAGS) $(DAEMON_SRC) -o $@
 
 $(BOOTSTRAP_BIN): check-ios-toolchain $(BOOTSTRAP_SRC)
 	mkdir -p $(BUILD_DIR)
-	PATH="$(IOS_BIN):$$PATH" $(IOS_CC) $(DAEMON_CFLAGS) $(BOOTSTRAP_SRC) -o $@
+	PATH="$(IOS_BIN):$$PATH" $(IOS_RUNTIME_ENV) $(IOS_CC) $(DAEMON_CFLAGS) $(BOOTSTRAP_SRC) -o $@
 
 $(VPNICON_TWEAK_BIN): check-ios-toolchain $(VPNICON_TWEAK_SRC)
 	mkdir -p $(BUILD_DIR)
-	PATH="$(IOS_BIN):$$PATH" $(IOS_CC) $(TWEAK_CFLAGS) $(VPNICON_TWEAK_SRC) -o $@ $(TWEAK_LDFLAGS)
+	PATH="$(IOS_BIN):$$PATH" $(IOS_RUNTIME_ENV) $(IOS_CC) $(TWEAK_CFLAGS) $(VPNICON_TWEAK_SRC) -o $@ $(TWEAK_LDFLAGS)
 
 app: $(APP_BIN)
 
@@ -68,6 +84,7 @@ daemon: $(DAEMON_BIN)
 
 package-root: check-package-inputs $(APP_BIN) $(DAEMON_BIN) $(BOOTSTRAP_BIN) $(VPNICON_TWEAK_BIN)
 	mkdir -p $(PKG_ROOT)
+	mkdir -p packaging/Applications/vless-core.app packaging/usr/bin
 	rm -rf $(PKG_ROOT)/*
 	cp -a packaging/DEBIAN $(PKG_ROOT)/
 	cp -a packaging/Applications $(PKG_ROOT)/
