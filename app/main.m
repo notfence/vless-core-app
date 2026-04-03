@@ -12,6 +12,7 @@
 #include <errno.h>
 #include <string.h>
 #include <math.h>
+#include <stdlib.h>
 #include <stdio.h>
 #include <signal.h>
 #include <sys/wait.h>
@@ -455,6 +456,170 @@ static NSString *DetectCoreBinaryVersion(void) {
         v = @"unknown";
     }
     return v;
+}
+
+static NSString *TrimSimpleString(NSString *s) {
+    if (!s) return @"";
+    return [s stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
+}
+
+static NSString *ReadTextFileBestEffort(NSString *path) {
+    if (!path || [path length] == 0) return nil;
+    NSData *data = [NSData dataWithContentsOfFile:path];
+    if (!data || [data length] == 0) return nil;
+
+    NSString *txt = [[[NSString alloc] initWithData:data encoding:NSUTF8StringEncoding] autorelease];
+    if (!txt) txt = [[[NSString alloc] initWithData:data encoding:NSISOLatin1StringEncoding] autorelease];
+    return txt;
+}
+
+static NSData *FetchURLViaVlessCoreCurl(NSString *urlString, NSString **errOut) {
+    const char *curl_path = "/usr/bin/vless-core-curl";
+    const char *ca_bundle_path = "/usr/share/vless-core/cacert.pem";
+
+    if (!urlString || [urlString length] == 0) {
+        if (errOut) *errOut = @"Invalid subscription URL";
+        return nil;
+    }
+
+    if (access(curl_path, X_OK) != 0) {
+        if (errOut) *errOut = @"vless-core-curl not found";
+        return nil;
+    }
+
+    const char *url_c = [urlString UTF8String];
+    if (!url_c || !*url_c) {
+        if (errOut) *errOut = @"Invalid subscription URL";
+        return nil;
+    }
+
+    char out_tmpl[] = "/tmp/vlesscore-sub-out-XXXXXX";
+    int out_fd = mkstemp(out_tmpl);
+    if (out_fd < 0) {
+        if (errOut) *errOut = [NSString stringWithFormat:@"mkstemp(out) failed: %s", strerror(errno)];
+        return nil;
+    }
+
+    char err_tmpl[] = "/tmp/vlesscore-sub-err-XXXXXX";
+    int err_fd = mkstemp(err_tmpl);
+    if (err_fd < 0) {
+        close(out_fd);
+        unlink(out_tmpl);
+        if (errOut) *errOut = [NSString stringWithFormat:@"mkstemp(err) failed: %s", strerror(errno)];
+        return nil;
+    }
+
+    pid_t pid = fork();
+    if (pid < 0) {
+        close(out_fd);
+        close(err_fd);
+        unlink(out_tmpl);
+        unlink(err_tmpl);
+        if (errOut) *errOut = [NSString stringWithFormat:@"fork failed: %s", strerror(errno)];
+        return nil;
+    }
+
+    if (pid == 0) {
+        int dn = open("/dev/null", O_RDONLY);
+        if (dn >= 0) {
+            (void)dup2(dn, STDIN_FILENO);
+            if (dn > STDERR_FILENO) close(dn);
+        }
+
+        (void)dup2(out_fd, STDOUT_FILENO);
+        (void)dup2(err_fd, STDERR_FILENO);
+        close(out_fd);
+        close(err_fd);
+
+        if (access(ca_bundle_path, R_OK) == 0) {
+            execl(curl_path, "vless-core-curl",
+                  "--fail",
+                  "--location",
+                  "--silent",
+                  "--show-error",
+                  "--connect-timeout", "10",
+                  "--max-time", "25",
+                  "--proto", "=https,http",
+                  "--cacert", ca_bundle_path,
+                  url_c,
+                  (char *)NULL);
+        } else {
+            execl(curl_path, "vless-core-curl",
+                  "--fail",
+                  "--location",
+                  "--silent",
+                  "--show-error",
+                  "--connect-timeout", "10",
+                  "--max-time", "25",
+                  "--proto", "=https,http",
+                  url_c,
+                  (char *)NULL);
+        }
+        _exit(127);
+    }
+
+    close(out_fd);
+    close(err_fd);
+
+    int status = 0;
+    int waited_ms = 0;
+    const int timeout_ms = 30000;
+    while (1) {
+        pid_t wr = waitpid(pid, &status, WNOHANG);
+        if (wr == pid) break;
+        if (wr < 0) {
+            if (errno == EINTR) continue;
+            kill(pid, SIGKILL);
+            waitpid(pid, &status, 0);
+            unlink(out_tmpl);
+            unlink(err_tmpl);
+            if (errOut) *errOut = [NSString stringWithFormat:@"waitpid failed: %s", strerror(errno)];
+            return nil;
+        }
+
+        if (waited_ms >= timeout_ms) {
+            kill(pid, SIGKILL);
+            waitpid(pid, &status, 0);
+            unlink(out_tmpl);
+            unlink(err_tmpl);
+            if (errOut) *errOut = @"vless-core-curl timed out";
+            return nil;
+        }
+
+        usleep(100 * 1000);
+        waited_ms += 100;
+    }
+
+    NSString *out_path = [NSString stringWithUTF8String:out_tmpl];
+    NSString *err_path = [NSString stringWithUTF8String:err_tmpl];
+    NSData *body = [NSData dataWithContentsOfFile:out_path];
+    NSString *curl_err = TrimSimpleString(ReadTextFileBestEffort(err_path));
+    if ([curl_err length] > 220) {
+        curl_err = [curl_err substringToIndex:220];
+    }
+
+    unlink(out_tmpl);
+    unlink(err_tmpl);
+
+    if (!WIFEXITED(status) || WEXITSTATUS(status) != 0) {
+        if (errOut) {
+            if ([curl_err length] > 0) {
+                *errOut = curl_err;
+            } else if (WIFEXITED(status)) {
+                *errOut = [NSString stringWithFormat:@"vless-core-curl exited with code %d", WEXITSTATUS(status)];
+            } else {
+                *errOut = @"vless-core-curl terminated unexpectedly";
+            }
+        }
+        return nil;
+    }
+
+    if (!body || [body length] == 0) {
+        if (errOut) *errOut = @"Empty subscription response";
+        return nil;
+    }
+
+    return body;
 }
 
 static void ClearLogsViaDaemon(void) {
@@ -1298,16 +1463,26 @@ static UIImage *MakeIconImage(VCIconType type, CGFloat size, BOOL active) {
     NSURL *url = [NSURL URLWithString:urlString];
     if (!url) return NO;
 
-    NSURLRequest *req = [NSURLRequest requestWithURL:url
-                                         cachePolicy:NSURLRequestReloadIgnoringLocalCacheData
-                                     timeoutInterval:20.0];
-    NSURLResponse *resp = nil;
-    NSError *err = nil;
-    NSData *data = [NSURLConnection sendSynchronousRequest:req returningResponse:&resp error:&err];
+    NSString *fetchErr = nil;
+    NSData *data = FetchURLViaVlessCoreCurl(urlString, &fetchErr);
+    if (!data && (!fetchErr || [fetchErr hasPrefix:@"vless-core-curl not found"])) {
+        NSURLRequest *req = [NSURLRequest requestWithURL:url
+                                             cachePolicy:NSURLRequestReloadIgnoringLocalCacheData
+                                         timeoutInterval:20.0];
+        NSURLResponse *resp = nil;
+        NSError *err = nil;
+        data = [NSURLConnection sendSynchronousRequest:req returningResponse:&resp error:&err];
+        if (!data || err) {
+            fetchErr = [err localizedDescription];
+        }
+    }
 
-    if (!data || err) {
+    if (!data) {
         if (showStatus) {
-            [self showStatus:[NSString stringWithFormat:@"Subscription fetch failed: %@", [err localizedDescription]] ok:NO];
+            if (![fetchErr isKindOfClass:[NSString class]] || [fetchErr length] == 0) {
+                fetchErr = @"unknown error";
+            }
+            [self showStatus:[NSString stringWithFormat:@"Subscription fetch failed: %@", fetchErr] ok:NO];
         }
         return NO;
     }

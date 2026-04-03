@@ -8,7 +8,7 @@ chmod 644 /Library/LaunchDaemons/com.vlesscore.vpnctld.plist || true
 chmod 644 /Library/MobileSubstrate/DynamicLibraries/vlesscorevpnicon.plist || true
 chmod 755 /Library/MobileSubstrate/DynamicLibraries/vlesscorevpnicon.dylib || true
 chmod 755 /Applications/vless-core.app/vless-core || true
-for bin in /usr/bin/vpnctld /usr/bin/vless-core-darwin-amrv7 /usr/bin/redsocks-vless-core; do
+for bin in /usr/bin/vpnctld /usr/bin/vless-core-darwin-amrv7 /usr/bin/vless-core-curl /usr/bin/redsocks-vless-core; do
   [ -e "$bin" ] && chmod 755 "$bin" || true
 done
 chmod 4755 /usr/bin/vpnctld-bootstrap || true

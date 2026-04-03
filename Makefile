@@ -29,6 +29,7 @@ TWEAK_CFLAGS := -fno-objc-arc -Wall -Wextra -O2 -arch armv7 -miphoneos-version-m
 TWEAK_LDFLAGS := -dynamiclib -install_name /Library/MobileSubstrate/DynamicLibraries/vlesscorevpnicon.dylib -framework Foundation -framework UIKit -framework CoreFoundation
 
 VLESS_CORE_BIN ?= $(abspath ../vless-core-cli/vless-core-darwin-amrv7)
+VLESS_CORE_CURL_BIN ?= $(abspath ../vless-core-cli/third_party/curl-ios6-armv7/bin/curl)
 REDSOCKS_BIN ?= $(ROOT)/third_party/redsocks-vless-core
 CA_BUNDLE ?= $(abspath ../vless-core-cli/third_party/cacert.pem)
 
@@ -41,6 +42,7 @@ check-ios-toolchain:
 
 check-package-inputs:
 	@test -f "$(VLESS_CORE_BIN)" || (echo "Missing core binary: $(VLESS_CORE_BIN)"; echo "Build it in ../vless-core-cli or override VLESS_CORE_BIN=/path/to/vless-core-darwin-amrv7"; exit 1)
+	@test -f "$(VLESS_CORE_CURL_BIN)" || (echo "Missing curl binary: $(VLESS_CORE_CURL_BIN)"; echo "Build it in ../vless-core-cli (make curl-ios6) or override VLESS_CORE_CURL_BIN=/path/to/curl"; exit 1)
 	@test -f "$(REDSOCKS_BIN)" || (echo "Missing redsocks binary: $(REDSOCKS_BIN)"; exit 1)
 	@test -f "$(CA_BUNDLE)" || (echo "Missing CA bundle: $(CA_BUNDLE)"; echo "Provide CA_BUNDLE=/path/to/cacert.pem"; exit 1)
 
@@ -84,6 +86,7 @@ package-root: check-package-inputs $(APP_BIN) $(DAEMON_BIN) $(BOOTSTRAP_BIN) $(V
 	cp $(BOOTSTRAP_BIN) $(PKG_ROOT)/usr/bin/vpnctld-bootstrap
 	cp $(VPNICON_TWEAK_BIN) $(PKG_ROOT)/Library/MobileSubstrate/DynamicLibraries/vlesscorevpnicon.dylib
 	cp $(VLESS_CORE_BIN) $(PKG_ROOT)/usr/bin/vless-core-darwin-amrv7
+	cp $(VLESS_CORE_CURL_BIN) $(PKG_ROOT)/usr/bin/vless-core-curl
 	cp $(REDSOCKS_BIN) $(PKG_ROOT)/usr/bin/redsocks-vless-core
 	mkdir -p $(PKG_ROOT)/usr/share/vless-core
 	cp $(CA_BUNDLE) $(PKG_ROOT)/usr/share/vless-core/cacert.pem
@@ -93,6 +96,7 @@ package-root: check-package-inputs $(APP_BIN) $(DAEMON_BIN) $(BOOTSTRAP_BIN) $(V
 	chmod 755 $(PKG_ROOT)/usr/bin/vpnctld
 	chmod 4755 $(PKG_ROOT)/usr/bin/vpnctld-bootstrap
 	chmod 755 $(PKG_ROOT)/usr/bin/vless-core-darwin-amrv7
+	chmod 755 $(PKG_ROOT)/usr/bin/vless-core-curl
 	chmod 755 $(PKG_ROOT)/usr/bin/redsocks-vless-core
 	chmod 755 $(PKG_ROOT)/Library/MobileSubstrate/DynamicLibraries/vlesscorevpnicon.dylib
 	chmod 755 $(PKG_ROOT)/DEBIAN/postinst $(PKG_ROOT)/DEBIAN/prerm
@@ -100,6 +104,7 @@ package-root: check-package-inputs $(APP_BIN) $(DAEMON_BIN) $(BOOTSTRAP_BIN) $(V
 	$(LDID) -S $(PKG_ROOT)/usr/bin/vpnctld
 	$(LDID) -S $(PKG_ROOT)/usr/bin/vpnctld-bootstrap
 	$(LDID) -S $(PKG_ROOT)/usr/bin/vless-core-darwin-amrv7
+	$(LDID) -S $(PKG_ROOT)/usr/bin/vless-core-curl
 	$(LDID) -S $(PKG_ROOT)/usr/bin/redsocks-vless-core
 	$(LDID) -S $(PKG_ROOT)/Library/MobileSubstrate/DynamicLibraries/vlesscorevpnicon.dylib
 	chmod 4755 $(PKG_ROOT)/usr/bin/vpnctld-bootstrap

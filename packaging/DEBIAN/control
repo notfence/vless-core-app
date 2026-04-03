@@ -1,6 +1,6 @@
 Package: com.vlesscore.app
 Name: vless-core
-Version: 0.2.16-1
+Version: 0.2.17-1
 Architecture: iphoneos-arm
 Description: vless-core app
 Maintainer: notfence
