@@ -777,11 +777,11 @@ static int apply_pf_rules(const char *server_ips, int redir_port) {
     if (was_enabled) {
         enabled_now = 1;
     } else {
-        snprintf(cmd, sizeof(cmd), "%s -e", pfctl);
+        snprintf(cmd, sizeof(cmd), "%s -q -e >/dev/null 2>&1", pfctl);
         if (run_cmd(cmd) == 0 || pf_is_enabled()) {
             enabled_now = 1;
         } else {
-            snprintf(cmd, sizeof(cmd), "%s -E", pfctl);
+            snprintf(cmd, sizeof(cmd), "%s -q -E >/dev/null 2>&1", pfctl);
             if (run_cmd(cmd) == 0 || pf_is_enabled()) {
                 enabled_now = 1;
             }
@@ -812,7 +812,7 @@ static int apply_pf_rules(const char *server_ips, int redir_port) {
         }
 
         log_msg("pf trying mode=%s", pf_rule_mode_name(mode));
-        snprintf(cmd, sizeof(cmd), "%s -f /var/run/vlesscore-pf.conf", pfctl);
+        snprintf(cmd, sizeof(cmd), "%s -q -f /var/run/vlesscore-pf.conf >/dev/null 2>&1", pfctl);
         if (run_cmd(cmd) == 0) {
             log_msg("pf rules loaded mode=%s", pf_rule_mode_name(mode));
             return 0;
@@ -827,11 +827,11 @@ static void clear_pf_rules(void) {
     if (!pfctl) return;
 
     char cmd[320];
-    snprintf(cmd, sizeof(cmd), "%s -F all", pfctl);
+    snprintf(cmd, sizeof(cmd), "%s -q -F all >/dev/null 2>&1", pfctl);
     run_cmd(cmd);
 
     if (!g.pf_enabled_before) {
-        snprintf(cmd, sizeof(cmd), "%s -d", pfctl);
+        snprintf(cmd, sizeof(cmd), "%s -q -d >/dev/null 2>&1", pfctl);
         run_cmd(cmd);
     }
 

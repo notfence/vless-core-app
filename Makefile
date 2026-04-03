@@ -30,6 +30,7 @@ TWEAK_LDFLAGS := -dynamiclib -install_name /Library/MobileSubstrate/DynamicLibra
 
 VLESS_CORE_BIN ?= $(abspath ../vless-core-cli/vless-core-darwin-amrv7)
 REDSOCKS_BIN ?= $(ROOT)/third_party/redsocks-vless-core
+CA_BUNDLE ?= $(abspath ../vless-core-cli/third_party/cacert.pem)
 
 all: deb
 
@@ -41,6 +42,7 @@ check-ios-toolchain:
 check-package-inputs:
 	@test -f "$(VLESS_CORE_BIN)" || (echo "Missing core binary: $(VLESS_CORE_BIN)"; echo "Build it in ../vless-core-cli or override VLESS_CORE_BIN=/path/to/vless-core-darwin-amrv7"; exit 1)
 	@test -f "$(REDSOCKS_BIN)" || (echo "Missing redsocks binary: $(REDSOCKS_BIN)"; exit 1)
+	@test -f "$(CA_BUNDLE)" || (echo "Missing CA bundle: $(CA_BUNDLE)"; echo "Provide CA_BUNDLE=/path/to/cacert.pem"; exit 1)
 
 $(APP_BIN): check-ios-toolchain $(APP_SRC)
 	mkdir -p $(BUILD_DIR)
@@ -81,6 +83,8 @@ package-root: check-package-inputs $(APP_BIN) $(DAEMON_BIN) $(BOOTSTRAP_BIN) $(V
 	cp $(VPNICON_TWEAK_BIN) $(PKG_ROOT)/Library/MobileSubstrate/DynamicLibraries/vlesscorevpnicon.dylib
 	cp $(VLESS_CORE_BIN) $(PKG_ROOT)/usr/bin/vless-core-darwin-amrv7
 	cp $(REDSOCKS_BIN) $(PKG_ROOT)/usr/bin/redsocks-vless-core
+	mkdir -p $(PKG_ROOT)/usr/share/vless-core
+	cp $(CA_BUNDLE) $(PKG_ROOT)/usr/share/vless-core/cacert.pem
 	find $(PKG_ROOT) -type d -exec chmod 755 {} \;
 	find $(PKG_ROOT) -type f -exec chmod 644 {} \;
 	chmod 755 $(PKG_ROOT)/Applications/vless-core.app/vless-core

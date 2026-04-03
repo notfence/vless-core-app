@@ -6,7 +6,7 @@
 
 ## Tested Device/OS
 
-Tested only on **iOS 6.1.3** on **iPhone 4s**.
+Tested on **iPhone 4s**, **iPad 2** running **iOS 6.1.3**.
 Compatibility with other iOS versions/devices is not guaranteed.
 
 ## Build
