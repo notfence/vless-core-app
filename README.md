@@ -9,6 +9,38 @@
 Tested on **iPhone 4s**, **iPad 2** running **iOS 6.1.3**.
 Compatibility with other iOS versions/devices is not guaranteed.
 
+## Install on iOS
+
+### Install from latest release (.deb)
+
+1. Download `.deb` from [latest release](https://github.com/notfence/vless-core-app/releases/latest).
+2. Put the `.deb` file on your device (for example: `/var/mobile/`).
+3. In iFile, find the `.deb`, tap it, and press `Install`.
+4. Device should respring.
+
+Also you can use terminal app to install it: 
+`dpkg -i com.vlesscore.app_iphoneos-arm.deb`
+
+### Install your own build via SSH (scp + dpkg)
+
+
+```bash
+# on build machine
+scp build/com.vlesscore.app_iphoneos-arm.deb root@<iphone-ip>:/var/root/
+
+# on iPhone
+dpkg -i com.vlesscore.app_iphoneos-arm.deb
+```
+
+## Supported Protocols
+
+Bundled core supports:
+
+- `VLESS + TCP + Reality + xtls-rprx-vision`
+- `VLESS + TLS + XHTTP (mode=packet-up)`
+
+Protocol semantics are aligned with `xray-core` for the supported transports and URI parameters.
+
 ## Build
 
 Need `vless-core-cli` first.
@@ -45,29 +77,6 @@ make deb VLESS_CORE_BIN=/abs/path/to/vless-core-darwin-amrv7
 ```
 
 Package uses `gzip` compression for old iOS 6 `dpkg` compatibility.
-
-## Install on iOS
-
-### Install from latest release (.deb)
-
-1. Download `.deb` from [latest release](https://github.com/notfence/vless-core-app/releases/latest).
-2. Put the `.deb` file on your device (for example: `/var/mobile/`).
-3. In iFile, find the `.deb`, tap it, and press `Install`.
-4. Device should respring.
-
-Also you can use terminal app to install it: 
-`dpkg -i com.vlesscore.app_iphoneos-arm.deb`
-
-### Install your own build via SSH (scp + dpkg)
-
-
-```bash
-# on build machine
-scp build/com.vlesscore.app_iphoneos-arm.deb root@<iphone-ip>:/var/root/
-
-# on iPhone
-dpkg -i com.vlesscore.app_iphoneos-arm.deb
-```
 
 ## Runtime paths
 
