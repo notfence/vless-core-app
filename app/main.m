@@ -599,35 +599,6 @@ static NSData *DecodeBase64String(NSString *input) {
     return [NSData dataWithBytesNoCopy:out length:out_len freeWhenDone:YES];
 }
 
-static void CallBoolSelectorIfExists(id obj, NSString *selectorName, BOOL value) {
-    SEL sel = NSSelectorFromString(selectorName);
-    if (!obj || ![obj respondsToSelector:sel]) return;
-
-    IMP imp = [obj methodForSelector:sel];
-    if (!imp) return;
-
-    void (*func)(id, SEL, BOOL) = (void (*)(id, SEL, BOOL))imp;
-    func(obj, sel, value);
-}
-
-static void SetVPNStatusIcon(BOOL enabled) {
-    UIApplication *app = [UIApplication sharedApplication];
-    CallBoolSelectorIfExists(app, @"_setStatusBarShowsVPN:", enabled);
-    CallBoolSelectorIfExists(app, @"setStatusBarShowsVPN:", enabled);
-
-    id statusBar = nil;
-    @try {
-        statusBar = [app valueForKey:@"statusBar"];
-    }
-    @catch (NSException *ex) {
-        (void)ex;
-        statusBar = nil;
-    }
-
-    CallBoolSelectorIfExists(statusBar, @"setShowsVPN:", enabled);
-    CallBoolSelectorIfExists(statusBar, @"_setShowsVPN:", enabled);
-}
-
 static UIImage *LoadBundledIconScaled(NSString *baseName, CGFloat size) {
     NSString *path = [[NSBundle mainBundle] pathForResource:baseName ofType:@"png"];
     if (!path) return nil;
@@ -1588,13 +1559,11 @@ static UIImage *MakeIconImage(VCIconType type, CGFloat size, BOOL active) {
         [self startUptimeTimer];
         [self updateConnectButton];
         [self showStatus:@"Connected (switched config)" ok:YES];
-        SetVPNStatusIcon(YES);
     } else {
         _connected = NO;
         [self stopUptimeTimer];
         [self updateConnectButton];
         [self showStatus:[NSString stringWithFormat:@"Reconnect failed (connect): %@", connResp] ok:NO];
-        SetVPNStatusIcon(NO);
     }
 }
 
@@ -1613,7 +1582,6 @@ static UIImage *MakeIconImage(VCIconType type, CGFloat size, BOOL active) {
             [self startUptimeTimer];
             [self updateConnectButton];
             [self showStatus:@"Connected" ok:YES];
-            SetVPNStatusIcon(YES);
         } else {
             [self showStatus:resp ok:NO];
         }
@@ -1629,7 +1597,6 @@ static UIImage *MakeIconImage(VCIconType type, CGFloat size, BOOL active) {
     } else {
         [self showStatus:resp ok:NO];
     }
-    SetVPNStatusIcon(NO);
 }
 
 - (void)plusPressed {
@@ -1715,12 +1682,10 @@ static UIImage *MakeIconImage(VCIconType type, CGFloat size, BOOL active) {
     if ([resp hasPrefix:@"OK connected"]) {
         _connected = YES;
         [self startUptimeTimer];
-        SetVPNStatusIcon(YES);
         [self showStatus:@"Connected" ok:YES];
     } else {
         _connected = NO;
         [self stopUptimeTimer];
-        SetVPNStatusIcon(NO);
         [self showStatus:@"Ready" ok:YES];
     }
     [self updateConnectButton];

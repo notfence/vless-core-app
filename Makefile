@@ -72,6 +72,8 @@ package-root: check-package-inputs $(APP_BIN) $(DAEMON_BIN) $(BOOTSTRAP_BIN) $(V
 	cp -a packaging/Library $(PKG_ROOT)/
 	cp -a packaging/usr $(PKG_ROOT)/
 	cp app/Info.plist $(PKG_ROOT)/Applications/vless-core.app/Info.plist
+	cp app/icons/Icon.png $(PKG_ROOT)/Applications/vless-core.app/Icon.png
+	cp app/icons/Icon@2x.png $(PKG_ROOT)/Applications/vless-core.app/Icon@2x.png
 	cp app/icons/icon-refresh.png $(PKG_ROOT)/Applications/vless-core.app/icon-refresh.png
 	cp app/icons/icon-terminal.png $(PKG_ROOT)/Applications/vless-core.app/icon-terminal.png
 	cp app/icons/icon-list.png $(PKG_ROOT)/Applications/vless-core.app/icon-list.png

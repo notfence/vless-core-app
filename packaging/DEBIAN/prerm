@@ -1,7 +1,8 @@
 #!/bin/sh
 set -e
 launchctl unload /Library/LaunchDaemons/com.vlesscore.vpnctld.plist >/dev/null 2>&1 || true
-rm -f /var/mobile/Library/Preferences/com.vlesscore.vpnicon.state >/dev/null 2>&1 || true
-rm -f /var/mobile/Library/vlesscore-vpnicon.log >/dev/null 2>&1 || true
-killall -9 SpringBoard >/dev/null 2>&1 || true
+if [ "$1" = "remove" ] || [ "$1" = "purge" ]; then
+  rm -f /var/mobile/Library/Preferences/com.vlesscore.vpnicon.state >/dev/null 2>&1 || true
+  rm -f /var/mobile/Library/vlesscore-vpnicon.log >/dev/null 2>&1 || true
+fi
 exit 0
