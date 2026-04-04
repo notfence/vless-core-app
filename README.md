@@ -73,12 +73,6 @@ make clean
 make deb IOS_TOOLCHAIN=$IOS_TOOLCHAIN
 ```
 
-For a fresh clone, ensure packaging placeholders exist (empty dirs are not tracked by git):
-
-```bash
-mkdir -p packaging/Applications/vless-core.app packaging/usr/bin
-```
-
 Output:
 
 - `build/com.vlesscore.app_iphoneos-arm.deb`
