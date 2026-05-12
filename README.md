@@ -1,13 +1,30 @@
 # vless-core-app
 
-`vless-core-app` is an iOS 6.x app + root daemon for full-device VLESS Reality routing.
+`vless-core-app` is an iOS 6.x app + root daemon for full-device VLESS routing.
 
 **Jailbreak required**
 
 ## Tested Device/OS
 
-Tested on **iPhone 4s**, **iPad 2** running **iOS 6.1.3**.
-Compatibility with other iOS versions/devices is not guaranteed.
+### Tested by Me
+
+| Device | OS | Status |
+| --- | --- | --- |
+| iPhone 4s | iOS 6.1.3 | Works fine |
+| iPad 4 | iOS 10.3.3 | Works fine |
+
+### Tested by Others
+
+| Device | OS | Status |
+| --- | --- | --- |
+| iPad 2 | iOS 6.1.3 | Works fine |
+| iPhone 5 | iOS 8.4.1 | Works, but has UI bugs |
+| iPhone 5 | iOS 10.3.3 | Not working: after install, SpringBoard crashes into Safe Mode |
+| iPad 2 | iOS 9.3.5 | Not working: no response from daemon |
+
+see [Issues](https://github.com/notfence/vless-core-app/issues) page for current bug list
+
+**<u>Compatibility with other iOS versions/devices is not guaranteed!</u>**
 
 ## Install on iOS
 
@@ -43,9 +60,9 @@ Protocol semantics are aligned with `xray-core` for the supported transports and
 
 ## Build
 
-Need `vless-core-cli` first (from sibling repo or release assets).
+Need `vless-core-cli` first.
 
-Download it from:
+Build or download it from:
 
 - Repo: https://github.com/notfence/vless-core-cli
 - Latest release: https://github.com/notfence/vless-core-cli/releases/latest
@@ -109,8 +126,5 @@ Package uses `gzip` compression for old iOS 6 `dpkg` compatibility.
 
 The daemon chooses the first usable backend in order:
 
-1. `tun2socks` (`/dev/tun0` required)
-2. `ipfw + redsocks`
-3. `pf + redsocks`
-
-So TCP full-device proxy mode can work even when `/dev/tun0` is missing.
+1. `ipfw + redsocks`
+2. `pf + redsocks`
