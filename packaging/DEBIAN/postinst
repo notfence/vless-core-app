@@ -17,42 +17,14 @@ touch /var/mobile/Library/Preferences/com.vlesscore.vpnicon.state || true
 chown mobile:mobile /var/mobile/Library/Preferences/com.vlesscore.vpnicon.state >/dev/null 2>&1 || true
 launchctl unload /Library/LaunchDaemons/com.vlesscore.vpnctld.plist >/dev/null 2>&1 || true
 launchctl load /Library/LaunchDaemons/com.vlesscore.vpnctld.plist >/dev/null 2>&1 || true
-UICACHE_BIN=""
-for p in /usr/bin/uicache /bin/uicache /usr/sbin/uicache /sbin/uicache; do
-  if [ -x "$p" ]; then
-    UICACHE_BIN="$p"
-    break
-  fi
-done
-if [ -z "$UICACHE_BIN" ]; then
-  UICACHE_BIN="$(command -v uicache 2>/dev/null || true)"
-fi
-if [ -n "$UICACHE_BIN" ]; then
-  "$UICACHE_BIN" -p /Applications/vless-core.app >/dev/null 2>&1 || "$UICACHE_BIN" >/dev/null 2>&1 || true
-  if id mobile >/dev/null 2>&1; then
-    su mobile -c "$UICACHE_BIN -p /Applications/vless-core.app" >/dev/null 2>&1 || \
-    su mobile -c "$UICACHE_BIN" >/dev/null 2>&1 || true
-  fi
+uicache -p /Applications/vless-core.app >/dev/null 2>&1 || uicache >/dev/null 2>&1 || true
+if id mobile >/dev/null 2>&1; then
+  su mobile -c "uicache -p /Applications/vless-core.app" >/dev/null 2>&1 || \
+  su mobile -c "uicache" >/dev/null 2>&1 || true
 fi
 sync >/dev/null 2>&1 || true
-SBRELOAD_BIN=""
-for p in /usr/bin/sbreload /bin/sbreload /usr/sbin/sbreload /sbin/sbreload; do
-  if [ -x "$p" ]; then
-    SBRELOAD_BIN="$p"
-    break
-  fi
-done
-if [ -z "$SBRELOAD_BIN" ]; then
-  SBRELOAD_BIN="$(command -v sbreload 2>/dev/null || true)"
-fi
-if [ -n "$SBRELOAD_BIN" ]; then
-  "$SBRELOAD_BIN" >/dev/null 2>&1 || \
-  killall -9 backboardd >/dev/null 2>&1 || \
-  killall -9 BackBoardd >/dev/null 2>&1 || \
-  killall -9 SpringBoard >/dev/null 2>&1 || true
-else
-  killall -9 backboardd >/dev/null 2>&1 || \
-  killall -9 BackBoardd >/dev/null 2>&1 || \
-  killall -9 SpringBoard >/dev/null 2>&1 || true
-fi
+sbreload >/dev/null 2>&1 || true
+launchctl stop com.apple.SpringBoard >/dev/null 2>&1 || true
+##killall backboardd >/dev/null 2>&1 || true
+killall -9 SpringBoard >/dev/null 2>&1 || true
 exit 0
