@@ -1176,8 +1176,7 @@ static UIImage *MakeIconImage(VCIconType type, CGFloat size, BOOL active) {
 
 - (NSInteger)tableView:(UITableView *)tableView numberOfRowsInSection:(NSInteger)section {
     (void)tableView;
-    (void)section;
-    return 1;
+    return (section == 0) ? 1 : 2;
 }
 
 - (NSString *)tableView:(UITableView *)tableView titleForHeaderInSection:(NSInteger)section {
@@ -1200,13 +1199,26 @@ static UIImage *MakeIconImage(VCIconType type, CGFloat size, BOOL active) {
         return cell;
     }
 
-    static NSString *kAboutCellId = @"SettingsAboutCell";
-    UITableViewCell *cell = [tableView dequeueReusableCellWithIdentifier:kAboutCellId];
-    if (!cell) {
-        cell = [[[UITableViewCell alloc] initWithStyle:UITableViewCellStyleSubtitle reuseIdentifier:kAboutCellId] autorelease];
+    if (indexPath.row == 0) {
+        static NSString *kAboutCellId = @"SettingsAboutCell";
+        UITableViewCell *cell = [tableView dequeueReusableCellWithIdentifier:kAboutCellId];
+        if (!cell) {
+            cell = [[[UITableViewCell alloc] initWithStyle:UITableViewCellStyleSubtitle reuseIdentifier:kAboutCellId] autorelease];
+        }
+        cell.textLabel.text = @"About vless-core";
+        cell.detailTextLabel.text = @"Version and core binary info";
+        cell.selectionStyle = UITableViewCellSelectionStyleBlue;
+        cell.accessoryType = UITableViewCellAccessoryDisclosureIndicator;
+        return cell;
     }
-    cell.textLabel.text = @"About vless-core";
-    cell.detailTextLabel.text = @"Version and core binary info";
+
+    static NSString *kGitHubCellId = @"SettingsGitHubCell";
+    UITableViewCell *cell = [tableView dequeueReusableCellWithIdentifier:kGitHubCellId];
+    if (!cell) {
+        cell = [[[UITableViewCell alloc] initWithStyle:UITableViewCellStyleSubtitle reuseIdentifier:kGitHubCellId] autorelease];
+    }
+    cell.textLabel.text = @"Project on GitHub";
+    cell.detailTextLabel.text = @"github.com/notfence/vless-core-app";
     cell.selectionStyle = UITableViewCellSelectionStyleBlue;
     cell.accessoryType = UITableViewCellAccessoryDisclosureIndicator;
     return cell;
@@ -1214,8 +1226,15 @@ static UIImage *MakeIconImage(VCIconType type, CGFloat size, BOOL active) {
 
 - (void)tableView:(UITableView *)tableView didSelectRowAtIndexPath:(NSIndexPath *)indexPath {
     if (indexPath.section == 1) {
-        if ([_delegate respondsToSelector:@selector(settingsVCDidRequestAbout:)]) {
-            [_delegate settingsVCDidRequestAbout:self];
+        if (indexPath.row == 0) {
+            if ([_delegate respondsToSelector:@selector(settingsVCDidRequestAbout:)]) {
+                [_delegate settingsVCDidRequestAbout:self];
+            }
+        } else {
+            NSURL *url = [NSURL URLWithString:@"https://github.com/notfence/vless-core-app"];
+            if (url) {
+                [[UIApplication sharedApplication] openURL:url];
+            }
         }
     }
     [tableView deselectRowAtIndexPath:indexPath animated:YES];
@@ -1256,6 +1275,7 @@ static UIImage *MakeIconImage(VCIconType type, CGFloat size, BOOL active) {
     BOOL _connected;
     BOOL _showingTerminal;
     BOOL _autoUpdateSubscriptions;
+    BOOL _didRunLaunchAutoUpdate;
 }
 @end
 
@@ -2311,13 +2331,17 @@ static UIImage *MakeIconImage(VCIconType type, CGFloat size, BOOL active) {
     [self updateTopButtonsIcons];
     [_tableView reloadData];
     [self queryInitialStatus];
+
+    if (!_didRunLaunchAutoUpdate) {
+        _didRunLaunchAutoUpdate = YES;
+        if (_autoUpdateSubscriptions && [_subscriptions count] > 0) {
+            [self refreshAllSubscriptions:YES];
+        }
+    }
 }
 
 - (void)viewWillAppear:(BOOL)animated {
     [super viewWillAppear:animated];
-    if (_autoUpdateSubscriptions && [_subscriptions count] > 0) {
-        [self refreshAllSubscriptions:YES];
-    }
 }
 
 - (BOOL)shouldAutorotateToInterfaceOrientation:(UIInterfaceOrientation)interfaceOrientation {
