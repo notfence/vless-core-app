@@ -35,7 +35,6 @@ typedef NS_ENUM(NSInteger, VCAlertTag) {
 
 typedef NS_ENUM(NSInteger, VCActionSheetTag) {
     VCActionSheetTagImport = 2001,
-    VCActionSheetTagSettings = 2002,
 };
 
 typedef NS_ENUM(NSInteger, VCIconType) {
@@ -1117,7 +1116,120 @@ static UIImage *MakeIconImage(VCIconType type, CGFloat size, BOOL active) {
     return img;
 }
 
-@interface MainVC : UIViewController <UITableViewDataSource, UITableViewDelegate, UIActionSheetDelegate, UIAlertViewDelegate, UITextViewDelegate> {
+@class SettingsVC;
+@protocol SettingsVCDelegate <NSObject>
+- (void)settingsVC:(SettingsVC *)vc didChangeAutoUpdate:(BOOL)enabled;
+- (void)settingsVCDidRequestAbout:(SettingsVC *)vc;
+@end
+
+@interface SettingsVC : UIViewController <UITableViewDataSource, UITableViewDelegate> {
+    UITableView *_tableView;
+    UISwitch *_autoUpdateSwitch;
+    BOOL _autoUpdate;
+    id<SettingsVCDelegate> _delegate;
+}
+@property (nonatomic, assign) BOOL autoUpdate;
+@property (nonatomic, assign) id<SettingsVCDelegate> delegate;
+@end
+
+@implementation SettingsVC
+@synthesize autoUpdate = _autoUpdate;
+@synthesize delegate = _delegate;
+
+- (void)closePressed {
+    [self dismissViewControllerAnimated:YES completion:nil];
+}
+
+- (void)autoUpdateSwitchChanged:(UISwitch *)sw {
+    _autoUpdate = [sw isOn];
+    if ([_delegate respondsToSelector:@selector(settingsVC:didChangeAutoUpdate:)]) {
+        [_delegate settingsVC:self didChangeAutoUpdate:_autoUpdate];
+    }
+}
+
+- (void)viewDidLoad {
+    [super viewDidLoad];
+    self.view.backgroundColor = [UIColor colorWithWhite:0.97f alpha:1.0f];
+    self.title = @"Settings";
+
+    UIBarButtonItem *close = [[[UIBarButtonItem alloc] initWithTitle:@"Back"
+                                                                style:UIBarButtonItemStyleBordered
+                                                               target:self
+                                                               action:@selector(closePressed)] autorelease];
+    self.navigationItem.leftBarButtonItem = close;
+
+    _tableView = [[UITableView alloc] initWithFrame:self.view.bounds style:UITableViewStyleGrouped];
+    _tableView.dataSource = self;
+    _tableView.delegate = self;
+    _tableView.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
+    [self.view addSubview:_tableView];
+
+    _autoUpdateSwitch = [[UISwitch alloc] initWithFrame:CGRectZero];
+    [_autoUpdateSwitch setOn:_autoUpdate animated:NO];
+    [_autoUpdateSwitch addTarget:self action:@selector(autoUpdateSwitchChanged:) forControlEvents:UIControlEventValueChanged];
+}
+
+- (NSInteger)numberOfSectionsInTableView:(UITableView *)tableView {
+    (void)tableView;
+    return 2;
+}
+
+- (NSInteger)tableView:(UITableView *)tableView numberOfRowsInSection:(NSInteger)section {
+    (void)tableView;
+    (void)section;
+    return 1;
+}
+
+- (NSString *)tableView:(UITableView *)tableView titleForHeaderInSection:(NSInteger)section {
+    (void)tableView;
+    return (section == 0) ? @"Subscriptions" : @"About";
+}
+
+- (UITableViewCell *)tableView:(UITableView *)tableView cellForRowAtIndexPath:(NSIndexPath *)indexPath {
+    if (indexPath.section == 0) {
+        static NSString *kSwitchCellId = @"SettingsSwitchCell";
+        UITableViewCell *cell = [tableView dequeueReusableCellWithIdentifier:kSwitchCellId];
+        if (!cell) {
+            cell = [[[UITableViewCell alloc] initWithStyle:UITableViewCellStyleSubtitle reuseIdentifier:kSwitchCellId] autorelease];
+        }
+        cell.textLabel.text = @"Auto-update subscriptions";
+        cell.detailTextLabel.text = @"Refresh subscriptions on app open";
+        cell.selectionStyle = UITableViewCellSelectionStyleNone;
+        [_autoUpdateSwitch setOn:_autoUpdate animated:NO];
+        cell.accessoryView = _autoUpdateSwitch;
+        return cell;
+    }
+
+    static NSString *kAboutCellId = @"SettingsAboutCell";
+    UITableViewCell *cell = [tableView dequeueReusableCellWithIdentifier:kAboutCellId];
+    if (!cell) {
+        cell = [[[UITableViewCell alloc] initWithStyle:UITableViewCellStyleSubtitle reuseIdentifier:kAboutCellId] autorelease];
+    }
+    cell.textLabel.text = @"About vless-core";
+    cell.detailTextLabel.text = @"Version and core binary info";
+    cell.selectionStyle = UITableViewCellSelectionStyleBlue;
+    cell.accessoryType = UITableViewCellAccessoryDisclosureIndicator;
+    return cell;
+}
+
+- (void)tableView:(UITableView *)tableView didSelectRowAtIndexPath:(NSIndexPath *)indexPath {
+    if (indexPath.section == 1) {
+        if ([_delegate respondsToSelector:@selector(settingsVCDidRequestAbout:)]) {
+            [_delegate settingsVCDidRequestAbout:self];
+        }
+    }
+    [tableView deselectRowAtIndexPath:indexPath animated:YES];
+}
+
+- (void)dealloc {
+    [_tableView release];
+    [_autoUpdateSwitch release];
+    [super dealloc];
+}
+
+@end
+
+@interface MainVC : UIViewController <UITableViewDataSource, UITableViewDelegate, UIActionSheetDelegate, UIAlertViewDelegate, UITextViewDelegate, SettingsVCDelegate> {
     UIButton *_connectBtn;
     UIButton *_plusBtn;
     UIButton *_terminalBtn;
@@ -1794,6 +1906,20 @@ static UIImage *MakeIconImage(VCIconType type, CGFloat size, BOOL active) {
     [av show];
 }
 
+- (void)settingsVC:(SettingsVC *)vc didChangeAutoUpdate:(BOOL)enabled {
+    (void)vc;
+    _autoUpdateSubscriptions = enabled;
+    [self saveData];
+    [self showStatus:_autoUpdateSubscriptions ? @"Auto-update subscriptions: ON"
+                                           : @"Auto-update subscriptions: OFF"
+                 ok:YES];
+}
+
+- (void)settingsVCDidRequestAbout:(SettingsVC *)vc {
+    (void)vc;
+    [self showAbout];
+}
+
 - (UIView *)accessoryChevronExpanded:(BOOL)expanded {
     UIView *v = [[[UIView alloc] initWithFrame:CGRectMake(0, 0, 20, 20)] autorelease];
     UIImageView *iv = [[[UIImageView alloc] initWithFrame:CGRectMake(2, 2, 16, 16)] autorelease];
@@ -2014,16 +2140,13 @@ static UIImage *MakeIconImage(VCIconType type, CGFloat size, BOOL active) {
 }
 
 - (void)settingsPressed {
-    NSString *autoUpdateTitle = _autoUpdateSubscriptions ? @"Auto-update subscriptions: ON"
-                                                         : @"Auto-update subscriptions: OFF";
+    SettingsVC *settings = [[[SettingsVC alloc] init] autorelease];
+    settings.autoUpdate = _autoUpdateSubscriptions;
+    settings.delegate = self;
 
-    UIActionSheet *sheet = [[[UIActionSheet alloc] initWithTitle:@"Settings"
-                                                         delegate:self
-                                                cancelButtonTitle:@"Close"
-                                           destructiveButtonTitle:nil
-                                                otherButtonTitles:autoUpdateTitle, @"About", nil] autorelease];
-    sheet.tag = VCActionSheetTagSettings;
-    [sheet showInView:self.view];
+    UINavigationController *nav = [[[UINavigationController alloc] initWithRootViewController:settings] autorelease];
+    nav.modalPresentationStyle = UIModalPresentationFullScreen;
+    [self presentViewController:nav animated:YES completion:nil];
 }
 
 - (void)terminalPressed {
@@ -2513,18 +2636,6 @@ static UIImage *MakeIconImage(VCIconType type, CGFloat size, BOOL active) {
             [av show];
         }
         return;
-    }
-
-    if (actionSheet.tag == VCActionSheetTagSettings) {
-        if (buttonIndex == 0) {
-            _autoUpdateSubscriptions = !_autoUpdateSubscriptions;
-            [self saveData];
-            [self showStatus:_autoUpdateSubscriptions ? @"Auto-update subscriptions: ON"
-                                                   : @"Auto-update subscriptions: OFF"
-                         ok:YES];
-        } else if (buttonIndex == 1) {
-            [self showAbout];
-        }
     }
 }
 
