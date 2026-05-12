@@ -1,12 +1,28 @@
 #!/bin/sh
 set -e
+
+fw_ver="$(dpkg-query -W -f='${Version}' firmware 2>/dev/null || true)"
+if [ -z "$fw_ver" ]; then
+  fw_ver="$(sw_vers -productVersion 2>/dev/null || true)"
+fi
+fw_major="${fw_ver%%.*}"
+case "$fw_major" in
+  ''|*[!0-9]*) fw_major=0 ;;
+esac
+
 chown -R root:wheel /Applications/vless-core.app || true
 chown root:wheel /Library/LaunchDaemons/com.vlesscore.vpnctld.plist || true
 chown root:wheel /usr/bin/vpnctld-bootstrap || true
-chown root:wheel /Library/MobileSubstrate/DynamicLibraries/vlesscorevpnicon.dylib /Library/MobileSubstrate/DynamicLibraries/vlesscorevpnicon.plist || true
 chmod 644 /Library/LaunchDaemons/com.vlesscore.vpnctld.plist || true
-chmod 644 /Library/MobileSubstrate/DynamicLibraries/vlesscorevpnicon.plist || true
-chmod 755 /Library/MobileSubstrate/DynamicLibraries/vlesscorevpnicon.dylib || true
+if [ "$fw_major" -ge 7 ]; then
+  rm -f /Library/MobileSubstrate/DynamicLibraries/vlesscorevpnicon.dylib \
+        /Library/MobileSubstrate/DynamicLibraries/vlesscorevpnicon.plist || true
+else
+  chown root:wheel /Library/MobileSubstrate/DynamicLibraries/vlesscorevpnicon.dylib \
+                   /Library/MobileSubstrate/DynamicLibraries/vlesscorevpnicon.plist || true
+  chmod 644 /Library/MobileSubstrate/DynamicLibraries/vlesscorevpnicon.plist || true
+  chmod 755 /Library/MobileSubstrate/DynamicLibraries/vlesscorevpnicon.dylib || true
+fi
 chmod 755 /Applications/vless-core.app/vless-core || true
 for bin in /usr/bin/vpnctld /usr/bin/vless-core-darwin-amrv7 /usr/bin/vless-core-curl /usr/bin/redsocks-vless-core; do
   [ -e "$bin" ] && chmod 755 "$bin" || true
@@ -17,14 +33,19 @@ touch /var/mobile/Library/Preferences/com.vlesscore.vpnicon.state || true
 chown mobile:mobile /var/mobile/Library/Preferences/com.vlesscore.vpnicon.state >/dev/null 2>&1 || true
 launchctl unload /Library/LaunchDaemons/com.vlesscore.vpnctld.plist >/dev/null 2>&1 || true
 launchctl load /Library/LaunchDaemons/com.vlesscore.vpnctld.plist >/dev/null 2>&1 || true
+echo "Download this app from my GitHub repository:" || true
+echo "https://github.com/notfence/vless-core-app" || true
+echo "uicache is coming..." || true
 uicache -p /Applications/vless-core.app >/dev/null 2>&1 || uicache >/dev/null 2>&1 || true
 if id mobile >/dev/null 2>&1; then
   su mobile -c "uicache -p /Applications/vless-core.app" >/dev/null 2>&1 || \
   su mobile -c "uicache" >/dev/null 2>&1 || true
 fi
 sync >/dev/null 2>&1 || true
-sbreload >/dev/null 2>&1 || true
-launchctl stop com.apple.SpringBoard >/dev/null 2>&1 || true
-##killall backboardd >/dev/null 2>&1 || true
-killall -9 SpringBoard >/dev/null 2>&1 || true
+if [ "$fw_major" -lt 7 ]; then
+  sbreload >/dev/null 2>&1 || true
+  launchctl stop com.apple.SpringBoard >/dev/null 2>&1 || true
+  ##killall backboardd >/dev/null 2>&1 || true
+  killall -9 SpringBoard >/dev/null 2>&1 || true
+fi
 exit 0
