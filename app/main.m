@@ -24,6 +24,7 @@ extern char **environ;
 static NSString *const kDefaultsConfigsKey = @"vlesscore.configs";
 static NSString *const kDefaultsSubsKey = @"vlesscore.subscriptions";
 static NSString *const kDefaultsAutoUpdateSubsKey = @"vlesscore.auto_update_subs";
+static NSString *const kDefaultsStealthModeKey = @"vlesscore.stealth_mode";
 static NSString *const kDefaultsSubHWIDKey = @"vlesscore.subscription_hwid";
 static const char *kDaemonPortPath = "/var/run/vpnctld.port";
 static const int kDaemonDefaultPort = 9093;
@@ -1168,16 +1169,20 @@ static UIImage *MakeIconImage(VCIconType type, CGFloat size, BOOL active) {
 @class SettingsVC;
 @protocol SettingsVCDelegate <NSObject>
 - (void)settingsVC:(SettingsVC *)vc didChangeAutoUpdate:(BOOL)enabled;
+- (void)settingsVC:(SettingsVC *)vc didChangeStealthMode:(BOOL)enabled;
 - (void)settingsVCDidRequestAbout:(SettingsVC *)vc;
 @end
 
 @interface SettingsVC : UIViewController <UITableViewDataSource, UITableViewDelegate> {
     UITableView *_tableView;
     UISwitch *_autoUpdateSwitch;
+    UISwitch *_stealthSwitch;
     BOOL _autoUpdate;
+    BOOL _stealthMode;
     id<SettingsVCDelegate> _delegate;
 }
 @property (nonatomic, assign) BOOL autoUpdate;
+@property (nonatomic, assign) BOOL stealthMode;
 @property (nonatomic, assign) id<SettingsVCDelegate> delegate;
 @end
 
@@ -1186,6 +1191,7 @@ static UIImage *MakeIconImage(VCIconType type, CGFloat size, BOOL active) {
 
 @implementation SettingsVC
 @synthesize autoUpdate = _autoUpdate;
+@synthesize stealthMode = _stealthMode;
 @synthesize delegate = _delegate;
 
 - (void)closePressed {
@@ -1196,6 +1202,13 @@ static UIImage *MakeIconImage(VCIconType type, CGFloat size, BOOL active) {
     _autoUpdate = [sw isOn];
     if ([_delegate respondsToSelector:@selector(settingsVC:didChangeAutoUpdate:)]) {
         [_delegate settingsVC:self didChangeAutoUpdate:_autoUpdate];
+    }
+}
+
+- (void)stealthSwitchChanged:(UISwitch *)sw {
+    _stealthMode = [sw isOn];
+    if ([_delegate respondsToSelector:@selector(settingsVC:didChangeStealthMode:)]) {
+        [_delegate settingsVC:self didChangeStealthMode:_stealthMode];
     }
 }
 
@@ -1219,6 +1232,10 @@ static UIImage *MakeIconImage(VCIconType type, CGFloat size, BOOL active) {
     _autoUpdateSwitch = [[UISwitch alloc] initWithFrame:CGRectZero];
     [_autoUpdateSwitch setOn:_autoUpdate animated:NO];
     [_autoUpdateSwitch addTarget:self action:@selector(autoUpdateSwitchChanged:) forControlEvents:UIControlEventValueChanged];
+
+    _stealthSwitch = [[UISwitch alloc] initWithFrame:CGRectZero];
+    [_stealthSwitch setOn:_stealthMode animated:NO];
+    [_stealthSwitch addTarget:self action:@selector(stealthSwitchChanged:) forControlEvents:UIControlEventValueChanged];
 }
 
 - (NSInteger)numberOfSectionsInTableView:(UITableView *)tableView {
@@ -1228,7 +1245,7 @@ static UIImage *MakeIconImage(VCIconType type, CGFloat size, BOOL active) {
 
 - (NSInteger)tableView:(UITableView *)tableView numberOfRowsInSection:(NSInteger)section {
     (void)tableView;
-    return (section == 0) ? 1 : 2;
+    return (section == 0) ? 2 : 2;
 }
 
 - (NSString *)tableView:(UITableView *)tableView titleForHeaderInSection:(NSInteger)section {
@@ -1237,7 +1254,7 @@ static UIImage *MakeIconImage(VCIconType type, CGFloat size, BOOL active) {
 }
 
 - (UITableViewCell *)tableView:(UITableView *)tableView cellForRowAtIndexPath:(NSIndexPath *)indexPath {
-    if (indexPath.section == 0) {
+    if (indexPath.section == 0 && indexPath.row == 0) {
         static NSString *kSwitchCellId = @"SettingsSwitchCell";
         UITableViewCell *cell = [tableView dequeueReusableCellWithIdentifier:kSwitchCellId];
         if (!cell) {
@@ -1248,6 +1265,20 @@ static UIImage *MakeIconImage(VCIconType type, CGFloat size, BOOL active) {
         cell.selectionStyle = UITableViewCellSelectionStyleNone;
         [_autoUpdateSwitch setOn:_autoUpdate animated:NO];
         cell.accessoryView = _autoUpdateSwitch;
+        return cell;
+    }
+
+    if (indexPath.section == 0 && indexPath.row == 1) {
+        static NSString *kStealthCellId = @"SettingsStealthCell";
+        UITableViewCell *cell = [tableView dequeueReusableCellWithIdentifier:kStealthCellId];
+        if (!cell) {
+            cell = [[[UITableViewCell alloc] initWithStyle:UITableViewCellStyleSubtitle reuseIdentifier:kStealthCellId] autorelease];
+        }
+        cell.textLabel.text = @"Stealth mode";
+        cell.detailTextLabel.text = @"Hide links in configs and subscriptions";
+        cell.selectionStyle = UITableViewCellSelectionStyleNone;
+        [_stealthSwitch setOn:_stealthMode animated:NO];
+        cell.accessoryView = _stealthSwitch;
         return cell;
     }
 
@@ -1324,6 +1355,7 @@ static UIImage *MakeIconImage(VCIconType type, CGFloat size, BOOL active) {
 - (void)dealloc {
     [_tableView release];
     [_autoUpdateSwitch release];
+    [_stealthSwitch release];
     [super dealloc];
 }
 
@@ -1372,6 +1404,7 @@ static UIImage *MakeIconImage(VCIconType type, CGFloat size, BOOL active) {
     BOOL _connected;
     BOOL _showingTerminal;
     BOOL _autoUpdateSubscriptions;
+    BOOL _stealthModeEnabled;
     BOOL _didRunLaunchAutoUpdate;
 }
 @end
@@ -1587,6 +1620,31 @@ static UIImage *MakeIconImage(VCIconType type, CGFloat size, BOOL active) {
     return [self hostFromURLString:urlString];
 }
 
+- (BOOL)isLikelyLinkText:(NSString *)text {
+    if (![text isKindOfClass:[NSString class]]) return NO;
+    NSString *trim = [self safeTrim:text];
+    if ([trim length] == 0) return NO;
+
+    NSString *lower = [trim lowercaseString];
+    if ([lower hasPrefix:@"http://"] || [lower hasPrefix:@"https://"] || [lower hasPrefix:@"vless://"]) return YES;
+    if ([trim rangeOfString:@"/"].location != NSNotFound) return YES;
+    if ([trim rangeOfString:@"."].location != NSNotFound) return YES;
+    if ([trim rangeOfString:@":"].location != NSNotFound) return YES;
+    return NO;
+}
+
+- (NSString *)maskedLinkText:(NSString *)text {
+    if (![text isKindOfClass:[NSString class]]) return @"";
+    NSString *trim = [self safeTrim:text];
+    NSUInteger len = [trim length];
+    if (len == 0) return @"";
+
+    if (!_stealthModeEnabled || ![self isLikelyLinkText:trim]) {
+        return trim;
+    }
+    return @"**links are hidden**";
+}
+
 - (BOOL)isSubscriptionURL:(NSString *)s {
     return [s hasPrefix:@"http://"] || [s hasPrefix:@"https://"];
 }
@@ -1600,6 +1658,7 @@ static UIImage *MakeIconImage(VCIconType type, CGFloat size, BOOL active) {
     [ud setObject:_configs forKey:kDefaultsConfigsKey];
     [ud setObject:_subscriptions forKey:kDefaultsSubsKey];
     [ud setBool:_autoUpdateSubscriptions forKey:kDefaultsAutoUpdateSubsKey];
+    [ud setBool:_stealthModeEnabled forKey:kDefaultsStealthModeKey];
     [ud synchronize];
 }
 
@@ -1624,6 +1683,12 @@ static UIImage *MakeIconImage(VCIconType type, CGFloat size, BOOL active) {
         _autoUpdateSubscriptions = YES;
     } else {
         _autoUpdateSubscriptions = [ud boolForKey:kDefaultsAutoUpdateSubsKey];
+    }
+
+    if ([ud objectForKey:kDefaultsStealthModeKey] == nil) {
+        _stealthModeEnabled = NO;
+    } else {
+        _stealthModeEnabled = [ud boolForKey:kDefaultsStealthModeKey];
     }
 
     _selectedConfigIndex = -1;
@@ -2217,6 +2282,16 @@ static UIImage *MakeIconImage(VCIconType type, CGFloat size, BOOL active) {
                  ok:YES];
 }
 
+- (void)settingsVC:(SettingsVC *)vc didChangeStealthMode:(BOOL)enabled {
+    (void)vc;
+    _stealthModeEnabled = enabled;
+    [self saveData];
+    [_tableView reloadData];
+    [self showStatus:_stealthModeEnabled ? @"Stealth mode: ON"
+                                   : @"Stealth mode: OFF"
+                 ok:YES];
+}
+
 - (void)settingsVCDidRequestAbout:(SettingsVC *)vc {
     (void)vc;
     [self showAbout];
@@ -2444,6 +2519,7 @@ static UIImage *MakeIconImage(VCIconType type, CGFloat size, BOOL active) {
 - (void)settingsPressed {
     SettingsVC *settings = [[[SettingsVC alloc] init] autorelease];
     settings.autoUpdate = _autoUpdateSubscriptions;
+    settings.stealthMode = _stealthModeEnabled;
     settings.delegate = self;
 
     SettingsNavController *nav = [[[SettingsNavController alloc] initWithRootViewController:settings] autorelease];
@@ -2834,8 +2910,9 @@ static UIImage *MakeIconImage(VCIconType type, CGFloat size, BOOL active) {
         NSDictionary *cfg = [_configs objectAtIndex:indexPath.row];
         NSString *name = [cfg objectForKey:@"name"];
         NSString *uri = [cfg objectForKey:@"uri"];
-        cell.textLabel.text = ([name length] > 0) ? name : [NSString stringWithFormat:@"Config %ld", (long)(indexPath.row + 1)];
-        cell.detailTextLabel.text = [self hostFromVLESSURI:uri];
+        NSString *shownConfigName = ([name length] > 0) ? name : [NSString stringWithFormat:@"Config %ld", (long)(indexPath.row + 1)];
+        cell.textLabel.text = [self maskedLinkText:shownConfigName];
+        cell.detailTextLabel.text = [self maskedLinkText:[self hostFromVLESSURI:uri]];
         cell.accessoryView = [self accessoryPingWithTag:(10000 + indexPath.row) selected:(_selectedConfigIndex == indexPath.row)];
     } else {
         NSInteger subIdx = -1;
@@ -2854,14 +2931,17 @@ static UIImage *MakeIconImage(VCIconType type, CGFloat size, BOOL active) {
                 if ([shownName length] == 0 || [shownName isEqualToString:host]) {
                     shownName = [self subscriptionNameFromURLString:url];
                 }
+                shownName = [self maskedLinkText:shownName];
+                NSString *shownURL = [self maskedLinkText:(url ? url : @"")];
                 cell.textLabel.text = shownName;
-                cell.detailTextLabel.text = [NSString stringWithFormat:@"%lu configs • %@", (unsigned long)cnt, url ? url : @""];
+                cell.detailTextLabel.text = [NSString stringWithFormat:@"%lu configs • %@", (unsigned long)cnt, shownURL];
                 cell.accessoryView = [self accessoryChevronExpanded:(_expandedSubscription == subIdx)];
             } else {
                 NSString *uri = [items objectAtIndex:itemIdx];
                 cell.indentationLevel = 0;
-                cell.textLabel.text = [self displayNameForURI:uri index:itemIdx];
-                cell.detailTextLabel.text = [self hostFromVLESSURI:uri];
+                NSString *itemName = [self displayNameForURI:uri index:itemIdx];
+                cell.textLabel.text = [self maskedLinkText:itemName];
+                cell.detailTextLabel.text = [self maskedLinkText:[self hostFromVLESSURI:uri]];
                 NSInteger tag = 20000 + (subIdx * 1000) + itemIdx;
                 BOOL selected = (_selectedSubIndex == subIdx && _selectedSubItemIndex == itemIdx);
                 cell.accessoryView = [self accessoryPingWithTag:tag selected:selected];
