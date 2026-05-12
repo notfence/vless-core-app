@@ -29,6 +29,30 @@ static const char *kDaemonPortPath = "/var/run/vpnctld.port";
 static const int kDaemonDefaultPort = 9093;
 static const int kDaemonPortMax = 9113;
 
+static BOOL IsPadDevice(void) {
+    if (UI_USER_INTERFACE_IDIOM() == UIUserInterfaceIdiomPad) {
+        return YES;
+    }
+
+    NSString *model = [[UIDevice currentDevice] model];
+    if (model && [model rangeOfString:@"iPad" options:NSCaseInsensitiveSearch].location != NSNotFound) {
+        return YES;
+    }
+
+    return NO;
+}
+
+static UIInterfaceOrientation CurrentInterfaceOrientation(void) {
+    UIInterfaceOrientation o = [[UIApplication sharedApplication] statusBarOrientation];
+    if (o == UIInterfaceOrientationLandscapeLeft ||
+        o == UIInterfaceOrientationLandscapeRight ||
+        o == UIInterfaceOrientationPortraitUpsideDown ||
+        o == UIInterfaceOrientationPortrait) {
+        return o;
+    }
+    return UIInterfaceOrientationPortrait;
+}
+
 typedef NS_ENUM(NSInteger, VCAlertTag) {
     VCAlertTagImportManual = 1001,
 };
@@ -1132,6 +1156,9 @@ static UIImage *MakeIconImage(VCIconType type, CGFloat size, BOOL active) {
 @property (nonatomic, assign) id<SettingsVCDelegate> delegate;
 @end
 
+@interface SettingsNavController : UINavigationController
+@end
+
 @implementation SettingsVC
 @synthesize autoUpdate = _autoUpdate;
 @synthesize delegate = _delegate;
@@ -1240,10 +1267,55 @@ static UIImage *MakeIconImage(VCIconType type, CGFloat size, BOOL active) {
     [tableView deselectRowAtIndexPath:indexPath animated:YES];
 }
 
+- (BOOL)shouldAutorotateToInterfaceOrientation:(UIInterfaceOrientation)interfaceOrientation {
+    if (IsPadDevice()) {
+        return UIInterfaceOrientationIsPortrait(interfaceOrientation) || UIInterfaceOrientationIsLandscape(interfaceOrientation);
+    }
+    return interfaceOrientation == UIInterfaceOrientationPortrait;
+}
+
+- (BOOL)shouldAutorotate {
+    return IsPadDevice();
+}
+
+- (NSUInteger)supportedInterfaceOrientations {
+    if (IsPadDevice()) {
+        return UIInterfaceOrientationMaskAllButUpsideDown;
+    }
+    return UIInterfaceOrientationMaskPortrait;
+}
+
+- (UIInterfaceOrientation)preferredInterfaceOrientationForPresentation {
+    if (IsPadDevice()) {
+        UIInterfaceOrientation current = CurrentInterfaceOrientation();
+        if (current == UIInterfaceOrientationPortraitUpsideDown) {
+            return UIInterfaceOrientationPortrait;
+        }
+        return current;
+    }
+    return UIInterfaceOrientationPortrait;
+}
+
 - (void)dealloc {
     [_tableView release];
     [_autoUpdateSwitch release];
     [super dealloc];
+}
+
+@end
+
+@implementation SettingsNavController
+
+- (BOOL)shouldAutorotate {
+    return [[self topViewController] shouldAutorotate];
+}
+
+- (NSUInteger)supportedInterfaceOrientations {
+    return [[self topViewController] supportedInterfaceOrientations];
+}
+
+- (UIInterfaceOrientation)preferredInterfaceOrientationForPresentation {
+    return [[self topViewController] preferredInterfaceOrientationForPresentation];
 }
 
 @end
@@ -2164,7 +2236,7 @@ static UIImage *MakeIconImage(VCIconType type, CGFloat size, BOOL active) {
     settings.autoUpdate = _autoUpdateSubscriptions;
     settings.delegate = self;
 
-    UINavigationController *nav = [[[UINavigationController alloc] initWithRootViewController:settings] autorelease];
+    SettingsNavController *nav = [[[SettingsNavController alloc] initWithRootViewController:settings] autorelease];
     nav.modalPresentationStyle = UIModalPresentationFullScreen;
     [self presentViewController:nav animated:YES completion:nil];
 }
@@ -2259,28 +2331,33 @@ static UIImage *MakeIconImage(VCIconType type, CGFloat size, BOOL active) {
     _titleLabel.font = [UIFont boldSystemFontOfSize:22.0f];
     _titleLabel.textColor = [UIColor blackColor];
     _titleLabel.backgroundColor = [UIColor clearColor];
+    _titleLabel.autoresizingMask = UIViewAutoresizingFlexibleWidth;
     [self.view addSubview:_titleLabel];
 
     _plusBtn = [[UIButton buttonWithType:UIButtonTypeCustom] retain];
     _plusBtn.frame = CGRectMake(plusX, topY, iconW, iconW);
+    _plusBtn.autoresizingMask = UIViewAutoresizingFlexibleLeftMargin;
     [_plusBtn addTarget:self action:@selector(plusPressed) forControlEvents:UIControlEventTouchUpInside];
     [self applyTopButtonFeedbackToButton:_plusBtn];
     [self.view addSubview:_plusBtn];
 
     _terminalBtn = [[UIButton buttonWithType:UIButtonTypeCustom] retain];
     _terminalBtn.frame = CGRectMake(terminalX, topY, iconW, iconW);
+    _terminalBtn.autoresizingMask = UIViewAutoresizingFlexibleLeftMargin;
     [_terminalBtn addTarget:self action:@selector(terminalPressed) forControlEvents:UIControlEventTouchUpInside];
     [self applyTopButtonFeedbackToButton:_terminalBtn];
     [self.view addSubview:_terminalBtn];
 
     _refreshBtn = [[UIButton buttonWithType:UIButtonTypeCustom] retain];
     _refreshBtn.frame = CGRectMake(refreshX, topY, iconW, iconW);
+    _refreshBtn.autoresizingMask = UIViewAutoresizingFlexibleLeftMargin;
     [_refreshBtn addTarget:self action:@selector(refreshPressed) forControlEvents:UIControlEventTouchUpInside];
     [self applyTopButtonFeedbackToButton:_refreshBtn];
     [self.view addSubview:_refreshBtn];
 
     _settingsBtn = [[UIButton buttonWithType:UIButtonTypeCustom] retain];
     _settingsBtn.frame = CGRectMake(settingsX, topY, iconW, iconW);
+    _settingsBtn.autoresizingMask = UIViewAutoresizingFlexibleLeftMargin;
     [_settingsBtn addTarget:self action:@selector(settingsPressed) forControlEvents:UIControlEventTouchUpInside];
     [self applyTopButtonFeedbackToButton:_settingsBtn];
     [self.view addSubview:_settingsBtn];
@@ -2292,6 +2369,7 @@ static UIImage *MakeIconImage(VCIconType type, CGFloat size, BOOL active) {
     _connectBtn.layer.cornerRadius = btnSize * 0.5f;
     _connectBtn.layer.borderWidth = 2.0f;
     _connectBtn.layer.borderColor = [UIColor colorWithWhite:1.0f alpha:0.95f].CGColor;
+    _connectBtn.autoresizingMask = UIViewAutoresizingFlexibleLeftMargin | UIViewAutoresizingFlexibleRightMargin;
     [_connectBtn setTitleColor:[UIColor whiteColor] forState:UIControlStateNormal];
     [_connectBtn addTarget:self action:@selector(togglePressed) forControlEvents:UIControlEventTouchUpInside];
     [self applyTouchFeedbackToButton:_connectBtn];
@@ -2302,6 +2380,7 @@ static UIImage *MakeIconImage(VCIconType type, CGFloat size, BOOL active) {
     _statusLabel.numberOfLines = 2;
     _statusLabel.text = @"Ready";
     _statusLabel.backgroundColor = [UIColor clearColor];
+    _statusLabel.autoresizingMask = UIViewAutoresizingFlexibleWidth;
     [self.view addSubview:_statusLabel];
 
     CGFloat listY = 242.0f;
@@ -2313,6 +2392,7 @@ static UIImage *MakeIconImage(VCIconType type, CGFloat size, BOOL active) {
     _tableView.delegate = self;
     _tableView.backgroundColor = [UIColor clearColor];
     _tableView.opaque = NO;
+    _tableView.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
     UIView *footer = [[[UIView alloc] initWithFrame:CGRectZero] autorelease];
     footer.backgroundColor = [UIColor clearColor];
     _tableView.tableFooterView = footer;
@@ -2322,6 +2402,7 @@ static UIImage *MakeIconImage(VCIconType type, CGFloat size, BOOL active) {
     _logView.editable = NO;
     _logView.font = [UIFont systemFontOfSize:10.0f];
     _logView.backgroundColor = bg;
+    _logView.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
     _logView.hidden = YES;
     _logView.text = @"Terminal logs";
     _logView.delegate = self;
@@ -2345,18 +2426,31 @@ static UIImage *MakeIconImage(VCIconType type, CGFloat size, BOOL active) {
 }
 
 - (BOOL)shouldAutorotateToInterfaceOrientation:(UIInterfaceOrientation)interfaceOrientation {
+    if (IsPadDevice()) {
+        return UIInterfaceOrientationIsPortrait(interfaceOrientation) || UIInterfaceOrientationIsLandscape(interfaceOrientation);
+    }
     return interfaceOrientation == UIInterfaceOrientationPortrait;
 }
 
 - (BOOL)shouldAutorotate {
-    return NO;
+    return IsPadDevice();
 }
 
 - (NSUInteger)supportedInterfaceOrientations {
+    if (IsPadDevice()) {
+        return UIInterfaceOrientationMaskAllButUpsideDown;
+    }
     return UIInterfaceOrientationMaskPortrait;
 }
 
 - (UIInterfaceOrientation)preferredInterfaceOrientationForPresentation {
+    if (IsPadDevice()) {
+        UIInterfaceOrientation current = CurrentInterfaceOrientation();
+        if (current == UIInterfaceOrientationPortraitUpsideDown) {
+            return UIInterfaceOrientationPortrait;
+        }
+        return current;
+    }
     return UIInterfaceOrientationPortrait;
 }
 
@@ -2692,6 +2786,12 @@ static UIImage *MakeIconImage(VCIconType type, CGFloat size, BOOL active) {
     _window.rootViewController = vc;
     [_window makeKeyAndVisible];
     return YES;
+}
+
+- (NSUInteger)application:(UIApplication *)application supportedInterfaceOrientationsForWindow:(UIWindow *)window {
+    (void)application;
+    (void)window;
+    return IsPadDevice() ? UIInterfaceOrientationMaskAllButUpsideDown : UIInterfaceOrientationMaskPortrait;
 }
 
 - (void)applicationWillTerminate:(UIApplication *)application {
