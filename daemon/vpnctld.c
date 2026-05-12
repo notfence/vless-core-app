@@ -25,7 +25,6 @@ extern int notify_post(const char *name);
 
 typedef enum {
     MODE_NONE = 0,
-    MODE_TUN = 1,
     MODE_IPFW = 2,
     MODE_PF = 3,
 } vpn_mode_t;
@@ -35,11 +34,9 @@ typedef struct {
     int socks_port;
     int redir_port;
     pid_t core_pid;
-    pid_t tun_pid;
     pid_t redsocks_pid;
     vpn_mode_t mode;
     int pf_enabled_before;
-    char gateway[64];
     char server_ip[64];
     char server_ips[512];
 } vpn_state_t;
@@ -47,6 +44,9 @@ typedef struct {
 static vpn_state_t g;
 static const char *kVPNIconStatePath = "/var/mobile/Library/Preferences/com.vlesscore.vpnicon.state";
 static const char *kVPNIconDarwinNotify = "com.vlesscore.vpnicon.changed";
+static const char *kDaemonPortPath = "/var/run/vpnctld.port";
+static const int kDaemonPortDefault = 9093;
+static const int kDaemonPortMax = 9113;
 
 static void stop_pid(pid_t *p);
 
@@ -113,7 +113,6 @@ static int path_exists(const char *path) {
 
 static const char *mode_name(vpn_mode_t mode) {
     switch (mode) {
-        case MODE_TUN: return "tun2socks";
         case MODE_IPFW: return "ipfw+redsocks";
         case MODE_PF: return "pf+redsocks";
         default: return "none";
@@ -171,12 +170,6 @@ static const char *find_redsocks_bin(void) {
 
 static const char *find_vless_core_bin(void) {
     if (can_exec("/usr/bin/vless-core-darwin-amrv7")) return "/usr/bin/vless-core-darwin-amrv7";
-    return NULL;
-}
-
-static const char *find_tun2socks_bin(void) {
-    if (can_exec("/usr/bin/tun2socks-vless-core")) return "/usr/bin/tun2socks-vless-core";
-    if (can_exec("/usr/bin/tun2socks")) return "/usr/bin/tun2socks";
     return NULL;
 }
 
@@ -315,34 +308,6 @@ static int resolve_host_ipv4_all(const char *host, char *first_ip, size_t first_
     return 0;
 }
 
-static int read_default_gateway(char *gw, size_t gw_cap) {
-    FILE *fp = popen("/sbin/route -n get default 2>/dev/null", "r");
-    if (!fp) return -1;
-
-    char line[256];
-    int found = -1;
-    while (fgets(line, sizeof(line), fp)) {
-        char *p = strstr(line, "gateway:");
-        if (!p) continue;
-
-        p += 8;
-        while (*p == ' ' || *p == '\t') p++;
-
-        char *e = p;
-        while (*e && *e != '\n' && *e != ' ' && *e != '\t') e++;
-        *e = '\0';
-
-        if (strlen(p) > 0 && strlen(p) < gw_cap) {
-            snprintf(gw, gw_cap, "%s", p);
-            found = 0;
-            break;
-        }
-    }
-
-    pclose(fp);
-    return found;
-}
-
 static int read_default_interface(char *ifname, size_t ifname_cap) {
     FILE *fp = popen("/sbin/route -n get default 2>/dev/null", "r");
     if (!fp) return -1;
@@ -421,29 +386,6 @@ static int spawn_core(const char *uri, int port, pid_t *pid_out) {
     };
 
     return spawn_logged(core_bin, argv, pid_out);
-}
-
-static int spawn_tun2socks(int socks_port, pid_t *pid_out) {
-    const char *bin = find_tun2socks_bin();
-    if (!bin) return -2;
-
-    char socks[64];
-    snprintf(socks, sizeof(socks), "127.0.0.1:%d", socks_port);
-
-    char *argv[] = {
-        (char *)bin,
-        "--tundev",
-        "tun0",
-        "--netif-ipaddr",
-        "10.233.233.2",
-        "--netif-netmask",
-        "255.255.255.0",
-        "--socks-server-addr",
-        socks,
-        NULL,
-    };
-
-    return spawn_logged(bin, argv, pid_out);
 }
 
 static int write_redsocks_conf(int socks_port, int redir_port, const char *redirector) {
@@ -566,6 +508,53 @@ static void update_vpn_icon_state(int enabled) {
     if (rc != 0) {
         log_msg("notify_post(%s) rc=%d", kVPNIconDarwinNotify, rc);
     }
+}
+
+static void write_daemon_port_file(int port) {
+    int fd = open(kDaemonPortPath, O_WRONLY | O_CREAT | O_TRUNC, 0644);
+    if (fd < 0) {
+        log_msg("cannot write %s errno=%d", kDaemonPortPath, errno);
+        return;
+    }
+
+    char buf[32];
+    int n = snprintf(buf, sizeof(buf), "%d\n", port);
+    if (n > 0) {
+        (void)write(fd, buf, (size_t)n);
+    }
+    close(fd);
+}
+
+static int try_bind_listen(int port, int *lfd_out) {
+    int lfd = socket(AF_INET, SOCK_STREAM, 0);
+    if (lfd < 0) {
+        log_msg("socket() failed errno=%d", errno);
+        return -1;
+    }
+
+    int one = 1;
+    (void)setsockopt(lfd, SOL_SOCKET, SO_REUSEADDR, &one, sizeof(one));
+
+    struct sockaddr_in sa;
+    memset(&sa, 0, sizeof(sa));
+    sa.sin_family = AF_INET;
+    sa.sin_addr.s_addr = inet_addr("127.0.0.1");
+    sa.sin_port = htons((uint16_t)port);
+
+    if (bind(lfd, (struct sockaddr *)&sa, sizeof(sa)) != 0) {
+        log_msg("bind(127.0.0.1:%d) failed errno=%d", port, errno);
+        close(lfd);
+        return -1;
+    }
+
+    if (listen(lfd, 16) != 0) {
+        log_msg("listen(%d) failed errno=%d", port, errno);
+        close(lfd);
+        return -1;
+    }
+
+    *lfd_out = lfd;
+    return 0;
 }
 
 static void stop_pid(pid_t *p) {
@@ -911,31 +900,7 @@ static int apply_ipfw_rules(const char *server_ip, int redir_port, int socks_por
     return 0;
 }
 
-static void cleanup_tun_side(void) {
-    char cmd[256];
-
-    if (strlen(g.gateway) > 0) {
-        snprintf(cmd, sizeof(cmd), "/sbin/route -n delete default >/dev/null 2>&1");
-        run_cmd(cmd);
-
-        snprintf(cmd, sizeof(cmd), "/sbin/route -n add default %s >/dev/null 2>&1", g.gateway);
-        run_cmd(cmd);
-    }
-
-    if (strlen(g.server_ip) > 0) {
-        snprintf(cmd, sizeof(cmd), "/sbin/route -n delete -host %s >/dev/null 2>&1", g.server_ip);
-        run_cmd(cmd);
-    }
-
-    run_cmd("/sbin/ifconfig tun0 down >/dev/null 2>&1");
-    stop_pid(&g.tun_pid);
-}
-
 static void disconnect_all(void) {
-    if (g.mode == MODE_TUN) {
-        cleanup_tun_side();
-    }
-
     if (g.mode == MODE_IPFW) {
         clear_ipfw_rules();
     }
@@ -951,50 +916,6 @@ static void disconnect_all(void) {
 
     memset(&g, 0, sizeof(g));
     update_vpn_icon_state(0);
-}
-
-static int try_connect_tun(int socks_port) {
-    if (!path_exists("/dev/tun0")) return -2;
-    if (!find_tun2socks_bin()) return -3;
-
-    if (read_default_gateway(g.gateway, sizeof(g.gateway)) != 0) {
-        return -4;
-    }
-
-    char cmd[256];
-
-    snprintf(cmd, sizeof(cmd), "/sbin/route -n delete -host %s >/dev/null 2>&1", g.server_ip);
-    run_cmd(cmd);
-
-    snprintf(cmd, sizeof(cmd), "/sbin/route -n add -host %s %s >/dev/null 2>&1", g.server_ip, g.gateway);
-    if (run_cmd(cmd) != 0) {
-        cleanup_tun_side();
-        return -5;
-    }
-
-    if (run_cmd("/sbin/ifconfig tun0 10.233.233.1 10.233.233.2 netmask 255.255.255.0 up >/dev/null 2>&1") != 0) {
-        cleanup_tun_side();
-        return -6;
-    }
-
-    int tun_rc = spawn_tun2socks(socks_port, &g.tun_pid);
-    if (tun_rc != 0) {
-        cleanup_tun_side();
-        return -7;
-    }
-
-    usleep(400000);
-
-    run_cmd("/sbin/route -n delete default >/dev/null 2>&1");
-    if (run_cmd("/sbin/route -n add default 10.233.233.2 >/dev/null 2>&1") != 0) {
-        cleanup_tun_side();
-        return -8;
-    }
-
-    g.mode = MODE_TUN;
-    g.connected = 1;
-    g.socks_port = socks_port;
-    return 0;
 }
 
 static int try_connect_ipfw(int socks_port) {
@@ -1095,13 +1016,6 @@ static int connect_all(const char *uri, int requested_port, char *msg, size_t ms
 
     usleep(500000);
 
-    int tun_rc = try_connect_tun(port);
-    if (tun_rc == 0) {
-        update_vpn_icon_state(1);
-        snprintf(msg, msg_cap, "OK connected mode=%s socks=%d gw=%s", mode_name(g.mode), g.socks_port, g.gateway);
-        return 0;
-    }
-
     int ipfw_rc = try_connect_ipfw(port);
     if (ipfw_rc == 0) {
         update_vpn_icon_state(1);
@@ -1117,7 +1031,7 @@ static int connect_all(const char *uri, int requested_port, char *msg, size_t ms
     }
 
     disconnect_all();
-    snprintf(msg, msg_cap, "ERR no usable full-device backend: tun_rc=%d ipfw_rc=%d pf_rc=%d (see /var/log/vpnctld.log)", tun_rc, ipfw_rc, pf_rc);
+    snprintf(msg, msg_cap, "ERR no usable full-device backend: ipfw_rc=%d pf_rc=%d (see /var/log/vpnctld.log)", ipfw_rc, pf_rc);
     return -1;
 }
 
@@ -1176,29 +1090,25 @@ int main(void) {
     memset(&g, 0, sizeof(g));
     update_vpn_icon_state(0);
 
-    int lfd = socket(AF_INET, SOCK_STREAM, 0);
+    int lfd = -1;
+    int bound_port = 0;
+    for (int port = kDaemonPortDefault; port <= kDaemonPortMax; port++) {
+        if (try_bind_listen(port, &lfd) == 0) {
+            bound_port = port;
+            break;
+        }
+    }
     if (lfd < 0) {
+        log_msg("fatal: cannot bind daemon API port range %d-%d", kDaemonPortDefault, kDaemonPortMax);
         return 1;
     }
 
-    int one = 1;
-    setsockopt(lfd, SOL_SOCKET, SO_REUSEADDR, &one, sizeof(one));
-
-    struct sockaddr_in sa;
-    memset(&sa, 0, sizeof(sa));
-    sa.sin_family = AF_INET;
-    sa.sin_addr.s_addr = inet_addr("127.0.0.1");
-    sa.sin_port = htons(9093);
-
-    if (bind(lfd, (struct sockaddr *)&sa, sizeof(sa)) != 0) {
-        close(lfd);
-        return 1;
+    if (bound_port != kDaemonPortDefault) {
+        log_msg("daemon API moved to fallback port=%d", bound_port);
+    } else {
+        log_msg("daemon API listening on default port=%d", bound_port);
     }
-
-    if (listen(lfd, 16) != 0) {
-        close(lfd);
-        return 1;
-    }
+    write_daemon_port_file(bound_port);
 
     for (;;) {
         int cfd = accept(lfd, NULL, NULL);
@@ -1212,6 +1122,7 @@ int main(void) {
     }
 
     disconnect_all();
+    unlink(kDaemonPortPath);
     close(lfd);
     return 0;
 }

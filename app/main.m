@@ -4,6 +4,7 @@
 #include <sys/socket.h>
 #include <sys/types.h>
 #include <sys/time.h>
+#include <sys/select.h>
 #include <netinet/in.h>
 #include <arpa/inet.h>
 #include <netdb.h>
@@ -16,11 +17,17 @@
 #include <stdio.h>
 #include <signal.h>
 #include <sys/wait.h>
+#include <spawn.h>
+
+extern char **environ;
 
 static NSString *const kDefaultsConfigsKey = @"vlesscore.configs";
 static NSString *const kDefaultsSubsKey = @"vlesscore.subscriptions";
 static NSString *const kDefaultsAutoUpdateSubsKey = @"vlesscore.auto_update_subs";
 static NSString *const kDefaultsSubHWIDKey = @"vlesscore.subscription_hwid";
+static const char *kDaemonPortPath = "/var/run/vpnctld.port";
+static const int kDaemonDefaultPort = 9093;
+static const int kDaemonPortMax = 9113;
 
 typedef NS_ENUM(NSInteger, VCAlertTag) {
     VCAlertTagImportManual = 1001,
@@ -44,42 +51,158 @@ typedef NS_ENUM(NSInteger, VCIconType) {
 };
 
 static int TryBootstrapDaemon(void) {
-    return system("/usr/bin/vpnctld-bootstrap >/dev/null 2>&1");
+    posix_spawn_file_actions_t actions;
+    posix_spawn_file_actions_init(&actions);
+    posix_spawn_file_actions_addopen(&actions, STDOUT_FILENO, "/dev/null", O_WRONLY, 0);
+    posix_spawn_file_actions_addopen(&actions, STDERR_FILENO, "/dev/null", O_WRONLY, 0);
+
+    char *argv[] = {
+        "/usr/bin/vpnctld-bootstrap",
+        NULL
+    };
+
+    pid_t pid = 0;
+    int rc = posix_spawn(&pid, "/usr/bin/vpnctld-bootstrap", &actions, NULL, argv, environ);
+    posix_spawn_file_actions_destroy(&actions);
+    return (rc == 0) ? 0 : -1;
+}
+
+static int ReadDaemonPort(void) {
+    FILE *fp = fopen(kDaemonPortPath, "r");
+    if (!fp) return kDaemonDefaultPort;
+
+    int port = 0;
+    if (fscanf(fp, "%d", &port) != 1 || port <= 0 || port > 65535) {
+        port = kDaemonDefaultPort;
+    }
+    fclose(fp);
+    return port;
+}
+
+static int BuildDaemonPortList(int *ports, int cap) {
+    if (!ports || cap <= 0) return 0;
+
+    int count = 0;
+    int preferred = ReadDaemonPort();
+    if (preferred > 0 && preferred <= 65535) {
+        ports[count++] = preferred;
+    }
+
+    for (int p = kDaemonDefaultPort; p <= kDaemonPortMax && count < cap; p++) {
+        if (p == preferred) continue;
+        ports[count++] = p;
+    }
+    return count;
+}
+
+static int ConnectWithTimeout(int fd, const struct sockaddr *sa, socklen_t sa_len, int timeout_ms) {
+    int flags = fcntl(fd, F_GETFL, 0);
+    if (flags < 0) {
+        return -1;
+    }
+    if (fcntl(fd, F_SETFL, flags | O_NONBLOCK) != 0) {
+        return -1;
+    }
+
+    int rc = connect(fd, sa, sa_len);
+    if (rc == 0) {
+        (void)fcntl(fd, F_SETFL, flags);
+        return 0;
+    }
+    if (errno != EINPROGRESS) {
+        (void)fcntl(fd, F_SETFL, flags);
+        return -1;
+    }
+
+    fd_set wfds;
+    FD_ZERO(&wfds);
+    FD_SET(fd, &wfds);
+
+    struct timeval tv;
+    tv.tv_sec = timeout_ms / 1000;
+    tv.tv_usec = (timeout_ms % 1000) * 1000;
+
+    rc = select(fd + 1, NULL, &wfds, NULL, &tv);
+    if (rc <= 0) {
+        errno = (rc == 0) ? ETIMEDOUT : errno;
+        (void)fcntl(fd, F_SETFL, flags);
+        return -1;
+    }
+
+    int soerr = 0;
+    socklen_t sl = (socklen_t)sizeof(soerr);
+    if (getsockopt(fd, SOL_SOCKET, SO_ERROR, &soerr, &sl) != 0) {
+        (void)fcntl(fd, F_SETFL, flags);
+        return -1;
+    }
+    if (soerr != 0) {
+        errno = soerr;
+        (void)fcntl(fd, F_SETFL, flags);
+        return -1;
+    }
+
+    (void)fcntl(fd, F_SETFL, flags);
+    return 0;
+}
+
+static int OpenDaemonSocket(const struct timeval *rw_tv, int connect_timeout_ms, int *fd_out, int *last_errno_out) {
+    int ports[64];
+    int port_count = BuildDaemonPortList(ports, (int)(sizeof(ports) / sizeof(ports[0])));
+    if (port_count <= 0) {
+        if (last_errno_out) *last_errno_out = EINVAL;
+        return -1;
+    }
+
+    int last_errno = ETIMEDOUT;
+    for (int i = 0; i < port_count; i++) {
+        int fd = socket(AF_INET, SOCK_STREAM, 0);
+        if (fd < 0) {
+            last_errno = errno;
+            continue;
+        }
+
+        setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, rw_tv, sizeof(*rw_tv));
+        setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, rw_tv, sizeof(*rw_tv));
+
+        struct sockaddr_in sa;
+        memset(&sa, 0, sizeof(sa));
+        sa.sin_family = AF_INET;
+        sa.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+        sa.sin_port = htons((uint16_t)ports[i]);
+
+        if (ConnectWithTimeout(fd, (struct sockaddr *)&sa, (socklen_t)sizeof(sa), connect_timeout_ms) == 0) {
+            *fd_out = fd;
+            if (last_errno_out) *last_errno_out = 0;
+            return 0;
+        }
+
+        last_errno = errno;
+        close(fd);
+    }
+
+    if (last_errno_out) *last_errno_out = last_errno;
+    return -1;
 }
 
 static NSString *SendCommand(NSString *cmdLine) {
-    int fd = socket(AF_INET, SOCK_STREAM, 0);
-    if (fd < 0) {
-        return [NSString stringWithFormat:@"socket() failed: %s", strerror(errno)];
-    }
-
     struct timeval tv;
     tv.tv_sec = 5;
     tv.tv_usec = 0;
-    setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
-    setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv));
 
-    struct sockaddr_in sa;
-    memset(&sa, 0, sizeof(sa));
-    sa.sin_family = AF_INET;
-    sa.sin_port = htons(9093);
-    sa.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+    int fd = -1;
+    int last_errno = 0;
+    if (OpenDaemonSocket(&tv, 500, &fd, &last_errno) != 0) {
+        (void)TryBootstrapDaemon();
 
-    if (connect(fd, (struct sockaddr *)&sa, sizeof(sa)) != 0) {
-        close(fd);
-        TryBootstrapDaemon();
-
-        fd = socket(AF_INET, SOCK_STREAM, 0);
-        if (fd < 0) {
-            return [NSString stringWithFormat:@"daemon offline (%s)", strerror(errno)];
+        for (int attempt = 0; attempt < 20; attempt++) {
+            usleep(100 * 1000);
+            if (OpenDaemonSocket(&tv, 400, &fd, &last_errno) == 0) {
+                break;
+            }
         }
-        setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
-        setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv));
 
-        if (connect(fd, (struct sockaddr *)&sa, sizeof(sa)) != 0) {
-            NSString *err = [NSString stringWithFormat:@"daemon offline (%s)", strerror(errno)];
-            close(fd);
-            return err;
+        if (fd < 0) {
+            return [NSString stringWithFormat:@"daemon offline (%s)", strerror(last_errno)];
         }
     }
 

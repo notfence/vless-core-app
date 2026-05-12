@@ -8,31 +8,110 @@
 #include <stdlib.h>
 #include <string.h>
 #include <netinet/in.h>
+#include <sys/select.h>
 #include <sys/socket.h>
 #include <sys/types.h>
 #include <unistd.h>
 
 extern char **environ;
 
-static int daemon_online(void) {
-    int fd = socket(AF_INET, SOCK_STREAM, 0);
-    if (fd < 0) return 0;
+static const char *kDaemonPortPath = "/var/run/vpnctld.port";
+static const int kDaemonDefaultPort = 9093;
+static const int kDaemonPortMax = 9113;
 
-    struct sockaddr_in sa;
-    memset(&sa, 0, sizeof(sa));
-    sa.sin_family = AF_INET;
-    sa.sin_port = htons(9093);
-    sa.sin_addr.s_addr = inet_addr("127.0.0.1");
+static int read_daemon_port(void) {
+    FILE *fp = fopen(kDaemonPortPath, "r");
+    if (!fp) return kDaemonDefaultPort;
 
-    int ok = (connect(fd, (struct sockaddr *)&sa, sizeof(sa)) == 0);
-    close(fd);
-    return ok;
+    int port = 0;
+    if (fscanf(fp, "%d", &port) != 1 || port <= 0 || port > 65535) {
+        port = kDaemonDefaultPort;
+    }
+    fclose(fp);
+    return port;
 }
 
-static int run_cmd(const char *cmd) {
-    int rc = system(cmd);
-    if (rc == -1) return -1;
-    return rc;
+static int build_daemon_port_list(int *ports, int cap) {
+    if (!ports || cap <= 0) return 0;
+
+    int count = 0;
+    int preferred = read_daemon_port();
+    if (preferred > 0 && preferred <= 65535) {
+        ports[count++] = preferred;
+    }
+
+    for (int p = kDaemonDefaultPort; p <= kDaemonPortMax && count < cap; p++) {
+        if (p == preferred) continue;
+        ports[count++] = p;
+    }
+    return count;
+}
+
+static int connect_with_timeout(int fd, const struct sockaddr *sa, socklen_t sa_len, int timeout_ms) {
+    int flags = fcntl(fd, F_GETFL, 0);
+    if (flags < 0) return -1;
+    if (fcntl(fd, F_SETFL, flags | O_NONBLOCK) != 0) return -1;
+
+    int rc = connect(fd, sa, sa_len);
+    if (rc == 0) {
+        (void)fcntl(fd, F_SETFL, flags);
+        return 0;
+    }
+    if (errno != EINPROGRESS) {
+        (void)fcntl(fd, F_SETFL, flags);
+        return -1;
+    }
+
+    fd_set wfds;
+    FD_ZERO(&wfds);
+    FD_SET(fd, &wfds);
+
+    struct timeval tv;
+    tv.tv_sec = timeout_ms / 1000;
+    tv.tv_usec = (timeout_ms % 1000) * 1000;
+
+    rc = select(fd + 1, NULL, &wfds, NULL, &tv);
+    if (rc <= 0) {
+        errno = (rc == 0) ? ETIMEDOUT : errno;
+        (void)fcntl(fd, F_SETFL, flags);
+        return -1;
+    }
+
+    int soerr = 0;
+    socklen_t sl = (socklen_t)sizeof(soerr);
+    if (getsockopt(fd, SOL_SOCKET, SO_ERROR, &soerr, &sl) != 0) {
+        (void)fcntl(fd, F_SETFL, flags);
+        return -1;
+    }
+    if (soerr != 0) {
+        errno = soerr;
+        (void)fcntl(fd, F_SETFL, flags);
+        return -1;
+    }
+
+    (void)fcntl(fd, F_SETFL, flags);
+    return 0;
+}
+
+static int daemon_online(void) {
+    int ports[64];
+    int port_count = build_daemon_port_list(ports, (int)(sizeof(ports) / sizeof(ports[0])));
+
+    for (int i = 0; i < port_count; i++) {
+        int fd = socket(AF_INET, SOCK_STREAM, 0);
+        if (fd < 0) continue;
+
+        struct sockaddr_in sa;
+        memset(&sa, 0, sizeof(sa));
+        sa.sin_family = AF_INET;
+        sa.sin_addr.s_addr = inet_addr("127.0.0.1");
+        sa.sin_port = htons((uint16_t)ports[i]);
+
+        int ok = (connect_with_timeout(fd, (struct sockaddr *)&sa, (socklen_t)sizeof(sa), 300) == 0);
+        close(fd);
+        if (ok) return 1;
+    }
+    return 0;
 }
 
 static int spawn_direct_daemon(void) {
@@ -60,18 +139,12 @@ int main(void) {
         return 0;
     }
 
-    run_cmd("launchctl unload /Library/LaunchDaemons/com.vlesscore.vpnctld.plist >/dev/null 2>&1");
-    run_cmd("launchctl load /Library/LaunchDaemons/com.vlesscore.vpnctld.plist >/dev/null 2>&1");
-    usleep(500000);
-
-    if (daemon_online()) {
-        return 0;
-    }
-
     if (spawn_direct_daemon() == 0) {
-        usleep(500000);
-        if (daemon_online()) {
-            return 0;
+        for (int i = 0; i < 20; i++) {
+            usleep(100000);
+            if (daemon_online()) {
+                return 0;
+            }
         }
     }
 
