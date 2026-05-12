@@ -650,9 +650,17 @@ static NSString *SubscriptionHWID(void) {
     return generated;
 }
 
-static NSData *FetchURLViaVlessCoreCurl(NSString *urlString, NSString **errOut) {
+static void CleanupSubscriptionFetchTempFiles(const char *out_path, const char *err_path, const char *hdr_path) {
+    if (out_path && *out_path) unlink(out_path);
+    if (err_path && *err_path) unlink(err_path);
+    if (hdr_path && *hdr_path) unlink(hdr_path);
+}
+
+static NSData *FetchURLViaVlessCoreCurl(NSString *urlString, NSString **errOut, NSString **headersOut) {
     const char *curl_path = "/usr/bin/vless-core-curl";
     const char *ca_bundle_path = "/usr/share/vless-core/cacert.pem";
+
+    if (headersOut) *headersOut = nil;
 
     if (!urlString || [urlString length] == 0) {
         if (errOut) *errOut = @"Invalid subscription URL";
@@ -689,17 +697,27 @@ static NSData *FetchURLViaVlessCoreCurl(NSString *urlString, NSString **errOut) 
     int err_fd = mkstemp(err_tmpl);
     if (err_fd < 0) {
         close(out_fd);
-        unlink(out_tmpl);
+        CleanupSubscriptionFetchTempFiles(out_tmpl, NULL, NULL);
         if (errOut) *errOut = [NSString stringWithFormat:@"mkstemp(err) failed: %s", strerror(errno)];
         return nil;
     }
+
+    char hdr_tmpl[] = "/tmp/vlesscore-sub-hdr-XXXXXX";
+    int hdr_fd = mkstemp(hdr_tmpl);
+    if (hdr_fd < 0) {
+        close(out_fd);
+        close(err_fd);
+        CleanupSubscriptionFetchTempFiles(out_tmpl, err_tmpl, NULL);
+        if (errOut) *errOut = [NSString stringWithFormat:@"mkstemp(hdr) failed: %s", strerror(errno)];
+        return nil;
+    }
+    close(hdr_fd);
 
     pid_t pid = fork();
     if (pid < 0) {
         close(out_fd);
         close(err_fd);
-        unlink(out_tmpl);
-        unlink(err_tmpl);
+        CleanupSubscriptionFetchTempFiles(out_tmpl, err_tmpl, hdr_tmpl);
         if (errOut) *errOut = [NSString stringWithFormat:@"fork failed: %s", strerror(errno)];
         return nil;
     }
@@ -725,6 +743,7 @@ static NSData *FetchURLViaVlessCoreCurl(NSString *urlString, NSString **errOut) 
                   "--connect-timeout", "10",
                   "--max-time", "25",
                   "--proto", "=https,http",
+                  "-D", hdr_tmpl,
                   "-H", hwid_header,
                   "--cacert", ca_bundle_path,
                   url_c,
@@ -738,6 +757,7 @@ static NSData *FetchURLViaVlessCoreCurl(NSString *urlString, NSString **errOut) 
                   "--connect-timeout", "10",
                   "--max-time", "25",
                   "--proto", "=https,http",
+                  "-D", hdr_tmpl,
                   "--cacert", ca_bundle_path,
                   url_c,
                   (char *)NULL);
@@ -750,6 +770,7 @@ static NSData *FetchURLViaVlessCoreCurl(NSString *urlString, NSString **errOut) 
                   "--connect-timeout", "10",
                   "--max-time", "25",
                   "--proto", "=https,http",
+                  "-D", hdr_tmpl,
                   "-H", hwid_header,
                   url_c,
                   (char *)NULL);
@@ -762,6 +783,7 @@ static NSData *FetchURLViaVlessCoreCurl(NSString *urlString, NSString **errOut) 
                   "--connect-timeout", "10",
                   "--max-time", "25",
                   "--proto", "=https,http",
+                  "-D", hdr_tmpl,
                   url_c,
                   (char *)NULL);
         }
@@ -781,8 +803,7 @@ static NSData *FetchURLViaVlessCoreCurl(NSString *urlString, NSString **errOut) 
             if (errno == EINTR) continue;
             kill(pid, SIGKILL);
             waitpid(pid, &status, 0);
-            unlink(out_tmpl);
-            unlink(err_tmpl);
+            CleanupSubscriptionFetchTempFiles(out_tmpl, err_tmpl, hdr_tmpl);
             if (errOut) *errOut = [NSString stringWithFormat:@"waitpid failed: %s", strerror(errno)];
             return nil;
         }
@@ -790,8 +811,7 @@ static NSData *FetchURLViaVlessCoreCurl(NSString *urlString, NSString **errOut) 
         if (waited_ms >= timeout_ms) {
             kill(pid, SIGKILL);
             waitpid(pid, &status, 0);
-            unlink(out_tmpl);
-            unlink(err_tmpl);
+            CleanupSubscriptionFetchTempFiles(out_tmpl, err_tmpl, hdr_tmpl);
             if (errOut) *errOut = @"vless-core-curl timed out";
             return nil;
         }
@@ -802,14 +822,19 @@ static NSData *FetchURLViaVlessCoreCurl(NSString *urlString, NSString **errOut) 
 
     NSString *out_path = [NSString stringWithUTF8String:out_tmpl];
     NSString *err_path = [NSString stringWithUTF8String:err_tmpl];
+    NSString *hdr_path = [NSString stringWithUTF8String:hdr_tmpl];
     NSData *body = [NSData dataWithContentsOfFile:out_path];
     NSString *curl_err = TrimSimpleString(ReadTextFileBestEffort(err_path));
+    NSString *curl_hdr = ReadTextFileBestEffort(hdr_path);
     if ([curl_err length] > 220) {
         curl_err = [curl_err substringToIndex:220];
     }
 
-    unlink(out_tmpl);
-    unlink(err_tmpl);
+    CleanupSubscriptionFetchTempFiles(out_tmpl, err_tmpl, hdr_tmpl);
+
+    if (headersOut) {
+        *headersOut = curl_hdr;
+    }
 
     if (!WIFEXITED(status) || WEXITSTATUS(status) != 0) {
         if (errOut) {
@@ -1397,6 +1422,171 @@ static UIImage *MakeIconImage(VCIconType type, CGFloat size, BOOL active) {
     return h;
 }
 
+- (NSString *)decodedURLComponent:(NSString *)component {
+    if (![component isKindOfClass:[NSString class]] || [component length] == 0) return @"";
+
+    NSString *fixed = [component stringByReplacingOccurrencesOfString:@"+" withString:@"%20"];
+    NSString *decoded = [fixed stringByReplacingPercentEscapesUsingEncoding:NSUTF8StringEncoding];
+    if (![decoded isKindOfClass:[NSString class]] || [decoded length] == 0) {
+        decoded = fixed;
+    }
+    return [self safeTrim:decoded];
+}
+
+- (NSString *)queryValueForURLString:(NSString *)urlString key:(NSString *)key {
+    if (![urlString isKindOfClass:[NSString class]] || [urlString length] == 0) return nil;
+    if (![key isKindOfClass:[NSString class]] || [key length] == 0) return nil;
+
+    NSRange q = [urlString rangeOfString:@"?"];
+    if (q.location == NSNotFound || q.location + 1 >= [urlString length]) return nil;
+
+    NSString *query = [urlString substringFromIndex:(q.location + 1)];
+    NSRange hash = [query rangeOfString:@"#"];
+    if (hash.location != NSNotFound) {
+        query = [query substringToIndex:hash.location];
+    }
+
+    NSArray *pairs = [query componentsSeparatedByString:@"&"];
+    NSString *wanted = [[self decodedURLComponent:key] lowercaseString];
+    for (NSString *pair in pairs) {
+        if (![pair isKindOfClass:[NSString class]] || [pair length] == 0) continue;
+
+        NSRange eq = [pair rangeOfString:@"="];
+        NSString *rawKey = nil;
+        NSString *rawValue = nil;
+        if (eq.location == NSNotFound) {
+            rawKey = pair;
+            rawValue = @"";
+        } else {
+            rawKey = [pair substringToIndex:eq.location];
+            rawValue = [pair substringFromIndex:(eq.location + 1)];
+        }
+
+        NSString *decodedKey = [[self decodedURLComponent:rawKey] lowercaseString];
+        if (![decodedKey isEqualToString:wanted]) continue;
+
+        NSString *decodedValue = [self decodedURLComponent:rawValue];
+        if ([decodedValue length] > 0) return decodedValue;
+    }
+
+    return nil;
+}
+
+- (NSString *)decodedSubscriptionTitleValue:(NSString *)rawValue {
+    if (![rawValue isKindOfClass:[NSString class]]) return nil;
+
+    NSString *value = [self safeTrim:rawValue];
+    if ([value length] == 0) return nil;
+
+    if ([value hasPrefix:@"\""] && [value hasSuffix:@"\""] && [value length] >= 2) {
+        value = [value substringWithRange:NSMakeRange(1, [value length] - 2)];
+        value = [self safeTrim:value];
+    }
+    if ([value length] == 0) return nil;
+
+    NSString *lower = [value lowercaseString];
+    if ([lower hasPrefix:@"base64:"]) {
+        NSString *b64 = [self safeTrim:[value substringFromIndex:7]];
+        NSData *decoded = DecodeBase64String(b64);
+        if (!decoded || [decoded length] == 0) return nil;
+
+        NSString *txt = [[[NSString alloc] initWithData:decoded encoding:NSUTF8StringEncoding] autorelease];
+        if (!txt) txt = [[[NSString alloc] initWithData:decoded encoding:NSISOLatin1StringEncoding] autorelease];
+        txt = [self safeTrim:txt];
+        return ([txt length] > 0) ? txt : nil;
+    }
+
+    NSString *decoded = [self decodedURLComponent:value];
+    return ([decoded length] > 0) ? decoded : nil;
+}
+
+- (NSString *)subscriptionTitleFromMetadataText:(NSString *)text {
+    if (![text isKindOfClass:[NSString class]] || [text length] == 0) return nil;
+
+    NSArray *lines = [text componentsSeparatedByCharactersInSet:[NSCharacterSet newlineCharacterSet]];
+    NSString *found = nil;
+    for (NSString *line in lines) {
+        if (![line isKindOfClass:[NSString class]]) continue;
+        NSString *trim = [self safeTrim:line];
+        if ([trim length] == 0) continue;
+
+        if ([trim hasPrefix:@"#"]) {
+            trim = [self safeTrim:[trim substringFromIndex:1]];
+            if ([trim length] == 0) continue;
+        }
+
+        NSString *lower = [trim lowercaseString];
+        if (![lower hasPrefix:@"profile-title"]) continue;
+
+        NSRange sep = [trim rangeOfString:@":"];
+        if (sep.location == NSNotFound) {
+            sep = [trim rangeOfString:@"="];
+        }
+        if (sep.location == NSNotFound || sep.location + 1 >= [trim length]) continue;
+
+        NSString *rawValue = [trim substringFromIndex:(sep.location + 1)];
+        NSString *decoded = [self decodedSubscriptionTitleValue:rawValue];
+        if ([decoded length] > 0) {
+            found = decoded;
+        }
+    }
+
+    return found;
+}
+
+- (NSString *)subscriptionTitleFromData:(NSData *)data {
+    if (!data || [data length] == 0) return nil;
+
+    NSString *raw = [[[NSString alloc] initWithData:data encoding:NSUTF8StringEncoding] autorelease];
+    if (!raw) raw = [[[NSString alloc] initWithData:data encoding:NSISOLatin1StringEncoding] autorelease];
+    if (!raw || [raw length] == 0) return nil;
+
+    NSString *title = [self subscriptionTitleFromMetadataText:raw];
+    if ([title length] > 0) return title;
+
+    NSString *b64 = [[raw componentsSeparatedByCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]] componentsJoinedByString:@""];
+    NSData *decoded = DecodeBase64String(b64);
+    if (!decoded || [decoded length] == 0) return nil;
+
+    NSString *decodedText = [[[NSString alloc] initWithData:decoded encoding:NSUTF8StringEncoding] autorelease];
+    if (!decodedText) decodedText = [[[NSString alloc] initWithData:decoded encoding:NSISOLatin1StringEncoding] autorelease];
+    if (!decodedText || [decodedText length] == 0) return nil;
+
+    return [self subscriptionTitleFromMetadataText:decodedText];
+}
+
+- (NSString *)subscriptionTitleFromHTTPHeaders:(NSDictionary *)headers {
+    if (![headers isKindOfClass:[NSDictionary class]]) return nil;
+
+    for (id key in headers) {
+        if (![key isKindOfClass:[NSString class]]) continue;
+        NSString *keyString = [(NSString *)key lowercaseString];
+        if (![keyString isEqualToString:@"profile-title"]) continue;
+
+        id rawHeader = [headers objectForKey:key];
+        if (![rawHeader isKindOfClass:[NSString class]]) continue;
+
+        NSString *decoded = [self decodedSubscriptionTitleValue:(NSString *)rawHeader];
+        if ([decoded length] > 0) return decoded;
+    }
+
+    return nil;
+}
+
+- (NSString *)subscriptionNameFromURLString:(NSString *)urlString {
+    if (![urlString isKindOfClass:[NSString class]] || [urlString length] == 0) {
+        return @"subscription";
+    }
+
+    NSArray *queryKeys = [NSArray arrayWithObjects:@"profile-title", @"title", @"name", @"subname", @"tag", @"remark", nil];
+    for (NSString *key in queryKeys) {
+        NSString *value = [self queryValueForURLString:urlString key:key];
+        if ([value length] > 0) return value;
+    }
+
+    return [self hostFromURLString:urlString];
+}
+
 - (BOOL)isSubscriptionURL:(NSString *)s {
     return [s hasPrefix:@"http://"] || [s hasPrefix:@"https://"];
 }
@@ -1887,9 +2077,16 @@ static UIImage *MakeIconImage(VCIconType type, CGFloat size, BOOL active) {
 
     NSURL *url = [NSURL URLWithString:urlString];
     if (!url) return NO;
+    NSString *nameFromURL = [self subscriptionNameFromURLString:urlString];
+    NSString *hostName = [self hostFromURLString:urlString];
+    NSString *nameFromMeta = nil;
 
     NSString *fetchErr = nil;
-    NSData *data = FetchURLViaVlessCoreCurl(urlString, &fetchErr);
+    NSString *curlHeaders = nil;
+    NSData *data = FetchURLViaVlessCoreCurl(urlString, &fetchErr, &curlHeaders);
+    if ([nameFromMeta length] == 0 && [curlHeaders length] > 0) {
+        nameFromMeta = [self subscriptionTitleFromMetadataText:curlHeaders];
+    }
     if (!data && (!fetchErr || [fetchErr hasPrefix:@"vless-core-curl not found"])) {
         NSMutableURLRequest *req = [NSMutableURLRequest requestWithURL:url
                                                            cachePolicy:NSURLRequestReloadIgnoringLocalCacheData
@@ -1903,6 +2100,9 @@ static UIImage *MakeIconImage(VCIconType type, CGFloat size, BOOL active) {
         data = [NSURLConnection sendSynchronousRequest:req returningResponse:&resp error:&err];
         if (!data || err) {
             fetchErr = [err localizedDescription];
+        } else if ([resp isKindOfClass:[NSHTTPURLResponse class]]) {
+            NSDictionary *headers = [(NSHTTPURLResponse *)resp allHeaderFields];
+            nameFromMeta = [self subscriptionTitleFromHTTPHeaders:headers];
         }
     }
 
@@ -1914,6 +2114,10 @@ static UIImage *MakeIconImage(VCIconType type, CGFloat size, BOOL active) {
             [self showStatus:[NSString stringWithFormat:@"Subscription fetch failed: %@", fetchErr] ok:NO];
         }
         return NO;
+    }
+
+    if ([nameFromMeta length] == 0) {
+        nameFromMeta = [self subscriptionTitleFromData:data];
     }
 
     NSArray *uris = [self parseSubscriptionData:data];
@@ -1928,8 +2132,14 @@ static UIImage *MakeIconImage(VCIconType type, CGFloat size, BOOL active) {
     [updated setObject:uris forKey:@"items"];
 
     NSString *name = [updated objectForKey:@"name"];
-    if (![name isKindOfClass:[NSString class]] || [name length] == 0) {
-        [updated setObject:[self hostFromURLString:urlString] forKey:@"name"];
+    if ([nameFromMeta length] > 0) {
+        [updated setObject:nameFromMeta forKey:@"name"];
+    } else {
+        BOOL missing = (![name isKindOfClass:[NSString class]] || [name length] == 0);
+        BOOL legacyHost = ([name isKindOfClass:[NSString class]] && [name isEqualToString:hostName]);
+        if (missing || legacyHost) {
+            [updated setObject:nameFromURL forKey:@"name"];
+        }
     }
 
     [_subscriptions replaceObjectAtIndex:idx withObject:updated];
@@ -2058,7 +2268,7 @@ static UIImage *MakeIconImage(VCIconType type, CGFloat size, BOOL active) {
 }
 
 - (void)importSubscriptionURL:(NSString *)urlString {
-    NSString *name = [self hostFromURLString:urlString];
+    NSString *name = [self subscriptionNameFromURLString:urlString];
 
     NSDictionary *sub = [NSDictionary dictionaryWithObjectsAndKeys:
                          name, @"name",
@@ -2639,7 +2849,12 @@ static UIImage *MakeIconImage(VCIconType type, CGFloat size, BOOL active) {
             NSUInteger cnt = [items count];
 
             if (isHeader) {
-                cell.textLabel.text = ([name length] > 0) ? name : [self hostFromURLString:url];
+                NSString *shownName = ([name length] > 0) ? name : @"";
+                NSString *host = [self hostFromURLString:url];
+                if ([shownName length] == 0 || [shownName isEqualToString:host]) {
+                    shownName = [self subscriptionNameFromURLString:url];
+                }
+                cell.textLabel.text = shownName;
                 cell.detailTextLabel.text = [NSString stringWithFormat:@"%lu configs • %@", (unsigned long)cnt, url ? url : @""];
                 cell.accessoryView = [self accessoryChevronExpanded:(_expandedSubscription == subIdx)];
             } else {
