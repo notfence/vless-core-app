@@ -43,9 +43,9 @@ Also you can use terminal app to install it:
 
 ```bash
 # on build machine
-scp build/com.vlesscore.app_iphoneos-arm.deb root@<iphone-ip>:/var/root/
+scp build/com.vlesscore.app_iphoneos-arm.deb root@<idevice-ip>:/var/root/
 
-# on iPhone
+# on iDevice
 dpkg -i com.vlesscore.app_iphoneos-arm.deb
 ```
 
