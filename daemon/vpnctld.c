@@ -47,8 +47,19 @@ static const char *kVPNIconDarwinNotify = "com.vlesscore.vpnicon.changed";
 static const char *kDaemonPortPath = "/var/run/vpnctld.port";
 static const int kDaemonPortDefault = 9093;
 static const int kDaemonPortMax = 9113;
+static volatile sig_atomic_t g_terminate = 0;
+static int g_listen_fd = -1;
 
 static void stop_pid(pid_t *p);
+
+static void handle_term_signal(int sig) {
+    (void)sig;
+    g_terminate = 1;
+    if (g_listen_fd >= 0) {
+        close(g_listen_fd);
+        g_listen_fd = -1;
+    }
+}
 
 static void log_msg(const char *fmt, ...) {
     struct timeval tv;
@@ -611,12 +622,14 @@ static int write_pf_conf(const char *server_ips, const char *ifname, int redir_p
             fp,
             "table <vlesscore_bypass> persist { 127.0.0.0/8, 10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16, 224.0.0.0/4, 255.255.255.255/32, %s }\n"
             "rdr pass on lo0 inet proto tcp from any to ! <vlesscore_bypass> -> 127.0.0.1 port %d\n"
+            "pass out quick on %s inet proto tcp from any to any user root keep state\n"
             "pass out quick on %s inet proto tcp from any to <vlesscore_bypass> flags S/SA keep state\n"
             "pass out quick on %s route-to (lo0 127.0.0.1) inet proto tcp from any to ! <vlesscore_bypass> flags S/SA keep state\n"
             "pass out on %s all keep state\n"
             "pass in all keep state\n",
             server_ips,
             redir_port,
+            ifname,
             ifname,
             ifname,
             ifname
@@ -626,12 +639,14 @@ static int write_pf_conf(const char *server_ips, const char *ifname, int redir_p
             fp,
             "table <vlesscore_bypass> persist { 127.0.0.0/8, 10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16, 224.0.0.0/4, 255.255.255.255/32, %s }\n"
             "rdr pass on lo0 inet proto tcp from any to ! <vlesscore_bypass> -> 127.0.0.1 port %d\n"
+            "pass out quick on %s inet proto tcp from any to any user root keep state\n"
             "pass out quick on %s inet proto tcp from any to <vlesscore_bypass> flags S/SA keep state\n"
             "pass out quick on %s route-to (lo0) inet proto tcp from any to ! <vlesscore_bypass> flags S/SA keep state\n"
             "pass out on %s all keep state\n"
             "pass in all keep state\n",
             server_ips,
             redir_port,
+            ifname,
             ifname,
             ifname,
             ifname
@@ -641,11 +656,13 @@ static int write_pf_conf(const char *server_ips, const char *ifname, int redir_p
             fp,
             "set skip on lo0\n"
             "table <vlesscore_bypass> persist { 127.0.0.0/8, 10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16, 224.0.0.0/4, 255.255.255.255/32, %s }\n"
+            "pass out quick on %s inet proto tcp from any to any user root keep state\n"
             "pass out quick on %s inet proto tcp from any to <vlesscore_bypass> flags S/SA keep state\n"
             "pass out quick on %s divert-to 127.0.0.1 port %d inet proto tcp from any to ! <vlesscore_bypass> flags S/SA keep state\n"
             "pass out on %s all keep state\n"
             "pass in all keep state\n",
             server_ips,
+            ifname,
             ifname,
             ifname,
             redir_port,
@@ -656,11 +673,13 @@ static int write_pf_conf(const char *server_ips, const char *ifname, int redir_p
             fp,
             "set skip on lo0\n"
             "table <vlesscore_bypass> persist { 127.0.0.0/8, 10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16, 224.0.0.0/4, 255.255.255.255/32, %s }\n"
+            "pass out quick on %s inet proto tcp from any to any user root keep state\n"
             "pass out quick on %s inet proto tcp from any to <vlesscore_bypass> keep state\n"
             "pass out quick on %s inet proto tcp from any to ! <vlesscore_bypass> divert-to 127.0.0.1 port %d keep state\n"
             "pass out on %s all keep state\n"
             "pass in all keep state\n",
             server_ips,
+            ifname,
             ifname,
             ifname,
             redir_port,
@@ -671,11 +690,13 @@ static int write_pf_conf(const char *server_ips, const char *ifname, int redir_p
             fp,
             "set skip on lo0\n"
             "table <vlesscore_bypass> persist { 127.0.0.0/8, 10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16, 224.0.0.0/4, 255.255.255.255/32, %s }\n"
+            "pass out quick on %s inet proto tcp from any to any user root keep state\n"
             "pass out quick on %s inet proto tcp from any to <vlesscore_bypass> flags S/SA keep state\n"
             "pass out quick on %s inet proto tcp from any to ! <vlesscore_bypass> rdr-to 127.0.0.1 port %d flags S/SA keep state\n"
             "pass out on %s all keep state\n"
             "pass in all keep state\n",
             server_ips,
+            ifname,
             ifname,
             ifname,
             redir_port,
@@ -686,11 +707,13 @@ static int write_pf_conf(const char *server_ips, const char *ifname, int redir_p
             fp,
             "set skip on lo0\n"
             "table <vlesscore_bypass> persist { 127.0.0.0/8, 10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16, 224.0.0.0/4, 255.255.255.255/32, %s }\n"
+            "pass out quick on %s inet proto tcp from any to any user root keep state\n"
             "pass out quick on %s inet proto tcp from any to <vlesscore_bypass> keep state\n"
             "pass out quick on %s inet proto tcp from any to ! <vlesscore_bypass> rdr-to 127.0.0.1 port %d keep state\n"
             "pass out on %s all keep state\n"
             "pass in all keep state\n",
             server_ips,
+            ifname,
             ifname,
             ifname,
             redir_port,
@@ -701,10 +724,12 @@ static int write_pf_conf(const char *server_ips, const char *ifname, int redir_p
             fp,
             "set skip on lo0\n"
             "table <vlesscore_bypass> persist { 127.0.0.0/8, 10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16, 224.0.0.0/4, 255.255.255.255/32, %s }\n"
+            "pass out quick on %s inet proto tcp from any to any user root keep state\n"
             "rdr pass on %s inet proto tcp from any to ! <vlesscore_bypass> -> 127.0.0.1 port %d\n"
             "pass out all keep state\n"
             "pass in all keep state\n",
             server_ips,
+            ifname,
             ifname,
             redir_port
         );
@@ -1086,6 +1111,14 @@ static void handle_client(int cfd) {
 }
 
 int main(void) {
+    struct sigaction sa;
+    memset(&sa, 0, sizeof(sa));
+    sa.sa_handler = handle_term_signal;
+    sigemptyset(&sa.sa_mask);
+    (void)sigaction(SIGTERM, &sa, NULL);
+    (void)sigaction(SIGINT, &sa, NULL);
+    (void)sigaction(SIGHUP, &sa, NULL);
+
     signal(SIGPIPE, SIG_IGN);
     memset(&g, 0, sizeof(g));
     update_vpn_icon_state(0);
@@ -1102,6 +1135,7 @@ int main(void) {
         log_msg("fatal: cannot bind daemon API port range %d-%d", kDaemonPortDefault, kDaemonPortMax);
         return 1;
     }
+    g_listen_fd = lfd;
 
     if (bound_port != kDaemonPortDefault) {
         log_msg("daemon API moved to fallback port=%d", bound_port);
@@ -1111,9 +1145,11 @@ int main(void) {
     write_daemon_port_file(bound_port);
 
     for (;;) {
+        if (g_terminate) break;
+
         int cfd = accept(lfd, NULL, NULL);
         if (cfd < 0) {
-            if (errno == EINTR) continue;
+            if (errno == EINTR && !g_terminate) continue;
             break;
         }
 
@@ -1123,6 +1159,9 @@ int main(void) {
 
     disconnect_all();
     unlink(kDaemonPortPath);
-    close(lfd);
+    if (lfd >= 0) {
+        close(lfd);
+    }
+    g_listen_fd = -1;
     return 0;
 }
