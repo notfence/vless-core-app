@@ -1,6 +1,6 @@
 Package: com.vlesscore.app
 Name: vless-core
-Version: 0.3.0-1
+Version: 0.3.1-1
 Architecture: iphoneos-arm
 Description: Full-device VLESS routing app
 Maintainer: notfence
