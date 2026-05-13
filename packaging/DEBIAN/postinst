@@ -1,9 +1,9 @@
 #!/bin/sh
 set -e
 
-fw_ver="$(dpkg-query -W -f='${Version}' firmware 2>/dev/null || true)"
+fw_ver="$(sw_vers -productVersion 2>/dev/null || true)"
 if [ -z "$fw_ver" ]; then
-  fw_ver="$(sw_vers -productVersion 2>/dev/null || true)"
+  fw_ver="$(dpkg-query -W -f='${Version}' firmware 2>/dev/null || true)"
 fi
 fw_major="${fw_ver%%.*}"
 case "$fw_major" in
@@ -43,9 +43,14 @@ if id mobile >/dev/null 2>&1; then
 fi
 sync >/dev/null 2>&1 || true
 if [ "$fw_major" -lt 7 ]; then
-  sbreload >/dev/null 2>&1 || true
-  launchctl stop com.apple.SpringBoard >/dev/null 2>&1 || true
-  ##killall backboardd >/dev/null 2>&1 || true
-  killall -9 SpringBoard >/dev/null 2>&1 || true
+  if killall -0 Cydia >/dev/null 2>&1; then
+    echo "Cydia is running; skip automatic respring to avoid half-configured package state." || true
+    echo "Please respring manually after closing Cydia." || true
+  else
+    sbreload >/dev/null 2>&1 || true
+    launchctl stop com.apple.SpringBoard >/dev/null 2>&1 || true
+    ##killall backboardd >/dev/null 2>&1 || true
+    killall -9 SpringBoard >/dev/null 2>&1 || true
+  fi
 fi
 exit 0
