@@ -107,9 +107,35 @@ static int daemon_online(void) {
         sa.sin_addr.s_addr = inet_addr("127.0.0.1");
         sa.sin_port = htons((uint16_t)ports[i]);
 
-        int ok = (connect_with_timeout(fd, (struct sockaddr *)&sa, (socklen_t)sizeof(sa), 300) == 0);
+        if (connect_with_timeout(fd, (struct sockaddr *)&sa, (socklen_t)sizeof(sa), 300) != 0) {
+            close(fd);
+            continue;
+        }
+
+        struct timeval tv;
+        tv.tv_sec = 1;
+        tv.tv_usec = 0;
+        (void)setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
+        (void)setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv));
+
+        const char probe[] = "STATUS\n";
+        ssize_t wr = write(fd, probe, (size_t)(sizeof(probe) - 1));
+        if (wr < 0) {
+            close(fd);
+            continue;
+        }
+
+        char reply[64];
+        ssize_t rd = read(fd, reply, sizeof(reply) - 1);
         close(fd);
-        if (ok) return 1;
+        if (rd <= 0) {
+            continue;
+        }
+
+        reply[rd] = '\0';
+        if (strncmp(reply, "OK ", 3) == 0) {
+            return 1;
+        }
     }
     return 0;
 }

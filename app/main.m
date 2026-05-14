@@ -169,7 +169,80 @@ static int ConnectWithTimeout(int fd, const struct sockaddr *sa, socklen_t sa_le
     return 0;
 }
 
-static int OpenDaemonSocket(const struct timeval *rw_tv, int connect_timeout_ms, int *fd_out, int *last_errno_out) {
+static int OpenDaemonSocketForPort(int port, const struct timeval *rw_tv, int connect_timeout_ms, int *fd_out, int *last_errno_out) {
+    if (port <= 0 || port > 65535) {
+        if (last_errno_out) *last_errno_out = EINVAL;
+        return -1;
+    }
+
+    int fd = socket(AF_INET, SOCK_STREAM, 0);
+    if (fd < 0) {
+        if (last_errno_out) *last_errno_out = errno;
+        return -1;
+    }
+
+    setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, rw_tv, sizeof(*rw_tv));
+    setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, rw_tv, sizeof(*rw_tv));
+
+    struct sockaddr_in sa;
+    memset(&sa, 0, sizeof(sa));
+    sa.sin_family = AF_INET;
+    sa.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+    sa.sin_port = htons((uint16_t)port);
+
+    if (ConnectWithTimeout(fd, (struct sockaddr *)&sa, (socklen_t)sizeof(sa), connect_timeout_ms) == 0) {
+        *fd_out = fd;
+        if (last_errno_out) *last_errno_out = 0;
+        return 0;
+    }
+
+    if (last_errno_out) *last_errno_out = errno;
+    close(fd);
+    return -1;
+}
+
+static int ProbeDaemonPort(int port, int connect_timeout_ms, int io_timeout_ms, int *last_errno_out) {
+    struct timeval tv;
+    tv.tv_sec = io_timeout_ms / 1000;
+    tv.tv_usec = (io_timeout_ms % 1000) * 1000;
+
+    int fd = -1;
+    int last_errno = 0;
+    if (OpenDaemonSocketForPort(port, &tv, connect_timeout_ms, &fd, &last_errno) != 0 || fd < 0) {
+        if (last_errno_out) *last_errno_out = last_errno;
+        return -1;
+    }
+
+    const char probe[] = "STATUS\n";
+    ssize_t wr = write(fd, probe, (size_t)(sizeof(probe) - 1));
+    if (wr < 0) {
+        last_errno = errno;
+        close(fd);
+        if (last_errno_out) *last_errno_out = last_errno;
+        return -1;
+    }
+
+    char buf[64];
+    ssize_t rd = read(fd, buf, sizeof(buf) - 1);
+    if (rd <= 0) {
+        last_errno = (rd < 0) ? errno : ECONNRESET;
+        close(fd);
+        if (last_errno_out) *last_errno_out = last_errno;
+        return -1;
+    }
+
+    buf[rd] = '\0';
+    close(fd);
+    if (strncmp(buf, "OK ", 3) == 0) {
+        if (last_errno_out) *last_errno_out = 0;
+        return 0;
+    }
+
+    if (last_errno_out) *last_errno_out = EPROTO;
+    return -1;
+}
+
+static int FindResponsiveDaemonPort(int connect_timeout_ms, int io_timeout_ms, int *port_out, int *last_errno_out) {
     int ports[64];
     int port_count = BuildDaemonPortList(ports, (int)(sizeof(ports) / sizeof(ports[0])));
     if (port_count <= 0) {
@@ -179,73 +252,96 @@ static int OpenDaemonSocket(const struct timeval *rw_tv, int connect_timeout_ms,
 
     int last_errno = ETIMEDOUT;
     for (int i = 0; i < port_count; i++) {
-        int fd = socket(AF_INET, SOCK_STREAM, 0);
-        if (fd < 0) {
-            last_errno = errno;
-            continue;
-        }
-
-        setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, rw_tv, sizeof(*rw_tv));
-        setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, rw_tv, sizeof(*rw_tv));
-
-        struct sockaddr_in sa;
-        memset(&sa, 0, sizeof(sa));
-        sa.sin_family = AF_INET;
-        sa.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
-        sa.sin_port = htons((uint16_t)ports[i]);
-
-        if (ConnectWithTimeout(fd, (struct sockaddr *)&sa, (socklen_t)sizeof(sa), connect_timeout_ms) == 0) {
-            *fd_out = fd;
+        if (ProbeDaemonPort(ports[i], connect_timeout_ms, io_timeout_ms, &last_errno) == 0) {
+            *port_out = ports[i];
             if (last_errno_out) *last_errno_out = 0;
             return 0;
         }
-
-        last_errno = errno;
-        close(fd);
     }
 
     if (last_errno_out) *last_errno_out = last_errno;
     return -1;
 }
 
-static NSString *SendCommand(NSString *cmdLine) {
-    struct timeval tv;
-    tv.tv_sec = 5;
-    tv.tv_usec = 0;
-
+static ssize_t SendRawCommandToPort(int port, NSData *outData, const struct timeval *rw_tv, int connect_timeout_ms, char *buf, size_t buf_cap, int *last_errno_out) {
     int fd = -1;
     int last_errno = 0;
-    if (OpenDaemonSocket(&tv, 500, &fd, &last_errno) != 0) {
-        (void)TryBootstrapDaemon();
+    if (OpenDaemonSocketForPort(port, rw_tv, connect_timeout_ms, &fd, &last_errno) != 0 || fd < 0) {
+        if (last_errno_out) *last_errno_out = last_errno;
+        return -1;
+    }
 
-        for (int attempt = 0; attempt < 20; attempt++) {
-            usleep(100 * 1000);
-            if (OpenDaemonSocket(&tv, 400, &fd, &last_errno) == 0) {
+    ssize_t wr = write(fd, [outData bytes], [outData length]);
+    if (wr < 0) {
+        last_errno = errno;
+        close(fd);
+        if (last_errno_out) *last_errno_out = last_errno;
+        return -1;
+    }
+
+    ssize_t rd = read(fd, buf, buf_cap - 1);
+    if (rd <= 0) {
+        last_errno = (rd < 0) ? errno : ECONNRESET;
+        close(fd);
+        if (last_errno_out) *last_errno_out = last_errno;
+        return -1;
+    }
+
+    buf[rd] = '\0';
+    close(fd);
+    if (last_errno_out) *last_errno_out = 0;
+    return rd;
+}
+
+static NSString *SendCommand(NSString *cmdLine) {
+    BOOL isConnectCommand = [cmdLine hasPrefix:@"CONNECT\t"];
+
+    struct timeval cmd_tv;
+    cmd_tv.tv_sec = isConnectCommand ? 8 : 2;
+    cmd_tv.tv_usec = 0;
+
+    NSData *outData = [cmdLine dataUsingEncoding:NSUTF8StringEncoding];
+    int last_errno = 0;
+    NSString *last_io_error = nil;
+
+    for (int phase = 0; phase < 2; phase++) {
+        if (phase == 1) {
+            (void)TryBootstrapDaemon();
+        }
+
+        int port = -1;
+        int ready_attempts = (phase == 1) ? 10 : 1;
+        for (int attempt = 0; attempt < ready_attempts; attempt++) {
+            if (FindResponsiveDaemonPort(250, 300, &port, &last_errno) == 0 && port > 0) {
                 break;
+            }
+            if (attempt + 1 < ready_attempts) {
+                usleep(120 * 1000);
             }
         }
 
-        if (fd < 0) {
-            return [NSString stringWithFormat:@"daemon offline (%s)", strerror(last_errno)];
+        if (port <= 0) {
+            continue;
         }
+
+        char buf[2048];
+        ssize_t rd = SendRawCommandToPort(port, outData, &cmd_tv, 500, buf, sizeof(buf), &last_errno);
+        if (rd > 0) {
+            return [NSString stringWithUTF8String:buf];
+        }
+
+        last_io_error = (last_errno == EPIPE || last_errno == ECONNRESET) ?
+            @"no response from daemon" :
+            [NSString stringWithFormat:@"write/read failed: %s", strerror(last_errno)];
     }
 
-    NSData *outData = [cmdLine dataUsingEncoding:NSUTF8StringEncoding];
-    ssize_t wr = write(fd, [outData bytes], [outData length]);
-    if (wr < 0) {
-        NSString *err = [NSString stringWithFormat:@"write failed: %s", strerror(errno)];
-        close(fd);
-        return err;
+    if (last_io_error) {
+        return last_io_error;
     }
-
-    char buf[2048];
-    ssize_t rd = read(fd, buf, sizeof(buf) - 1);
-    close(fd);
-    if (rd <= 0) {
-        return @"no response from daemon";
+    if (last_errno == 0) {
+        last_errno = ECONNREFUSED;
     }
-    buf[rd] = '\0';
-    return [NSString stringWithUTF8String:buf];
+    return [NSString stringWithFormat:@"daemon offline (%s)", strerror(last_errno)];
 }
 
 static int ConnectLatencyMs(const char *host, uint16_t port, int timeout_ms, int *latency_ms) {
@@ -2579,17 +2675,27 @@ static UIImage *MakeIconImage(VCIconType type, CGFloat size, BOOL active) {
 }
 
 - (void)queryInitialStatus {
-    NSString *resp = [self sanitizeDaemonText:SendCommand(@"STATUS\n")];
-    if ([resp hasPrefix:@"OK connected"]) {
-        _connected = YES;
-        [self startUptimeTimer];
-        [self showStatus:@"Connected" ok:YES];
-    } else {
-        _connected = NO;
-        [self stopUptimeTimer];
-        [self showStatus:@"Ready" ok:YES];
-    }
-    [self updateConnectButton];
+    [self showStatus:@"Checking daemon..." ok:YES];
+
+    dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_DEFAULT, 0), ^{
+        NSAutoreleasePool *pool = [[NSAutoreleasePool alloc] init];
+        NSString *resp = [self sanitizeDaemonText:SendCommand(@"STATUS\n")];
+        BOOL connectedNow = [resp hasPrefix:@"OK connected"];
+
+        dispatch_async(dispatch_get_main_queue(), ^{
+            if (connectedNow) {
+                _connected = YES;
+                [self startUptimeTimer];
+                [self showStatus:@"Connected" ok:YES];
+            } else {
+                _connected = NO;
+                [self stopUptimeTimer];
+                [self showStatus:@"Ready" ok:YES];
+            }
+            [self updateConnectButton];
+        });
+        [pool drain];
+    });
 }
 
 - (void)viewDidLoad {
