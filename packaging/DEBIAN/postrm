@@ -1,0 +1,30 @@
+#!/bin/sh
+set -e
+
+fw_ver="$(sw_vers -productVersion 2>/dev/null || true)"
+if [ -z "$fw_ver" ]; then
+  fw_ver="$(dpkg-query -W -f='${Version}' firmware 2>/dev/null || true)"
+fi
+fw_major="${fw_ver%%.*}"
+case "$fw_major" in
+  ''|*[!0-9]*) fw_major=0 ;;
+esac
+
+case "$1" in
+  remove|purge)
+    if [ "$fw_major" -lt 7 ]; then
+      if [ -z "${CYDIA:-}" ]; then
+        ( sleep 2; killall SpringBoard >/dev/null 2>&1 || true ) &
+      fi
+    elif [ -z "${CYDIA:-}" ]; then
+      echo "Running uicache for package removal..."
+      uicache -p /Applications/vless-core.app >/dev/null 2>&1 || uicache >/dev/null 2>&1 || true
+      if id mobile >/dev/null 2>&1; then
+        su mobile -c "uicache -p /Applications/vless-core.app" >/dev/null 2>&1 || \
+        su mobile -c "uicache" >/dev/null 2>&1 || true
+      fi
+    fi
+    ;;
+esac
+
+exit 0

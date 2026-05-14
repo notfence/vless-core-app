@@ -116,7 +116,9 @@ package-root: check-package-inputs $(APP_BIN) $(DAEMON_BIN) $(BOOTSTRAP_BIN) $(V
 	chmod 755 $(PKG_ROOT)/usr/bin/vless-core-curl
 	chmod 755 $(PKG_ROOT)/usr/bin/redsocks-vless-core
 	chmod 755 $(PKG_ROOT)/Library/MobileSubstrate/DynamicLibraries/vlesscorevpnicon.dylib
-	chmod 755 $(PKG_ROOT)/DEBIAN/postinst $(PKG_ROOT)/DEBIAN/prerm
+	for script in preinst postinst prerm postrm; do \
+		[ -f "$(PKG_ROOT)/DEBIAN/$$script" ] && chmod 755 "$(PKG_ROOT)/DEBIAN/$$script" || true; \
+	done
 	$(LDID) -S $(PKG_ROOT)/Applications/vless-core.app/vless-core
 	$(LDID) -S $(PKG_ROOT)/usr/bin/vpnctld
 	$(LDID) -S $(PKG_ROOT)/usr/bin/vpnctld-bootstrap

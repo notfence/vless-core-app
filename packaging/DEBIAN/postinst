@@ -10,6 +10,16 @@ case "$fw_major" in
   ''|*[!0-9]*) fw_major=0 ;;
 esac
 
+finish() {
+  f="$1"
+  [ -z "$f" ] || [ -z "${CYDIA:-}" ] && return
+  read -r fd ver <<EOT
+$CYDIA
+EOT
+  [ "$ver" -ge 1 ] || return
+  echo "finish:${f}" >&"$fd"
+}
+
 chown -R root:wheel /Applications/vless-core.app || true
 chown root:wheel /Library/LaunchDaemons/com.vlesscore.vpnctld.plist || true
 chown root:wheel /usr/bin/vpnctld-bootstrap || true
@@ -43,14 +53,12 @@ if id mobile >/dev/null 2>&1; then
 fi
 sync >/dev/null 2>&1 || true
 if [ "$fw_major" -lt 7 ]; then
-  if killall -0 Cydia >/dev/null 2>&1; then
-    echo "Cydia is running; skip automatic respring to avoid half-configured package state." || true
-    echo "Please respring manually after closing Cydia." || true
+  if [ -n "${CYDIA:-}" ]; then
+    finish restart
   else
-    sbreload >/dev/null 2>&1 || true
-    launchctl stop com.apple.SpringBoard >/dev/null 2>&1 || true
-    ##killall backboardd >/dev/null 2>&1 || true
-    killall -9 SpringBoard >/dev/null 2>&1 || true
+    echo "non-Cydia installation detected"
+    echo "respring stage..."
+    ( sleep 2; killall SpringBoard >/dev/null 2>&1 || true ) &
   fi
 fi
 exit 0
