@@ -18,9 +18,7 @@
 | Device | OS | Status |
 | --- | --- | --- |
 | iPad 2 | iOS 6.1.3 | Works fine |
-| iPhone 5 | iOS 8.4.1 | Works, but has UI bugs |
-| iPhone 5 | iOS 10.3.3 | Not working: after install, SpringBoard crashes into Safe Mode |
-| iPad 2 | iOS 9.3.5 | Not working: no response from daemon |
+| iPhone 4s | iOS 6.1.3 | Works fine |
 
 see [Issues](https://github.com/notfence/vless-core-app/issues) page for current bug list
 
@@ -35,8 +33,10 @@ see [Issues](https://github.com/notfence/vless-core-app/issues) page for current
 3. In iFile, find the `.deb`, tap it, and press `Install`.
 4. Device should respring.
 
-Also you can use terminal app to install it: 
-`dpkg -i com.vlesscore.app_iphoneos-arm.deb`
+Also you can use terminal app to install it:
+```bash
+dpkg -i com.vlesscore.app_iphoneos-arm.deb
+```
 
 ### Install your own build via SSH (scp + dpkg)
 
@@ -47,6 +47,14 @@ scp build/com.vlesscore.app_iphoneos-arm.deb root@<idevice-ip>:/var/root/
 
 # on iDevice
 dpkg -i com.vlesscore.app_iphoneos-arm.deb
+```
+## Uninstall
+### Uninstall via Cydia
+Just go to Cydia and remove it like usual tweak
+### Uninstall via terminal/SSH
+Execute this command:
+```bash 
+dpkg -r com.vlesscore.app
 ```
 
 ## Supported Protocols
