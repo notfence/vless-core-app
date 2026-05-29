@@ -74,6 +74,15 @@ typedef NS_ENUM(NSInteger, VCIconType) {
     VCIconTypeList = 9,
 };
 
+static NSInteger const kVCSettingsTitleMarqueeTag = 7400;
+static NSInteger const kVCSettingsDetailMarqueeTag = 7401;
+static NSInteger const kVCMainDetailContainerTag = 7410;
+static NSInteger const kVCMainDetailPrefixTag = 7411;
+static NSInteger const kVCMainDetailTailTag = 7412;
+static CGFloat const kVCDetailMarqueeGap = 4.0f;
+static NSTimeInterval const kVCMarqueePauseSeconds = 1.0;
+static CGFloat const kVCMarqueePixelsPerSecond = 28.0f;
+
 static int TryBootstrapDaemon(void) {
     posix_spawn_file_actions_t actions;
     posix_spawn_file_actions_init(&actions);
@@ -1262,6 +1271,209 @@ static UIImage *MakeIconImage(VCIconType type, CGFloat size, BOOL active) {
     return img;
 }
 
+@interface VCMarqueeLabel : UIView {
+    UILabel *_label;
+    NSString *_text;
+    NSTimer *_startTimer;
+    NSTimer *_endPauseTimer;
+    CGFloat _overflowWidth;
+    CGSize _lastBoundsSize;
+    BOOL _needsRefresh;
+}
+@property (nonatomic, copy) NSString *text;
+@property (nonatomic, retain) UIFont *font;
+@property (nonatomic, retain) UIColor *textColor;
+- (void)stopMarquee;
+- (void)restartMarquee;
+@end
+
+@implementation VCMarqueeLabel
+@synthesize text = _text;
+
+- (id)initWithFrame:(CGRect)frame {
+    self = [super initWithFrame:frame];
+    if (!self) return nil;
+
+    self.clipsToBounds = YES;
+    self.backgroundColor = [UIColor clearColor];
+
+    _label = [[UILabel alloc] initWithFrame:CGRectZero];
+    _label.backgroundColor = [UIColor clearColor];
+    _label.textColor = [UIColor grayColor];
+    _label.font = [UIFont systemFontOfSize:11.0f];
+    _label.numberOfLines = 1;
+    _label.lineBreakMode = NSLineBreakByClipping;
+    [self addSubview:_label];
+
+    _overflowWidth = 0.0f;
+    _lastBoundsSize = CGSizeZero;
+    _needsRefresh = YES;
+    return self;
+}
+
+- (void)dealloc {
+    [self stopMarquee];
+    [_text release];
+    [_label release];
+    [super dealloc];
+}
+
+- (void)invalidateTimer:(NSTimer **)timerPtr {
+    if (!timerPtr) return;
+    NSTimer *timer = *timerPtr;
+    if (timer) {
+        [timer invalidate];
+        [timer release];
+        *timerPtr = nil;
+    }
+}
+
+- (void)scheduleTimer:(NSTimer **)timerPtr selector:(SEL)selector after:(NSTimeInterval)seconds {
+    [self invalidateTimer:timerPtr];
+    NSTimer *timer = [NSTimer timerWithTimeInterval:seconds
+                                             target:self
+                                           selector:selector
+                                           userInfo:nil
+                                            repeats:NO];
+    [[NSRunLoop mainRunLoop] addTimer:timer forMode:NSRunLoopCommonModes];
+    *timerPtr = [timer retain];
+}
+
+- (CGFloat)textWidthForCurrentText {
+    if (![_text isKindOfClass:[NSString class]] || [_text length] == 0) return 0.0f;
+    UIFont *font = (_label.font ? _label.font : [UIFont systemFontOfSize:11.0f]);
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wdeprecated-declarations"
+    CGSize sz = [_text sizeWithFont:font];
+#pragma clang diagnostic pop
+    return ceilf(sz.width);
+}
+
+- (void)resetToStartAndPause {
+    [self invalidateTimer:&_endPauseTimer];
+    if (_overflowWidth <= 0.5f || !self.window) return;
+    CGRect f = _label.frame;
+    f.origin.x = 0.0f;
+    _label.frame = f;
+    [self scheduleTimer:&_startTimer selector:@selector(startScrollStep) after:kVCMarqueePauseSeconds];
+}
+
+- (void)startScrollStep {
+    [self invalidateTimer:&_startTimer];
+    if (_overflowWidth <= 0.5f || !self.window) return;
+
+    CGFloat duration = _overflowWidth / kVCMarqueePixelsPerSecond;
+    if (duration < 0.35f) duration = 0.35f;
+
+    [UIView animateWithDuration:duration
+                          delay:0.0
+                        options:UIViewAnimationOptionCurveLinear | UIViewAnimationOptionBeginFromCurrentState
+                     animations:^{
+                         CGRect f = _label.frame;
+                         f.origin.x = -_overflowWidth;
+                         _label.frame = f;
+                     }
+                     completion:^(BOOL finished) {
+                         if (!finished) return;
+                         [self scheduleTimer:&_endPauseTimer
+                                     selector:@selector(resetToStartAndPause)
+                                        after:kVCMarqueePauseSeconds];
+                     }];
+}
+
+- (void)refreshMarqueeIfNeeded:(BOOL)force {
+    CGSize b = self.bounds.size;
+    if (!force && !_needsRefresh && fabsf((float)(b.width - _lastBoundsSize.width)) < 0.5f &&
+        fabsf((float)(b.height - _lastBoundsSize.height)) < 0.5f) {
+        return;
+    }
+
+    _lastBoundsSize = b;
+    _needsRefresh = NO;
+    [self stopMarquee];
+    _label.text = (_text ? _text : @"");
+
+    CGFloat viewW = b.width;
+    CGFloat viewH = b.height;
+    if (viewW < 1.0f || viewH < 1.0f) {
+        _label.frame = CGRectMake(0, 0, 0, 0);
+        return;
+    }
+
+    CGFloat textW = [self textWidthForCurrentText];
+    if (textW < 1.0f) textW = viewW;
+
+    _overflowWidth = textW - viewW;
+    if (_overflowWidth <= 0.5f) {
+        _overflowWidth = 0.0f;
+        _label.frame = CGRectMake(0, 0, viewW, viewH);
+        return;
+    }
+
+    _label.frame = CGRectMake(0, 0, textW, viewH);
+    [self scheduleTimer:&_startTimer selector:@selector(startScrollStep) after:kVCMarqueePauseSeconds];
+}
+
+- (void)setText:(NSString *)text {
+    if (_text == text || [_text isEqualToString:text]) {
+        _needsRefresh = YES;
+        [self refreshMarqueeIfNeeded:YES];
+        return;
+    }
+    [_text release];
+    _text = [text copy];
+    _needsRefresh = YES;
+    [self refreshMarqueeIfNeeded:YES];
+}
+
+- (UIFont *)font {
+    return _label.font;
+}
+
+- (void)setFont:(UIFont *)font {
+    if ((_label.font == font) || [_label.font isEqual:font]) return;
+    _label.font = font;
+    _needsRefresh = YES;
+    [self refreshMarqueeIfNeeded:YES];
+}
+
+- (UIColor *)textColor {
+    return _label.textColor;
+}
+
+- (void)setTextColor:(UIColor *)textColor {
+    if ((_label.textColor == textColor) || [_label.textColor isEqual:textColor]) return;
+    _label.textColor = textColor;
+}
+
+- (void)layoutSubviews {
+    [super layoutSubviews];
+    [self refreshMarqueeIfNeeded:NO];
+}
+
+- (void)didMoveToWindow {
+    [super didMoveToWindow];
+    if (self.window) {
+        _needsRefresh = YES;
+        [self refreshMarqueeIfNeeded:YES];
+    } else {
+        [self stopMarquee];
+    }
+}
+
+- (void)stopMarquee {
+    [self invalidateTimer:&_startTimer];
+    [self invalidateTimer:&_endPauseTimer];
+    [_label.layer removeAllAnimations];
+}
+
+- (void)restartMarquee {
+    _needsRefresh = YES;
+    [self refreshMarqueeIfNeeded:YES];
+}
+
+@end
+
 @class SettingsVC;
 @protocol SettingsVCDelegate <NSObject>
 - (void)settingsVC:(SettingsVC *)vc didChangeAutoUpdate:(BOOL)enabled;
@@ -1349,6 +1561,98 @@ static UIImage *MakeIconImage(VCIconType type, CGFloat size, BOOL active) {
     return (section == 0) ? @"Subscriptions" : @"About";
 }
 
+- (VCMarqueeLabel *)settingsMarqueeForCell:(UITableViewCell *)cell
+                                        tag:(NSInteger)tag
+                              createIfNeeded:(BOOL)createIfNeeded {
+    if (!cell) return nil;
+    VCMarqueeLabel *marquee = (VCMarqueeLabel *)[cell.contentView viewWithTag:tag];
+    if (!marquee && createIfNeeded) {
+        marquee = [[[VCMarqueeLabel alloc] initWithFrame:CGRectZero] autorelease];
+        marquee.tag = tag;
+        marquee.userInteractionEnabled = NO;
+        marquee.backgroundColor = [UIColor clearColor];
+        [cell.contentView addSubview:marquee];
+    }
+    return marquee;
+}
+
+- (void)applySettingsMarqueesToCell:(UITableViewCell *)cell
+                               title:(NSString *)title
+                              detail:(NSString *)detail {
+    if (!cell) return;
+    NSString *titleText = ([title isKindOfClass:[NSString class]] ? title : @"");
+    NSString *detailText = ([detail isKindOfClass:[NSString class]] ? detail : @"");
+    UIColor *titleColor = [UIColor blackColor];
+    UIColor *detailColor = [UIColor grayColor];
+
+    cell.textLabel.textColor = titleColor;
+    cell.detailTextLabel.textColor = detailColor;
+    cell.textLabel.text = titleText;
+    cell.detailTextLabel.text = detailText;
+    [cell setNeedsLayout];
+    [cell layoutIfNeeded];
+
+    VCMarqueeLabel *titleMarquee = [self settingsMarqueeForCell:cell tag:kVCSettingsTitleMarqueeTag createIfNeeded:YES];
+    if ([titleText length] > 0) {
+        titleMarquee.hidden = NO;
+        titleMarquee.frame = cell.textLabel.frame;
+        titleMarquee.font = cell.textLabel.font;
+        titleMarquee.textColor = titleColor;
+        titleMarquee.text = titleText;
+        cell.textLabel.textColor = [UIColor clearColor];
+    } else {
+        [titleMarquee stopMarquee];
+        titleMarquee.text = @"";
+        titleMarquee.hidden = YES;
+    }
+
+    VCMarqueeLabel *detailMarquee = [self settingsMarqueeForCell:cell tag:kVCSettingsDetailMarqueeTag createIfNeeded:YES];
+    if ([detailText length] > 0) {
+        detailMarquee.hidden = NO;
+        detailMarquee.frame = cell.detailTextLabel.frame;
+        detailMarquee.font = cell.detailTextLabel.font;
+        detailMarquee.textColor = detailColor;
+        detailMarquee.text = detailText;
+        cell.detailTextLabel.textColor = [UIColor clearColor];
+    } else {
+        [detailMarquee stopMarquee];
+        detailMarquee.text = @"";
+        detailMarquee.hidden = YES;
+    }
+}
+
+- (NSString *)settingsTitleTextForIndexPath:(NSIndexPath *)indexPath {
+    if (indexPath.section == 0 && indexPath.row == 0) {
+        return @"Auto-update subscriptions";
+    }
+    if (indexPath.section == 0 && indexPath.row == 1) {
+        return @"Stealth mode";
+    }
+    if (indexPath.section == 1 && indexPath.row == 0) {
+        return @"About vless-core";
+    }
+    if (indexPath.section == 1 && indexPath.row == 1) {
+        return @"Project on GitHub";
+    }
+    return @"";
+}
+
+- (NSString *)settingsDetailTextForIndexPath:(NSIndexPath *)indexPath {
+    if (indexPath.section == 0 && indexPath.row == 0) {
+        return @"Refresh subscriptions on app open";
+    }
+    if (indexPath.section == 0 && indexPath.row == 1) {
+        return @"Hide links in configs and subscriptions";
+    }
+    if (indexPath.section == 1 && indexPath.row == 0) {
+        return @"Version and core binary info";
+    }
+    if (indexPath.section == 1 && indexPath.row == 1) {
+        return @"github.com/notfence/vless-core-app";
+    }
+    return @"";
+}
+
 - (UITableViewCell *)tableView:(UITableView *)tableView cellForRowAtIndexPath:(NSIndexPath *)indexPath {
     if (indexPath.section == 0 && indexPath.row == 0) {
         static NSString *kSwitchCellId = @"SettingsSwitchCell";
@@ -1356,11 +1660,12 @@ static UIImage *MakeIconImage(VCIconType type, CGFloat size, BOOL active) {
         if (!cell) {
             cell = [[[UITableViewCell alloc] initWithStyle:UITableViewCellStyleSubtitle reuseIdentifier:kSwitchCellId] autorelease];
         }
-        cell.textLabel.text = @"Auto-update subscriptions";
-        cell.detailTextLabel.text = @"Refresh subscriptions on app open";
         cell.selectionStyle = UITableViewCellSelectionStyleNone;
         [_autoUpdateSwitch setOn:_autoUpdate animated:NO];
         cell.accessoryView = _autoUpdateSwitch;
+        [self applySettingsMarqueesToCell:cell
+                                    title:@"Auto-update subscriptions"
+                                   detail:@"Refresh subscriptions on app open"];
         return cell;
     }
 
@@ -1370,11 +1675,12 @@ static UIImage *MakeIconImage(VCIconType type, CGFloat size, BOOL active) {
         if (!cell) {
             cell = [[[UITableViewCell alloc] initWithStyle:UITableViewCellStyleSubtitle reuseIdentifier:kStealthCellId] autorelease];
         }
-        cell.textLabel.text = @"Stealth mode";
-        cell.detailTextLabel.text = @"Hide links in configs and subscriptions";
         cell.selectionStyle = UITableViewCellSelectionStyleNone;
         [_stealthSwitch setOn:_stealthMode animated:NO];
         cell.accessoryView = _stealthSwitch;
+        [self applySettingsMarqueesToCell:cell
+                                    title:@"Stealth mode"
+                                   detail:@"Hide links in configs and subscriptions"];
         return cell;
     }
 
@@ -1384,10 +1690,11 @@ static UIImage *MakeIconImage(VCIconType type, CGFloat size, BOOL active) {
         if (!cell) {
             cell = [[[UITableViewCell alloc] initWithStyle:UITableViewCellStyleSubtitle reuseIdentifier:kAboutCellId] autorelease];
         }
-        cell.textLabel.text = @"About vless-core";
-        cell.detailTextLabel.text = @"Version and core binary info";
         cell.selectionStyle = UITableViewCellSelectionStyleBlue;
         cell.accessoryType = UITableViewCellAccessoryDisclosureIndicator;
+        [self applySettingsMarqueesToCell:cell
+                                    title:@"About vless-core"
+                                   detail:@"Version and core binary info"];
         return cell;
     }
 
@@ -1396,11 +1703,19 @@ static UIImage *MakeIconImage(VCIconType type, CGFloat size, BOOL active) {
     if (!cell) {
         cell = [[[UITableViewCell alloc] initWithStyle:UITableViewCellStyleSubtitle reuseIdentifier:kGitHubCellId] autorelease];
     }
-    cell.textLabel.text = @"Project on GitHub";
-    cell.detailTextLabel.text = @"github.com/notfence/vless-core-app";
     cell.selectionStyle = UITableViewCellSelectionStyleBlue;
     cell.accessoryType = UITableViewCellAccessoryDisclosureIndicator;
+    [self applySettingsMarqueesToCell:cell
+                                title:@"Project on GitHub"
+                               detail:@"github.com/notfence/vless-core-app"];
     return cell;
+}
+
+- (void)tableView:(UITableView *)tableView willDisplayCell:(UITableViewCell *)cell forRowAtIndexPath:(NSIndexPath *)indexPath {
+    (void)tableView;
+    [self applySettingsMarqueesToCell:cell
+                                title:[self settingsTitleTextForIndexPath:indexPath]
+                               detail:[self settingsDetailTextForIndexPath:indexPath]];
 }
 
 - (void)tableView:(UITableView *)tableView didSelectRowAtIndexPath:(NSIndexPath *)indexPath {
@@ -1502,6 +1817,7 @@ static UIImage *MakeIconImage(VCIconType type, CGFloat size, BOOL active) {
     BOOL _autoUpdateSubscriptions;
     BOOL _stealthModeEnabled;
     BOOL _didRunLaunchAutoUpdate;
+    BOOL _queuedMainMarqueeRelayout;
 }
 @end
 
@@ -2023,12 +2339,235 @@ static UIImage *MakeIconImage(VCIconType type, CGFloat size, BOOL active) {
 }
 
 - (NSString *)configSecondaryTextFromURI:(NSString *)uri {
+    NSString *prefix = [self configPrefixTextFromURI:uri];
+    NSString *endpoint = [self configEndpointTextFromURI:uri];
+    if ([prefix length] == 0) return endpoint;
+    if ([endpoint length] == 0) return prefix;
+    return [NSString stringWithFormat:@"%@ %@", prefix, endpoint];
+}
+
+- (NSString *)configPrefixTextFromURI:(NSString *)uri {
     NSString *scheme = [self schemeFromURIString:uri];
     NSString *transport = [self transportTypeFromURI:uri];
     NSString *security = [self securityTypeFromURI:uri];
+    return [NSString stringWithFormat:@"[%@/%@/%@]", scheme, transport, security];
+}
+
+- (NSString *)configEndpointTextFromURI:(NSString *)uri {
     NSString *endpoint = [self endpointFromConfigURI:uri];
-    NSString *shownEndpoint = [self maskedLinkText:endpoint];
-    return [NSString stringWithFormat:@"[%@/%@/%@] %@", scheme, transport, security, shownEndpoint];
+    return [self maskedLinkText:endpoint];
+}
+
+- (UIView *)mainDetailContainerForCell:(UITableViewCell *)cell createIfNeeded:(BOOL)createIfNeeded {
+    if (!cell) return nil;
+    UIView *container = [cell.contentView viewWithTag:kVCMainDetailContainerTag];
+    if (!container && createIfNeeded) {
+        container = [[[UIView alloc] initWithFrame:CGRectZero] autorelease];
+        container.tag = kVCMainDetailContainerTag;
+        container.backgroundColor = [UIColor clearColor];
+        container.userInteractionEnabled = NO;
+        container.clipsToBounds = YES;
+        [cell.contentView addSubview:container];
+    }
+    return container;
+}
+
+- (UILabel *)mainDetailPrefixLabelForContainer:(UIView *)container createIfNeeded:(BOOL)createIfNeeded {
+    if (!container) return nil;
+    UILabel *label = (UILabel *)[container viewWithTag:kVCMainDetailPrefixTag];
+    if (!label && createIfNeeded) {
+        label = [[[UILabel alloc] initWithFrame:CGRectZero] autorelease];
+        label.tag = kVCMainDetailPrefixTag;
+        label.backgroundColor = [UIColor clearColor];
+        label.numberOfLines = 1;
+        label.lineBreakMode = NSLineBreakByClipping;
+        [container addSubview:label];
+    }
+    return label;
+}
+
+- (VCMarqueeLabel *)mainDetailTailMarqueeForContainer:(UIView *)container createIfNeeded:(BOOL)createIfNeeded {
+    if (!container) return nil;
+    VCMarqueeLabel *marquee = (VCMarqueeLabel *)[container viewWithTag:kVCMainDetailTailTag];
+    if (!marquee && createIfNeeded) {
+        marquee = [[[VCMarqueeLabel alloc] initWithFrame:CGRectZero] autorelease];
+        marquee.tag = kVCMainDetailTailTag;
+        marquee.backgroundColor = [UIColor clearColor];
+        marquee.userInteractionEnabled = NO;
+        [container addSubview:marquee];
+    }
+    return marquee;
+}
+
+- (CGRect)mainDetailContentFrameForCell:(UITableViewCell *)cell {
+    if (!cell) return CGRectZero;
+    [cell setNeedsLayout];
+    [cell layoutIfNeeded];
+
+    CGRect contentBounds = cell.contentView.bounds;
+    CGFloat contentW = CGRectGetWidth(contentBounds);
+    CGFloat contentH = CGRectGetHeight(contentBounds);
+    if (contentW < 1.0f || contentH < 1.0f) return CGRectZero;
+
+    CGRect titleFrame = cell.textLabel.frame;
+    CGRect legacyDetailFrame = cell.detailTextLabel.frame;
+
+    CGFloat left = titleFrame.origin.x;
+    if (left < 6.0f) {
+        left = legacyDetailFrame.origin.x;
+    }
+    if (left < 6.0f) {
+        left = 10.0f;
+    }
+
+    CGFloat top = CGRectGetMaxY(titleFrame) + 1.0f;
+    if (top < 1.0f || top > contentH - 6.0f) {
+        top = legacyDetailFrame.origin.y;
+    }
+    if (top < 1.0f) {
+        top = 24.0f;
+    }
+
+    CGFloat right = contentW - 10.0f;
+    if (cell.accessoryView && !cell.accessoryView.hidden) {
+        CGRect accessoryFrame = cell.accessoryView.frame;
+        if (CGRectGetWidth(accessoryFrame) > 1.0f && CGRectGetMinX(accessoryFrame) > 1.0f) {
+            right = MIN(right, CGRectGetMinX(accessoryFrame) - 8.0f);
+        }
+    }
+    if (right < left + 12.0f) {
+        right = left + 12.0f;
+    }
+
+    CGFloat height = contentH - top - 2.0f;
+    if (legacyDetailFrame.size.height > 0.0f) {
+        height = MAX(height, legacyDetailFrame.size.height);
+    }
+    if (top + height > contentH) {
+        height = contentH - top;
+    }
+    if (height < 10.0f) {
+        height = 14.0f;
+        if (top + height > contentH) {
+            top = MAX(0.0f, contentH - height);
+        }
+    }
+
+    return CGRectMake(left, top, right - left, height);
+}
+
+- (void)clearDetailMarqueeForCell:(UITableViewCell *)cell {
+    UIView *container = [self mainDetailContainerForCell:cell createIfNeeded:NO];
+    if (!container) return;
+
+    UILabel *prefixLabel = [self mainDetailPrefixLabelForContainer:container createIfNeeded:NO];
+    VCMarqueeLabel *tailMarquee = [self mainDetailTailMarqueeForContainer:container createIfNeeded:NO];
+    if (tailMarquee) {
+        [tailMarquee stopMarquee];
+        tailMarquee.text = @"";
+        tailMarquee.hidden = YES;
+    }
+    if (prefixLabel) {
+        prefixLabel.text = @"";
+        prefixLabel.hidden = YES;
+    }
+    container.hidden = YES;
+}
+
+- (void)applyDetailPrefix:(NSString *)prefix marqueeTail:(NSString *)tail toCell:(UITableViewCell *)cell {
+    if (!cell) return;
+
+    NSString *prefixText = ([prefix isKindOfClass:[NSString class]] ? prefix : @"");
+    NSString *tailText = ([tail isKindOfClass:[NSString class]] ? tail : @"");
+    UIColor *detailColor = [UIColor grayColor];
+    UIFont *detailFont = cell.detailTextLabel.font;
+    if (!detailFont) detailFont = [UIFont systemFontOfSize:11.0f];
+
+    // Keep subtitle geometry stable: non-empty detail preserves UIKit two-line layout metrics.
+    BOOL hasDetail = ([prefixText length] > 0 || [tailText length] > 0);
+    cell.detailTextLabel.text = hasDetail ? @" " : @"";
+    cell.detailTextLabel.textColor = [UIColor clearColor];
+
+    if ([prefixText length] == 0 && [tailText length] == 0) {
+        [self clearDetailMarqueeForCell:cell];
+        return;
+    }
+
+    UIView *container = [self mainDetailContainerForCell:cell createIfNeeded:YES];
+    CGRect containerFrame = [self mainDetailContentFrameForCell:cell];
+    if (CGRectGetWidth(containerFrame) < 8.0f || CGRectGetHeight(containerFrame) < 8.0f) {
+        [self clearDetailMarqueeForCell:cell];
+        return;
+    }
+
+    container.hidden = NO;
+    container.frame = containerFrame;
+
+    UILabel *prefixLabel = [self mainDetailPrefixLabelForContainer:container createIfNeeded:YES];
+    VCMarqueeLabel *tailMarquee = [self mainDetailTailMarqueeForContainer:container createIfNeeded:YES];
+    CGFloat lineH = CGRectGetHeight(container.bounds);
+    CGFloat lineW = CGRectGetWidth(container.bounds);
+
+    prefixLabel.font = detailFont;
+    prefixLabel.textColor = detailColor;
+    prefixLabel.backgroundColor = [UIColor clearColor];
+
+    tailMarquee.font = detailFont;
+    tailMarquee.textColor = detailColor;
+    tailMarquee.backgroundColor = [UIColor clearColor];
+
+    if ([tailText length] == 0) {
+        [tailMarquee stopMarquee];
+        tailMarquee.text = @"";
+        tailMarquee.hidden = YES;
+
+        prefixLabel.hidden = NO;
+        prefixLabel.text = prefixText;
+        prefixLabel.frame = CGRectMake(0.0f, 0.0f, lineW, lineH);
+        return;
+    }
+
+    if ([prefixText length] == 0) {
+        prefixLabel.hidden = YES;
+        prefixLabel.text = @"";
+        prefixLabel.frame = CGRectMake(0.0f, 0.0f, 0.0f, lineH);
+
+        tailMarquee.hidden = NO;
+        tailMarquee.frame = CGRectMake(0.0f, 0.0f, lineW, lineH);
+        tailMarquee.text = tailText;
+        return;
+    }
+
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wdeprecated-declarations"
+    CGSize prefixSize = [prefixText sizeWithFont:detailFont];
+#pragma clang diagnostic pop
+
+    CGFloat prefixWidth = ceilf(prefixSize.width);
+    CGFloat maxPrefixWidth = lineW - 16.0f;
+    if (maxPrefixWidth < 8.0f) maxPrefixWidth = lineW;
+    if (prefixWidth > maxPrefixWidth) prefixWidth = maxPrefixWidth;
+    if (prefixWidth < 0.0f) prefixWidth = 0.0f;
+
+    CGFloat tailX = prefixWidth + kVCDetailMarqueeGap;
+    CGFloat tailWidth = lineW - tailX;
+    if (tailWidth < 8.0f) {
+        prefixLabel.hidden = NO;
+        prefixLabel.text = [NSString stringWithFormat:@"%@ %@", prefixText, tailText];
+        prefixLabel.frame = CGRectMake(0.0f, 0.0f, lineW, lineH);
+        [tailMarquee stopMarquee];
+        tailMarquee.text = @"";
+        tailMarquee.hidden = YES;
+        return;
+    }
+
+    prefixLabel.hidden = NO;
+    prefixLabel.text = prefixText;
+    prefixLabel.frame = CGRectMake(0.0f, 0.0f, prefixWidth, lineH);
+
+    tailMarquee.hidden = NO;
+    tailMarquee.frame = CGRectMake(tailX, 0.0f, tailWidth, lineH);
+    tailMarquee.text = tailText;
 }
 
 - (BOOL)isXHTTPTransportURI:(NSString *)uri {
@@ -3068,6 +3607,71 @@ static UIImage *MakeIconImage(VCIconType type, CGFloat size, BOOL active) {
     [self showStatus:@"Subscription config deleted" ok:YES];
 }
 
+- (void)applyMarqueeDetailForMainCell:(UITableViewCell *)cell atIndexPath:(NSIndexPath *)indexPath {
+    if (!cell || !indexPath) return;
+
+    if (indexPath.section == 0) {
+        if (indexPath.row < 0 || indexPath.row >= (NSInteger)[_configs count]) {
+            [self applyDetailPrefix:@"" marqueeTail:@"" toCell:cell];
+            return;
+        }
+        NSDictionary *cfg = [_configs objectAtIndex:indexPath.row];
+        NSString *uri = [cfg objectForKey:@"uri"];
+        NSString *prefix = [self configPrefixTextFromURI:uri];
+        NSString *tail = [self configEndpointTextFromURI:uri];
+        [self applyDetailPrefix:prefix marqueeTail:tail toCell:cell];
+        return;
+    }
+
+    NSInteger subIdx = -1;
+    NSInteger itemIdx = -1;
+    BOOL isHeader = YES;
+    if (![self mapSubscriptionRow:indexPath.row toSubIndex:&subIdx itemIndex:&itemIdx isHeader:&isHeader]) {
+        [self applyDetailPrefix:@"" marqueeTail:@"" toCell:cell];
+        return;
+    }
+
+    NSDictionary *sub = [_subscriptions objectAtIndex:subIdx];
+    if (isHeader) {
+        NSArray *items = [self subscriptionItemsAtIndex:subIdx];
+        NSString *url = [sub objectForKey:@"url"];
+        NSString *shownURL = [self maskedLinkText:(url ? url : @"")];
+        NSString *prefix = [NSString stringWithFormat:@"%lu configs •", (unsigned long)[items count]];
+        [self applyDetailPrefix:prefix marqueeTail:shownURL toCell:cell];
+        return;
+    }
+
+    NSArray *items = [self subscriptionItemsAtIndex:subIdx];
+    if (itemIdx < 0 || itemIdx >= (NSInteger)[items count]) {
+        [self applyDetailPrefix:@"" marqueeTail:@"" toCell:cell];
+        return;
+    }
+
+    NSString *uri = [items objectAtIndex:itemIdx];
+    NSString *prefix = [self configPrefixTextFromURI:uri];
+    NSString *tail = [self configEndpointTextFromURI:uri];
+    [self applyDetailPrefix:prefix marqueeTail:tail toCell:cell];
+}
+
+- (void)runQueuedMainMarqueeRelayout {
+    _queuedMainMarqueeRelayout = NO;
+    if (!_tableView || _showingTerminal) return;
+
+    NSArray *visible = [_tableView indexPathsForVisibleRows];
+    for (NSIndexPath *ip in visible) {
+        UITableViewCell *visibleCell = [_tableView cellForRowAtIndexPath:ip];
+        if (visibleCell) {
+            [self applyMarqueeDetailForMainCell:visibleCell atIndexPath:ip];
+        }
+    }
+}
+
+- (void)scheduleMainMarqueeRelayout {
+    if (_queuedMainMarqueeRelayout) return;
+    _queuedMainMarqueeRelayout = YES;
+    [self performSelector:@selector(runQueuedMainMarqueeRelayout) withObject:nil afterDelay:0.0];
+}
+
 - (UITableViewCell *)tableView:(UITableView *)tableView cellForRowAtIndexPath:(NSIndexPath *)indexPath {
     static NSString *kCellId = @"VCItemCell";
     UITableViewCell *cell = [tableView dequeueReusableCellWithIdentifier:kCellId];
@@ -3077,6 +3681,8 @@ static UIImage *MakeIconImage(VCIconType type, CGFloat size, BOOL active) {
         cell.detailTextLabel.font = [UIFont systemFontOfSize:11.0f];
         cell.detailTextLabel.textColor = [UIColor grayColor];
     }
+    cell.clipsToBounds = YES;
+    cell.contentView.clipsToBounds = YES;
     cell.indentationLevel = 0;
     cell.indentationWidth = 14.0f;
     cell.accessoryType = UITableViewCellAccessoryNone;
@@ -3086,10 +3692,8 @@ static UIImage *MakeIconImage(VCIconType type, CGFloat size, BOOL active) {
     if (indexPath.section == 0) {
         NSDictionary *cfg = [_configs objectAtIndex:indexPath.row];
         NSString *name = [cfg objectForKey:@"name"];
-        NSString *uri = [cfg objectForKey:@"uri"];
         NSString *shownConfigName = ([name length] > 0) ? name : [NSString stringWithFormat:@"Config %ld", (long)(indexPath.row + 1)];
         cell.textLabel.text = [self maskedLinkText:shownConfigName];
-        cell.detailTextLabel.text = [self configSecondaryTextFromURI:uri];
         cell.accessoryView = [self accessoryPingWithTag:(10000 + indexPath.row) selected:(_selectedConfigIndex == indexPath.row)];
     } else {
         NSInteger subIdx = -1;
@@ -3100,7 +3704,6 @@ static UIImage *MakeIconImage(VCIconType type, CGFloat size, BOOL active) {
             NSString *name = [sub objectForKey:@"name"];
             NSString *url = [sub objectForKey:@"url"];
             NSArray *items = [self subscriptionItemsAtIndex:subIdx];
-            NSUInteger cnt = [items count];
 
             if (isHeader) {
                 NSString *shownName = ([name length] > 0) ? name : @"";
@@ -3109,27 +3712,43 @@ static UIImage *MakeIconImage(VCIconType type, CGFloat size, BOOL active) {
                     shownName = [self subscriptionNameFromURLString:url];
                 }
                 shownName = [self maskedLinkText:shownName];
-                NSString *shownURL = [self maskedLinkText:(url ? url : @"")];
                 cell.textLabel.text = shownName;
-                cell.detailTextLabel.text = [NSString stringWithFormat:@"%lu configs • %@", (unsigned long)cnt, shownURL];
                 cell.accessoryView = [self accessoryChevronExpanded:(_expandedSubscription == subIdx)];
             } else {
                 NSString *uri = [items objectAtIndex:itemIdx];
                 cell.indentationLevel = 0;
                 NSString *itemName = [self displayNameForURI:uri index:itemIdx];
                 cell.textLabel.text = [self maskedLinkText:itemName];
-                cell.detailTextLabel.text = [self configSecondaryTextFromURI:uri];
                 NSInteger tag = 20000 + (subIdx * 1000) + itemIdx;
                 BOOL selected = (_selectedSubIndex == subIdx && _selectedSubItemIndex == itemIdx);
                 cell.accessoryView = [self accessoryPingWithTag:tag selected:selected];
             }
         } else {
             cell.textLabel.text = @"(invalid row)";
-            cell.detailTextLabel.text = @"";
         }
     }
 
+    [self applyMarqueeDetailForMainCell:cell atIndexPath:indexPath];
+    [self scheduleMainMarqueeRelayout];
     return cell;
+}
+
+- (void)tableView:(UITableView *)tableView willDisplayCell:(UITableViewCell *)cell forRowAtIndexPath:(NSIndexPath *)indexPath {
+    (void)tableView;
+    [self applyMarqueeDetailForMainCell:cell atIndexPath:indexPath];
+    [self scheduleMainMarqueeRelayout];
+}
+
+- (void)scrollViewDidEndDecelerating:(UIScrollView *)scrollView {
+    if (scrollView == _tableView) {
+        [self scheduleMainMarqueeRelayout];
+    }
+}
+
+- (void)scrollViewDidEndDragging:(UIScrollView *)scrollView willDecelerate:(BOOL)decelerate {
+    if (scrollView == _tableView && !decelerate) {
+        [self scheduleMainMarqueeRelayout];
+    }
 }
 
 - (void)tableView:(UITableView *)tableView didSelectRowAtIndexPath:(NSIndexPath *)indexPath {
