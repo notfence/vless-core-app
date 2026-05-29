@@ -1497,6 +1497,51 @@ static UIImage *MakeIconImage(VCIconType type, CGFloat size, BOOL active) {
 @interface SettingsNavController : UINavigationController
 @end
 
+@interface FAQVC : UIViewController {
+    UITextView *_textView;
+}
+@end
+
+@implementation FAQVC
+
+- (void)dealloc {
+    [_textView release];
+    [super dealloc];
+}
+
+- (void)viewDidLoad {
+    [super viewDidLoad];
+    self.title = @"FAQ";
+    self.view.backgroundColor = [UIColor colorWithWhite:0.97f alpha:1.0f];
+
+    _textView = [[UITextView alloc] initWithFrame:self.view.bounds];
+    _textView.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
+    _textView.editable = NO;
+    _textView.backgroundColor = [UIColor clearColor];
+    _textView.textColor = [UIColor colorWithWhite:0.12f alpha:1.0f];
+    _textView.font = [UIFont systemFontOfSize:15.0f];
+    _textView.alwaysBounceVertical = YES;
+    _textView.text =
+        @"Q: Why can't I connect?\n"
+        @"A: Most failures come from an unsupported configuration tuple, wrong server parameters, or a server that is offline. "
+        @"This app currently allows only [vless/tcp/reality] and [vless/xhttp/tls]. Recheck the link, server details, and network reachability.\n\n"
+        @"Q: Why isn't the subscription added?\n"
+        @"A: The app accepts only direct vless:// links or http(s) subscription URLs that return valid vless:// entries. "
+        @"If your provider blocks requests, redirects heavily, or returns an empty list, import will fail.\n\n"
+        @"Q: Which protocols are supported?\n"
+        @"A: VLESS links are supported. For now, supported transport/security sets are tcp+reality and xhttp+tls. "
+        @"Other tuples are blocked on purpose to prevent broken connections.\n\n"
+        @"Q: Why are some protocol tuples marked in red?\n"
+        @"A: Red means the tuple is not supported by the app right now. "
+        @"This warning is shown to help you avoid failed connection attempts.\n\n"
+        @"Q: Up to which iOS version is the app supported?\n"
+        @"A: This package targets legacy 32-bit iOS devices (minimum iOS 6.0). "
+        @"It should work up to iOS 10. 64-bit unsupported";
+    [self.view addSubview:_textView];
+}
+
+@end
+
 @implementation SettingsVC
 @synthesize autoUpdate = _autoUpdate;
 @synthesize stealthMode = _stealthMode;
@@ -1553,7 +1598,7 @@ static UIImage *MakeIconImage(VCIconType type, CGFloat size, BOOL active) {
 
 - (NSInteger)tableView:(UITableView *)tableView numberOfRowsInSection:(NSInteger)section {
     (void)tableView;
-    return (section == 0) ? 2 : 2;
+    return (section == 0) ? 2 : 3;
 }
 
 - (NSString *)tableView:(UITableView *)tableView titleForHeaderInSection:(NSInteger)section {
@@ -1632,6 +1677,9 @@ static UIImage *MakeIconImage(VCIconType type, CGFloat size, BOOL active) {
         return @"About vless-core";
     }
     if (indexPath.section == 1 && indexPath.row == 1) {
+        return @"FAQ";
+    }
+    if (indexPath.section == 1 && indexPath.row == 2) {
         return @"Project on GitHub";
     }
     return @"";
@@ -1648,6 +1696,9 @@ static UIImage *MakeIconImage(VCIconType type, CGFloat size, BOOL active) {
         return @"Version and core binary info";
     }
     if (indexPath.section == 1 && indexPath.row == 1) {
+        return @"Common questions and quick answers";
+    }
+    if (indexPath.section == 1 && indexPath.row == 2) {
         return @"github.com/notfence/vless-core-app";
     }
     return @"";
@@ -1698,6 +1749,20 @@ static UIImage *MakeIconImage(VCIconType type, CGFloat size, BOOL active) {
         return cell;
     }
 
+    if (indexPath.row == 1) {
+        static NSString *kFAQCellId = @"SettingsFAQCell";
+        UITableViewCell *cell = [tableView dequeueReusableCellWithIdentifier:kFAQCellId];
+        if (!cell) {
+            cell = [[[UITableViewCell alloc] initWithStyle:UITableViewCellStyleSubtitle reuseIdentifier:kFAQCellId] autorelease];
+        }
+        cell.selectionStyle = UITableViewCellSelectionStyleBlue;
+        cell.accessoryType = UITableViewCellAccessoryDisclosureIndicator;
+        [self applySettingsMarqueesToCell:cell
+                                    title:@"FAQ"
+                                   detail:@"Common questions and quick answers"];
+        return cell;
+    }
+
     static NSString *kGitHubCellId = @"SettingsGitHubCell";
     UITableViewCell *cell = [tableView dequeueReusableCellWithIdentifier:kGitHubCellId];
     if (!cell) {
@@ -1724,6 +1789,9 @@ static UIImage *MakeIconImage(VCIconType type, CGFloat size, BOOL active) {
             if ([_delegate respondsToSelector:@selector(settingsVCDidRequestAbout:)]) {
                 [_delegate settingsVCDidRequestAbout:self];
             }
+        } else if (indexPath.row == 1) {
+            FAQVC *faq = [[[FAQVC alloc] init] autorelease];
+            [self.navigationController pushViewController:faq animated:YES];
         } else {
             NSURL *url = [NSURL URLWithString:@"https://github.com/notfence/vless-core-app"];
             if (url) {
