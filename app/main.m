@@ -1811,12 +1811,14 @@ static UIImage *MakeIconImage(VCIconType type, CGFloat size, BOOL active) {
     NSInteger _selectedSubIndex;
     NSInteger _selectedSubItemIndex;
     NSInteger _expandedSubscription;
+    NSInteger _updatingSubscriptionIndex;
 
     BOOL _connected;
     BOOL _showingTerminal;
     BOOL _autoUpdateSubscriptions;
     BOOL _stealthModeEnabled;
     BOOL _didRunLaunchAutoUpdate;
+    BOOL _launchAutoUpdateInProgress;
     BOOL _queuedMainMarqueeRelayout;
 }
 @end
@@ -2136,6 +2138,7 @@ static UIImage *MakeIconImage(VCIconType type, CGFloat size, BOOL active) {
     _selectedSubIndex = -1;
     _selectedSubItemIndex = -1;
     _expandedSubscription = -1;
+    _updatingSubscriptionIndex = -1;
 
     if ([_configs count] > 0) {
         _selectedConfigIndex = 0;
@@ -2185,6 +2188,54 @@ static UIImage *MakeIconImage(VCIconType type, CGFloat size, BOOL active) {
         }
     }
     return NO;
+}
+
+- (NSInteger)rowForSubscriptionHeaderAtIndex:(NSInteger)subIdx {
+    if (subIdx < 0 || subIdx >= (NSInteger)[_subscriptions count]) return -1;
+
+    NSInteger row = 0;
+    for (NSInteger i = 0; i < (NSInteger)[_subscriptions count]; i++) {
+        if (i == subIdx) {
+            return row;
+        }
+        row += 1;
+        if (i == _expandedSubscription) {
+            row += (NSInteger)[[self subscriptionItemsAtIndex:i] count];
+        }
+    }
+
+    return -1;
+}
+
+- (void)setUpdatingSubscriptionIndex:(NSInteger)subIdx {
+    if (_updatingSubscriptionIndex == subIdx) return;
+
+    NSInteger oldIdx = _updatingSubscriptionIndex;
+    _updatingSubscriptionIndex = subIdx;
+
+    if (!_tableView) return;
+
+    NSMutableArray *paths = [NSMutableArray array];
+    NSInteger oldRow = [self rowForSubscriptionHeaderAtIndex:oldIdx];
+    if (oldRow >= 0) {
+        NSIndexPath *ip = [NSIndexPath indexPathForRow:oldRow inSection:1];
+        [paths addObject:ip];
+    }
+
+    NSInteger newRow = [self rowForSubscriptionHeaderAtIndex:subIdx];
+    if (newRow >= 0) {
+        NSIndexPath *ip = [NSIndexPath indexPathForRow:newRow inSection:1];
+        [paths addObject:ip];
+    }
+
+    if ([paths count] == 0) return;
+
+    @try {
+        [_tableView reloadRowsAtIndexPaths:paths withRowAnimation:UITableViewRowAnimationNone];
+    } @catch (NSException *e) {
+        (void)e;
+        [_tableView reloadData];
+    }
 }
 
 - (void)normalizeSelection {
@@ -3105,15 +3156,25 @@ static UIImage *MakeIconImage(VCIconType type, CGFloat size, BOOL active) {
     return ([filtered count] > 0) ? filtered : clean;
 }
 
-- (BOOL)refreshSubscriptionAtIndex:(NSInteger)idx showStatus:(BOOL)showStatus {
-    if (idx < 0 || idx >= (NSInteger)[_subscriptions count]) return NO;
+- (NSDictionary *)updatedSubscriptionDictionaryFromSource:(NSDictionary *)sub errorText:(NSString **)errorTextOut {
+    if (errorTextOut) *errorTextOut = nil;
+    if (![sub isKindOfClass:[NSDictionary class]]) {
+        if (errorTextOut) *errorTextOut = @"Subscription entry is invalid";
+        return nil;
+    }
 
-    NSDictionary *sub = [_subscriptions objectAtIndex:idx];
     NSString *urlString = [sub objectForKey:@"url"];
-    if (![urlString isKindOfClass:[NSString class]] || [urlString length] == 0) return NO;
+    if (![urlString isKindOfClass:[NSString class]] || [urlString length] == 0) {
+        if (errorTextOut) *errorTextOut = @"Subscription URL is missing";
+        return nil;
+    }
 
     NSURL *url = [NSURL URLWithString:urlString];
-    if (!url) return NO;
+    if (!url) {
+        if (errorTextOut) *errorTextOut = @"Subscription URL is invalid";
+        return nil;
+    }
+
     NSString *nameFromURL = [self subscriptionNameFromURLString:urlString];
     NSString *hostName = [self hostFromURLString:urlString];
     NSString *nameFromMeta = nil;
@@ -3144,13 +3205,11 @@ static UIImage *MakeIconImage(VCIconType type, CGFloat size, BOOL active) {
     }
 
     if (!data) {
-        if (showStatus) {
-            if (![fetchErr isKindOfClass:[NSString class]] || [fetchErr length] == 0) {
-                fetchErr = @"unknown error";
-            }
-            [self showStatus:[NSString stringWithFormat:@"Subscription fetch failed: %@", fetchErr] ok:NO];
+        if (![fetchErr isKindOfClass:[NSString class]] || [fetchErr length] == 0) {
+            fetchErr = @"unknown error";
         }
-        return NO;
+        if (errorTextOut) *errorTextOut = [NSString stringWithFormat:@"Subscription fetch failed: %@", fetchErr];
+        return nil;
     }
 
     if ([nameFromMeta length] == 0) {
@@ -3159,10 +3218,8 @@ static UIImage *MakeIconImage(VCIconType type, CGFloat size, BOOL active) {
 
     NSArray *uris = [self parseSubscriptionData:data];
     if ([uris count] == 0) {
-        if (showStatus) {
-            [self showStatus:@"Subscription has no valid vless:// entries" ok:NO];
-        }
-        return NO;
+        if (errorTextOut) *errorTextOut = @"Subscription has no valid vless:// entries";
+        return nil;
     }
 
     NSMutableDictionary *updated = [NSMutableDictionary dictionaryWithDictionary:sub];
@@ -3179,9 +3236,26 @@ static UIImage *MakeIconImage(VCIconType type, CGFloat size, BOOL active) {
         }
     }
 
+    return updated;
+}
+
+- (BOOL)refreshSubscriptionAtIndex:(NSInteger)idx showStatus:(BOOL)showStatus {
+    if (idx < 0 || idx >= (NSInteger)[_subscriptions count]) return NO;
+
+    NSDictionary *sub = [_subscriptions objectAtIndex:idx];
+    NSString *errorText = nil;
+    NSDictionary *updated = [self updatedSubscriptionDictionaryFromSource:sub errorText:&errorText];
+    if (![updated isKindOfClass:[NSDictionary class]]) {
+        if (showStatus && [errorText length] > 0) {
+            [self showStatus:errorText ok:NO];
+        }
+        return NO;
+    }
+
+    NSArray *uris = [updated objectForKey:@"items"];
     [_subscriptions replaceObjectAtIndex:idx withObject:updated];
     if (_selectedSubIndex == idx) {
-        if ((NSInteger)[uris count] <= 0) {
+        if (![uris isKindOfClass:[NSArray class]] || (NSInteger)[uris count] <= 0) {
             _selectedSubItemIndex = -1;
         } else if (_selectedSubItemIndex < 0 || _selectedSubItemIndex >= (NSInteger)[uris count]) {
             _selectedSubItemIndex = 0;
@@ -3192,6 +3266,106 @@ static UIImage *MakeIconImage(VCIconType type, CGFloat size, BOOL active) {
         [self showStatus:[NSString stringWithFormat:@"Subscription updated (%lu configs)", (unsigned long)[uris count]] ok:YES];
     }
     return YES;
+}
+
+- (BOOL)subscriptionsMatchSnapshotForLaunchAutoUpdate:(NSArray *)snapshot {
+    if (![snapshot isKindOfClass:[NSArray class]]) return NO;
+    if ((NSInteger)[snapshot count] != (NSInteger)[_subscriptions count]) return NO;
+
+    for (NSInteger i = 0; i < (NSInteger)[snapshot count]; i++) {
+        NSDictionary *oldSub = [snapshot objectAtIndex:i];
+        NSDictionary *curSub = [_subscriptions objectAtIndex:i];
+        NSString *oldURL = [oldSub objectForKey:@"url"];
+        NSString *curURL = [curSub objectForKey:@"url"];
+        if (![oldURL isKindOfClass:[NSString class]]) oldURL = @"";
+        if (![curURL isKindOfClass:[NSString class]]) curURL = @"";
+        if (![oldURL isEqualToString:curURL]) return NO;
+    }
+    return YES;
+}
+
+- (void)startBackgroundSubscriptionRefreshWithStatus:(NSString *)startStatus {
+    if ([_subscriptions count] == 0) {
+        [self showStatus:@"No subscriptions to update" ok:NO];
+        return;
+    }
+    if (_launchAutoUpdateInProgress) {
+        [self showStatus:@"Subscriptions update is already running" ok:YES];
+        return;
+    }
+
+    _launchAutoUpdateInProgress = YES;
+
+    NSArray *snapshot = [[NSArray alloc] initWithArray:_subscriptions copyItems:YES];
+    NSString *startText = ([startStatus isKindOfClass:[NSString class]] && [startStatus length] > 0)
+                              ? startStatus
+                              : @"Updating subscriptions...";
+    [self showStatus:startText ok:YES];
+
+    dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_DEFAULT, 0), ^{
+        NSAutoreleasePool *pool = [[NSAutoreleasePool alloc] init];
+
+        NSMutableArray *updatedSubs = [[NSMutableArray alloc] initWithCapacity:[snapshot count]];
+        NSUInteger okCount = 0;
+        for (NSInteger i = 0; i < (NSInteger)[snapshot count]; i++) {
+            dispatch_sync(dispatch_get_main_queue(), ^{
+                [self setUpdatingSubscriptionIndex:i];
+            });
+
+            NSDictionary *sub = [snapshot objectAtIndex:i];
+            NSString *errorText = nil;
+            NSDictionary *updated = [self updatedSubscriptionDictionaryFromSource:sub errorText:&errorText];
+            if (updated) {
+                [updatedSubs addObject:updated];
+                okCount++;
+            } else {
+                [updatedSubs addObject:sub];
+            }
+        }
+
+        while ([updatedSubs count] < [snapshot count]) {
+            [updatedSubs addObject:[snapshot objectAtIndex:[updatedSubs count]]];
+        }
+
+        dispatch_async(dispatch_get_main_queue(), ^{
+            [self setUpdatingSubscriptionIndex:-1];
+            _launchAutoUpdateInProgress = NO;
+
+            if (![self subscriptionsMatchSnapshotForLaunchAutoUpdate:snapshot]) {
+                [self showStatus:@"Auto-update skipped: subscriptions changed" ok:YES];
+                [updatedSubs release];
+                [snapshot release];
+                return;
+            }
+
+            [_subscriptions removeAllObjects];
+            [_subscriptions addObjectsFromArray:updatedSubs];
+
+            [self normalizeSelection];
+            [_tableView reloadData];
+            [self saveData];
+
+            BOOL ok = okCount > 0;
+            [self showStatus:[NSString stringWithFormat:@"Subscriptions updated: %lu/%lu",
+                              (unsigned long)okCount,
+                              (unsigned long)[snapshot count]]
+                         ok:ok];
+
+            [updatedSubs release];
+            [snapshot release];
+        });
+
+        [pool drain];
+    });
+}
+
+- (void)startLaunchAutoUpdateIfNeeded {
+    if (_didRunLaunchAutoUpdate) return;
+    _didRunLaunchAutoUpdate = YES;
+
+    if (!_autoUpdateSubscriptions || [_subscriptions count] == 0) return;
+
+    [self startBackgroundSubscriptionRefreshWithStatus:@"Auto-updating subscriptions in background..."];
 }
 
 - (void)refreshAllSubscriptions:(BOOL)showStatus {
@@ -3274,6 +3448,27 @@ static UIImage *MakeIconImage(VCIconType type, CGFloat size, BOOL active) {
     UIImageView *iv = [[[UIImageView alloc] initWithFrame:CGRectMake(2, 2, 16, 16)] autorelease];
     iv.image = MakeIconImage(expanded ? VCIconTypeChevronDown : VCIconTypeChevronRight, 16.0f, NO);
     [v addSubview:iv];
+    return v;
+}
+
+- (UIView *)accessorySubscriptionHeaderExpanded:(BOOL)expanded loading:(BOOL)loading {
+    if (!loading) {
+        return [self accessoryChevronExpanded:expanded];
+    }
+
+    UIView *v = [[[UIView alloc] initWithFrame:CGRectMake(0, 0, 44, 20)] autorelease];
+
+    UIActivityIndicatorView *spinner =
+        [[[UIActivityIndicatorView alloc] initWithActivityIndicatorStyle:UIActivityIndicatorViewStyleGray] autorelease];
+    spinner.frame = CGRectMake(0, 0, 20, 20);
+    spinner.hidesWhenStopped = YES;
+    [spinner startAnimating];
+    [v addSubview:spinner];
+
+    UIImageView *iv = [[[UIImageView alloc] initWithFrame:CGRectMake(24, 2, 16, 16)] autorelease];
+    iv.image = MakeIconImage(expanded ? VCIconTypeChevronDown : VCIconTypeChevronRight, 16.0f, NO);
+    [v addSubview:iv];
+
     return v;
 }
 
@@ -3495,7 +3690,7 @@ static UIImage *MakeIconImage(VCIconType type, CGFloat size, BOOL active) {
 }
 
 - (void)refreshPressed {
-    [self refreshAllSubscriptions:YES];
+    [self startBackgroundSubscriptionRefreshWithStatus:@"Updating subscriptions..."];
 }
 
 - (void)settingsPressed {
@@ -3690,17 +3885,15 @@ static UIImage *MakeIconImage(VCIconType type, CGFloat size, BOOL active) {
     [self updateTopButtonsIcons];
     [_tableView reloadData];
     [self queryInitialStatus];
-
-    if (!_didRunLaunchAutoUpdate) {
-        _didRunLaunchAutoUpdate = YES;
-        if (_autoUpdateSubscriptions && [_subscriptions count] > 0) {
-            [self refreshAllSubscriptions:YES];
-        }
-    }
 }
 
 - (void)viewWillAppear:(BOOL)animated {
     [super viewWillAppear:animated];
+}
+
+- (void)viewDidAppear:(BOOL)animated {
+    [super viewDidAppear:animated];
+    [self startLaunchAutoUpdateIfNeeded];
 }
 
 - (BOOL)shouldAutorotateToInterfaceOrientation:(UIInterfaceOrientation)interfaceOrientation {
@@ -3995,7 +4188,9 @@ static UIImage *MakeIconImage(VCIconType type, CGFloat size, BOOL active) {
                 }
                 shownName = [self maskedLinkText:shownName];
                 cell.textLabel.text = shownName;
-                cell.accessoryView = [self accessoryChevronExpanded:(_expandedSubscription == subIdx)];
+                BOOL loading = (_updatingSubscriptionIndex == subIdx);
+                cell.accessoryView = [self accessorySubscriptionHeaderExpanded:(_expandedSubscription == subIdx)
+                                                                       loading:loading];
             } else {
                 NSString *uri = [items objectAtIndex:itemIdx];
                 cell.indentationLevel = 0;
