@@ -2650,6 +2650,227 @@ static UIImage *MakeIconImage(VCIconType type, CGFloat size, BOOL active) {
     return NO;
 }
 
+- (NSString *)xhttpPinKeyFromURI:(NSString *)uri {
+    NSString *host = nil;
+    uint16_t port = 443;
+    if (![self parseVLESSHost:&host port:&port fromURI:uri]) return nil;
+    NSString *trimmedHost = [[self safeTrim:host] lowercaseString];
+    if (![trimmedHost isKindOfClass:[NSString class]] || [trimmedHost length] == 0) return nil;
+    return [NSString stringWithFormat:@"%@:%u", trimmedHost, (unsigned int)port];
+}
+
+- (NSString *)xhttpTOFUPinMismatchStatusForURI:(NSString *)uri {
+    NSString *tail = ReadFileTail(@"/var/log/vless-core.log", 12288);
+    if (![tail isKindOfClass:[NSString class]] || [tail length] == 0) return nil;
+
+    NSString *lowerTail = [tail lowercaseString];
+    if ([lowerTail rangeOfString:@"tofu pin mismatch"].location == NSNotFound) return nil;
+
+    NSString *pinKey = [self xhttpPinKeyFromURI:uri];
+    if ([pinKey length] > 0) {
+        NSString *needle = [NSString stringWithFormat:@"tofu pin mismatch for %@", pinKey];
+        if ([lowerTail rangeOfString:needle].location == NSNotFound &&
+            [lowerTail rangeOfString:pinKey].location == NSNotFound) {
+            return nil;
+        }
+        return [NSString stringWithFormat:@"Error: TOFU pin mismatch for %@ (clear old entry in xhttp-pins.txt)", pinKey];
+    }
+
+    return @"Error: TOFU pin mismatch (clear old entry in xhttp-pins.txt)";
+}
+
+- (BOOL)removeXHTTPPinKey:(NSString *)pinKey fromFile:(NSString *)path removed:(BOOL *)removedOut {
+    if (removedOut) *removedOut = NO;
+    if (![pinKey isKindOfClass:[NSString class]] || [pinKey length] == 0) return NO;
+    if (![path isKindOfClass:[NSString class]] || [path length] == 0) return NO;
+
+    NSString *content = ReadTextFileBestEffort(path);
+    if (![content isKindOfClass:[NSString class]]) {
+        return YES;
+    }
+
+    NSArray *lines = [content componentsSeparatedByString:@"\n"];
+    NSMutableArray *kept = [NSMutableArray arrayWithCapacity:[lines count]];
+    NSCharacterSet *ws = [NSCharacterSet whitespaceCharacterSet];
+    NSCharacterSet *trimSet = [NSCharacterSet whitespaceAndNewlineCharacterSet];
+    NSString *lowerPinKey = [pinKey lowercaseString];
+    BOOL removed = NO;
+
+    for (NSString *line in lines) {
+        if (![line isKindOfClass:[NSString class]]) continue;
+
+        NSString *trimmed = [line stringByTrimmingCharactersInSet:trimSet];
+        if ([trimmed length] == 0 || [trimmed hasPrefix:@"#"]) {
+            [kept addObject:line];
+            continue;
+        }
+
+        NSRange wsRange = [trimmed rangeOfCharacterFromSet:ws];
+        NSString *lineKey = (wsRange.location == NSNotFound) ? trimmed : [trimmed substringToIndex:wsRange.location];
+        if ([[lineKey lowercaseString] isEqualToString:lowerPinKey]) {
+            removed = YES;
+            continue;
+        }
+
+        [kept addObject:line];
+    }
+
+    if (!removed) {
+        return YES;
+    }
+
+    NSString *newContent = [kept componentsJoinedByString:@"\n"];
+    if ([content hasSuffix:@"\n"] && ![newContent hasSuffix:@"\n"]) {
+        newContent = [newContent stringByAppendingString:@"\n"];
+    }
+
+    BOOL ok = [newContent writeToFile:path atomically:YES encoding:NSUTF8StringEncoding error:nil];
+    if (!ok) {
+        ok = [newContent writeToFile:path atomically:YES encoding:NSISOLatin1StringEncoding error:nil];
+    }
+    if (ok && removedOut) *removedOut = YES;
+    return ok;
+}
+
+- (BOOL)clearXHTTPPinForURI:(NSString *)uri removedAny:(BOOL *)removedAnyOut {
+    if (removedAnyOut) *removedAnyOut = NO;
+
+    NSString *pinKey = [self xhttpPinKeyFromURI:uri];
+    if (![pinKey isKindOfClass:[NSString class]] || [pinKey length] == 0) return NO;
+
+    NSArray *paths = [NSArray arrayWithObjects:
+                      @"/var/mobile/Library/Preferences/vless-core/xhttp-pins.txt",
+                      @"/tmp/vless-core-xhttp-pins.txt",
+                      nil];
+
+    BOOL anyRemoved = NO;
+    for (NSString *path in paths) {
+        BOOL removed = NO;
+        if (![self removeXHTTPPinKey:pinKey fromFile:path removed:&removed]) {
+            return NO;
+        }
+        if (removed) anyRemoved = YES;
+    }
+
+    if (removedAnyOut) *removedAnyOut = anyRemoved;
+    return YES;
+}
+
+- (NSInteger)socksPortFromDaemonStatusText:(NSString *)statusText {
+    if (![statusText isKindOfClass:[NSString class]] || [statusText length] == 0) return -1;
+    NSRange marker = [statusText rangeOfString:@"socks="];
+    if (marker.location == NSNotFound) return -1;
+
+    NSUInteger start = marker.location + marker.length;
+    NSUInteger end = start;
+    while (end < [statusText length]) {
+        unichar c = [statusText characterAtIndex:end];
+        if (c < '0' || c > '9') break;
+        end++;
+    }
+    if (end <= start) return -1;
+
+    NSInteger p = [[statusText substringWithRange:NSMakeRange(start, end - start)] integerValue];
+    if (p <= 0 || p > 65535) return -1;
+    return p;
+}
+
+- (NSInteger)currentDaemonSocksPort {
+    NSString *status = [self sanitizeDaemonText:SendCommand(@"STATUS\n")];
+    if (![status hasPrefix:@"OK connected"]) return -1;
+    return [self socksPortFromDaemonStatusText:status];
+}
+
+- (void)xhttpConnectHealthCheckWorker:(NSDictionary *)payload {
+    NSAutoreleasePool *pool = [[NSAutoreleasePool alloc] init];
+    NSString *uri = [payload objectForKey:@"uri"];
+
+    BOOL ok = NO;
+    for (int attempt = 0; attempt < 3 && !ok; attempt++) {
+        NSInteger socksPort = [self currentDaemonSocksPort];
+        if (socksPort > 0 && socksPort <= 65535) {
+            int ms = 0;
+            if (RealPingConnectOnceMs((uint16_t)socksPort, 3500, &ms) == 0) {
+                ok = YES;
+                break;
+            }
+        }
+        usleep(250 * 1000);
+    }
+
+    NSMutableDictionary *out = [NSMutableDictionary dictionaryWithCapacity:3];
+    [out setObject:(ok ? @"1" : @"0") forKey:@"ok"];
+    if (![uri isKindOfClass:[NSString class]]) uri = @"";
+    [out setObject:uri forKey:@"uri"];
+
+    if (!ok) {
+        NSString *reason = [self xhttpTOFUPinMismatchStatusForURI:uri];
+        if (![reason isKindOfClass:[NSString class]] || [reason length] == 0) {
+            reason = @"Error: xhttp tunnel failed health-check";
+        }
+        [out setObject:reason forKey:@"reason"];
+    }
+
+    [self performSelectorOnMainThread:@selector(xhttpConnectHealthCheckResultOnMain:) withObject:out waitUntilDone:NO];
+    [pool drain];
+}
+
+- (void)xhttpConnectHealthCheckResultOnMain:(NSDictionary *)payload {
+    BOOL ok = [[payload objectForKey:@"ok"] isEqualToString:@"1"];
+    if (ok) return;
+    if (!_connected) return;
+
+    NSString *reason = [payload objectForKey:@"reason"];
+    if ([reason rangeOfString:@"TOFU pin mismatch"].location == NSNotFound) {
+        return;
+    }
+
+    NSString *uri = [payload objectForKey:@"uri"];
+    if (![uri isKindOfClass:[NSString class]] || [uri length] == 0) {
+        [self showStatus:reason ok:NO];
+        return;
+    }
+
+    BOOL removedAny = NO;
+    BOOL clearOK = [self clearXHTTPPinForURI:uri removedAny:&removedAny];
+    if (!clearOK) {
+        [self showStatus:[NSString stringWithFormat:@"%@ (auto-fix failed: pin file write error)", reason] ok:NO];
+        return;
+    }
+
+    NSString *discResp = [self sanitizeDaemonText:SendCommand(@"DISCONNECT\n")];
+    if (![discResp hasPrefix:@"OK"]) {
+        [self showStatus:[NSString stringWithFormat:@"%@ (disconnect failed: %@)", reason, discResp] ok:NO];
+        return;
+    }
+    _connected = NO;
+    [self stopUptimeTimer];
+    [self updateConnectButton];
+
+    NSString *cmd = [NSString stringWithFormat:@"CONNECT\t0\t%@\n", uri];
+    NSString *resp = [self sanitizeDaemonText:SendCommand(cmd)];
+    if ([resp hasPrefix:@"OK"]) {
+        _connected = YES;
+        [self startUptimeTimer];
+        [self updateConnectButton];
+        if (removedAny) {
+            [self showStatus:@"Connected (xhttp pin refreshed)" ok:YES];
+        } else {
+            [self showStatus:@"Connected (xhttp reconnected)" ok:YES];
+        }
+    } else {
+        [self showStatus:[NSString stringWithFormat:@"%@ (reconnect failed: %@)", reason, resp] ok:NO];
+    }
+}
+
+- (void)scheduleXHTTPConnectHealthCheckForURI:(NSString *)uri {
+    if (![self isXHTTPTransportURI:uri]) return;
+    NSDictionary *payload = [NSDictionary dictionaryWithObjectsAndKeys:
+                             (uri ? uri : @""), @"uri",
+                             nil];
+    [NSThread detachNewThreadSelector:@selector(xhttpConnectHealthCheckWorker:) toTarget:self withObject:payload];
+}
+
 - (void)pingWorker:(NSDictionary *)payload {
     NSAutoreleasePool *pool = [[NSAutoreleasePool alloc] init];
     NSString *uri = [payload objectForKey:@"uri"];
@@ -3217,6 +3438,7 @@ static UIImage *MakeIconImage(VCIconType type, CGFloat size, BOOL active) {
         [self startUptimeTimer];
         [self updateConnectButton];
         [self showStatus:@"Connected (switched config)" ok:YES];
+        [self scheduleXHTTPConnectHealthCheckForURI:newURI];
     } else {
         _connected = NO;
         [self stopUptimeTimer];
@@ -3244,6 +3466,7 @@ static UIImage *MakeIconImage(VCIconType type, CGFloat size, BOOL active) {
             [self startUptimeTimer];
             [self updateConnectButton];
             [self showStatus:@"Connected" ok:YES];
+            [self scheduleXHTTPConnectHealthCheckForURI:uri];
         } else {
             [self showStatus:resp ok:NO];
         }

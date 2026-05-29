@@ -61,4 +61,5 @@ if [ "$fw_major" -lt 7 ]; then
     ( sleep 2; killall SpringBoard >/dev/null 2>&1 || true ) &
   fi
 fi
+echo "Done!"
 exit 0
