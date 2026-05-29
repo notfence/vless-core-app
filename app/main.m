@@ -1536,6 +1536,17 @@ static UIImage *MakeIconImage(VCIconType type, CGFloat size, BOOL active) {
     return [uri substringWithRange:NSMakeRange(start, i - start)];
 }
 
+- (NSString *)schemeFromURIString:(NSString *)uri {
+    if (![uri isKindOfClass:[NSString class]] || [uri length] == 0) return @"vless";
+
+    NSRange sep = [uri rangeOfString:@"://"];
+    if (sep.location == NSNotFound || sep.location == 0) return @"vless";
+
+    NSString *scheme = [self safeTrim:[uri substringToIndex:sep.location]];
+    if ([scheme length] == 0) return @"vless";
+    return [scheme lowercaseString];
+}
+
 - (NSString *)displayNameForURI:(NSString *)uri index:(NSInteger)index {
     NSString *name = [self decodedFragmentFromURI:uri];
     if (name) return name;
@@ -1700,6 +1711,24 @@ static UIImage *MakeIconImage(VCIconType type, CGFloat size, BOOL active) {
     }
 
     return nil;
+}
+
+- (NSString *)transportTypeFromURI:(NSString *)uri {
+    NSString *transport = [self queryValueForURLString:uri key:@"type"];
+    if ([transport length] == 0) transport = [self queryValueForURLString:uri key:@"transport"];
+    if ([transport length] == 0) transport = [self queryValueForURLString:uri key:@"network"];
+    if ([transport length] == 0) transport = [self queryValueForURLString:uri key:@"net"];
+
+    transport = [self safeTrim:transport];
+    if ([transport length] == 0) return @"tcp";
+    return [transport lowercaseString];
+}
+
+- (NSString *)securityTypeFromURI:(NSString *)uri {
+    NSString *security = [self queryValueForURLString:uri key:@"security"];
+    security = [self safeTrim:security];
+    if ([security length] == 0) return @"none";
+    return [security lowercaseString];
 }
 
 - (NSString *)subscriptionNameFromURLString:(NSString *)urlString {
@@ -1958,6 +1987,48 @@ static UIImage *MakeIconImage(VCIconType type, CGFloat size, BOOL active) {
     if (hostOut) *hostOut = host;
     if (portOut) *portOut = port;
     return YES;
+}
+
+- (NSString *)endpointFromConfigURI:(NSString *)uri {
+    if (![uri isKindOfClass:[NSString class]] || [uri length] == 0) return @"server";
+
+    NSURL *u = [NSURL URLWithString:uri];
+    NSString *host = [self safeTrim:[u host]];
+    NSNumber *portNum = [u port];
+    NSInteger port = [portNum respondsToSelector:@selector(integerValue)] ? [portNum integerValue] : 0;
+
+    if ([host length] > 0) {
+        if (port <= 0 || port > 65535) {
+            NSString *scheme = [self schemeFromURIString:uri];
+            if ([scheme isEqualToString:@"vless"]) {
+                port = 443;
+            }
+        }
+
+        if (port > 0 && port <= 65535) {
+            return [NSString stringWithFormat:@"%@:%ld", host, (long)port];
+        }
+        return host;
+    }
+
+    NSString *parsedHost = nil;
+    uint16_t parsedPort = 443;
+    if ([self parseVLESSHost:&parsedHost port:&parsedPort fromURI:uri] && [parsedHost length] > 0) {
+        return [NSString stringWithFormat:@"%@:%u", parsedHost, (unsigned int)parsedPort];
+    }
+
+    NSString *fallbackHost = [self hostFromVLESSURI:uri];
+    if ([fallbackHost length] > 0) return fallbackHost;
+    return @"server";
+}
+
+- (NSString *)configSecondaryTextFromURI:(NSString *)uri {
+    NSString *scheme = [self schemeFromURIString:uri];
+    NSString *transport = [self transportTypeFromURI:uri];
+    NSString *security = [self securityTypeFromURI:uri];
+    NSString *endpoint = [self endpointFromConfigURI:uri];
+    NSString *shownEndpoint = [self maskedLinkText:endpoint];
+    return [NSString stringWithFormat:@"[%@/%@/%@] %@", scheme, transport, security, shownEndpoint];
 }
 
 - (BOOL)isXHTTPTransportURI:(NSString *)uri {
@@ -3018,7 +3089,7 @@ static UIImage *MakeIconImage(VCIconType type, CGFloat size, BOOL active) {
         NSString *uri = [cfg objectForKey:@"uri"];
         NSString *shownConfigName = ([name length] > 0) ? name : [NSString stringWithFormat:@"Config %ld", (long)(indexPath.row + 1)];
         cell.textLabel.text = [self maskedLinkText:shownConfigName];
-        cell.detailTextLabel.text = [self maskedLinkText:[self hostFromVLESSURI:uri]];
+        cell.detailTextLabel.text = [self configSecondaryTextFromURI:uri];
         cell.accessoryView = [self accessoryPingWithTag:(10000 + indexPath.row) selected:(_selectedConfigIndex == indexPath.row)];
     } else {
         NSInteger subIdx = -1;
@@ -3047,7 +3118,7 @@ static UIImage *MakeIconImage(VCIconType type, CGFloat size, BOOL active) {
                 cell.indentationLevel = 0;
                 NSString *itemName = [self displayNameForURI:uri index:itemIdx];
                 cell.textLabel.text = [self maskedLinkText:itemName];
-                cell.detailTextLabel.text = [self maskedLinkText:[self hostFromVLESSURI:uri]];
+                cell.detailTextLabel.text = [self configSecondaryTextFromURI:uri];
                 NSInteger tag = 20000 + (subIdx * 1000) + itemIdx;
                 BOOL selected = (_selectedSubIndex == subIdx && _selectedSubItemIndex == itemIdx);
                 cell.accessoryView = [self accessoryPingWithTag:tag selected:selected];
