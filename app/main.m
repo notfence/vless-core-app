@@ -2358,6 +2358,40 @@ static UIImage *MakeIconImage(VCIconType type, CGFloat size, BOOL active) {
     return [self maskedLinkText:endpoint];
 }
 
+- (BOOL)isSupportedConfigTupleForURI:(NSString *)uri {
+    NSString *scheme = [[self schemeFromURIString:uri] lowercaseString];
+    NSString *transport = [[self transportTypeFromURI:uri] lowercaseString];
+    NSString *security = [[self securityTypeFromURI:uri] lowercaseString];
+
+    if (![scheme isEqualToString:@"vless"]) return NO;
+
+    // Supported tuple #1: [vless/tcp/reality]
+    BOOL vision = [transport isEqualToString:@"tcp"] &&
+                  [security isEqualToString:@"reality"];
+
+    // Supported tuple #2: [vless/xhttp/tls]
+    BOOL xhttp = [transport isEqualToString:@"xhttp"] &&
+                 [security isEqualToString:@"tls"];
+
+    return vision || xhttp;
+}
+
+- (UIColor *)configPrefixColorForURI:(NSString *)uri {
+    if ([self isSupportedConfigTupleForURI:uri]) {
+        return [UIColor grayColor];
+    }
+    return [UIColor colorWithRed:0.78f green:0.12f blue:0.12f alpha:1.0f];
+}
+
+- (NSString *)unsupportedConfigStatusTextForURI:(NSString *)uri {
+    NSString *prefix = [self configPrefixTextFromURI:uri];
+    if (![prefix isKindOfClass:[NSString class]] || [prefix length] == 0) {
+        prefix = @"[unknown]";
+    }
+    return [NSString stringWithFormat:@"Error: unsupported config %@",
+            prefix];
+}
+
 - (UIView *)mainDetailContainerForCell:(UITableViewCell *)cell createIfNeeded:(BOOL)createIfNeeded {
     if (!cell) return nil;
     UIView *container = [cell.contentView viewWithTag:kVCMainDetailContainerTag];
@@ -2474,11 +2508,15 @@ static UIImage *MakeIconImage(VCIconType type, CGFloat size, BOOL active) {
     container.hidden = YES;
 }
 
-- (void)applyDetailPrefix:(NSString *)prefix marqueeTail:(NSString *)tail toCell:(UITableViewCell *)cell {
+- (void)applyDetailPrefix:(NSString *)prefix
+              prefixColor:(UIColor *)prefixColor
+              marqueeTail:(NSString *)tail
+                   toCell:(UITableViewCell *)cell {
     if (!cell) return;
 
     NSString *prefixText = ([prefix isKindOfClass:[NSString class]] ? prefix : @"");
     NSString *tailText = ([tail isKindOfClass:[NSString class]] ? tail : @"");
+    UIColor *effectivePrefixColor = [prefixColor isKindOfClass:[UIColor class]] ? prefixColor : [UIColor grayColor];
     UIColor *detailColor = [UIColor grayColor];
     UIFont *detailFont = cell.detailTextLabel.font;
     if (!detailFont) detailFont = [UIFont systemFontOfSize:11.0f];
@@ -2509,7 +2547,7 @@ static UIImage *MakeIconImage(VCIconType type, CGFloat size, BOOL active) {
     CGFloat lineW = CGRectGetWidth(container.bounds);
 
     prefixLabel.font = detailFont;
-    prefixLabel.textColor = detailColor;
+    prefixLabel.textColor = effectivePrefixColor;
     prefixLabel.backgroundColor = [UIColor clearColor];
 
     tailMarquee.font = detailFont;
@@ -2568,6 +2606,13 @@ static UIImage *MakeIconImage(VCIconType type, CGFloat size, BOOL active) {
     tailMarquee.hidden = NO;
     tailMarquee.frame = CGRectMake(tailX, 0.0f, tailWidth, lineH);
     tailMarquee.text = tailText;
+}
+
+- (void)applyDetailPrefix:(NSString *)prefix marqueeTail:(NSString *)tail toCell:(UITableViewCell *)cell {
+    [self applyDetailPrefix:prefix
+                prefixColor:[UIColor grayColor]
+                marqueeTail:tail
+                     toCell:cell];
 }
 
 - (BOOL)isXHTTPTransportURI:(NSString *)uri {
@@ -3152,6 +3197,10 @@ static UIImage *MakeIconImage(VCIconType type, CGFloat size, BOOL active) {
     if (![oldURI isKindOfClass:[NSString class]] || ![newURI isKindOfClass:[NSString class]]) return;
     if ([oldURI length] == 0 || [newURI length] == 0) return;
     if ([oldURI isEqualToString:newURI]) return;
+    if (![self isSupportedConfigTupleForURI:newURI]) {
+        [self showStatus:[self unsupportedConfigStatusTextForURI:newURI] ok:NO];
+        return;
+    }
 
     [self showStatus:@"Reconnecting to selected config..." ok:YES];
 
@@ -3181,6 +3230,10 @@ static UIImage *MakeIconImage(VCIconType type, CGFloat size, BOOL active) {
         NSString *uri = [self uriForCurrentSelection];
         if (!uri) {
             [self showStatus:@"Select/import a configuration first" ok:NO];
+            return;
+        }
+        if (![self isSupportedConfigTupleForURI:uri]) {
+            [self showStatus:[self unsupportedConfigStatusTextForURI:uri] ok:NO];
             return;
         }
 
@@ -3619,7 +3672,10 @@ static UIImage *MakeIconImage(VCIconType type, CGFloat size, BOOL active) {
         NSString *uri = [cfg objectForKey:@"uri"];
         NSString *prefix = [self configPrefixTextFromURI:uri];
         NSString *tail = [self configEndpointTextFromURI:uri];
-        [self applyDetailPrefix:prefix marqueeTail:tail toCell:cell];
+        [self applyDetailPrefix:prefix
+                    prefixColor:[self configPrefixColorForURI:uri]
+                    marqueeTail:tail
+                         toCell:cell];
         return;
     }
 
@@ -3650,7 +3706,10 @@ static UIImage *MakeIconImage(VCIconType type, CGFloat size, BOOL active) {
     NSString *uri = [items objectAtIndex:itemIdx];
     NSString *prefix = [self configPrefixTextFromURI:uri];
     NSString *tail = [self configEndpointTextFromURI:uri];
-    [self applyDetailPrefix:prefix marqueeTail:tail toCell:cell];
+    [self applyDetailPrefix:prefix
+                prefixColor:[self configPrefixColorForURI:uri]
+                marqueeTail:tail
+                     toCell:cell];
 }
 
 - (void)runQueuedMainMarqueeRelayout {
