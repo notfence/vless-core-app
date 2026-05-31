@@ -3,6 +3,7 @@
 #include <arpa/inet.h>
 #include <errno.h>
 #include <netdb.h>
+#include <net/if.h>
 #include <netinet/in.h>
 #include <signal.h>
 #include <spawn.h>
@@ -363,6 +364,74 @@ static int ifname_is_safe(const char *ifname) {
     return 1;
 }
 
+static int ifname_exists(const char *ifname) {
+    if (!ifname || !*ifname) return 0;
+    return if_nametoindex(ifname) != 0;
+}
+
+static int pf_interface_allowed(const char *ifname) {
+    if (!ifname) return 0;
+    if (strncmp(ifname, "en", 2) == 0) return 1;
+    if (strncmp(ifname, "pdp_ip", 6) == 0) return 1;
+    return 0;
+}
+
+static int add_pf_interface(char ifnames[][32], size_t *count, size_t cap, const char *ifname) {
+    if (!ifnames || !count || !ifname) return 0;
+    if (!ifname_is_safe(ifname)) return 0;
+    if (!pf_interface_allowed(ifname)) return 0;
+    if (!ifname_exists(ifname)) return 0;
+
+    for (size_t i = 0; i < *count; i++) {
+        if (strcmp(ifnames[i], ifname) == 0) return 0;
+    }
+
+    if (*count >= cap) return -1;
+    snprintf(ifnames[*count], 32, "%s", ifname);
+    (*count)++;
+    return 0;
+}
+
+static size_t collect_pf_interfaces(char ifnames[][32], size_t cap) {
+    if (!ifnames || cap == 0) return 0;
+
+    size_t count = 0;
+    FILE *fp = popen("/sbin/ifconfig -l 2>/dev/null", "r");
+    if (fp) {
+        char line[1024];
+        if (fgets(line, sizeof(line), fp)) {
+            char *save = NULL;
+            for (char *tok = strtok_r(line, " \t\r\n", &save); tok; tok = strtok_r(NULL, " \t\r\n", &save)) {
+                if (add_pf_interface(ifnames, &count, cap, tok) != 0) {
+                    break;
+                }
+            }
+        }
+        pclose(fp);
+    }
+
+    char def_if[32];
+    memset(def_if, 0, sizeof(def_if));
+    if (read_default_interface(def_if, sizeof(def_if)) == 0) {
+        (void)add_pf_interface(ifnames, &count, cap, def_if);
+    }
+
+    (void)add_pf_interface(ifnames, &count, cap, "en0");
+    (void)add_pf_interface(ifnames, &count, cap, "pdp_ip0");
+    (void)add_pf_interface(ifnames, &count, cap, "pdp_ip1");
+
+    return count;
+}
+
+static int interface_list_has_prefix(char ifnames[][32], size_t if_count, const char *prefix) {
+    if (!ifnames || !prefix || !*prefix) return 0;
+    size_t n = strlen(prefix);
+    for (size_t i = 0; i < if_count; i++) {
+        if (strncmp(ifnames[i], prefix, n) == 0) return 1;
+    }
+    return 0;
+}
+
 static int spawn_logged(const char *bin, char *const argv[], pid_t *pid_out) {
     posix_spawn_file_actions_t actions;
     posix_spawn_file_actions_init(&actions);
@@ -612,131 +681,234 @@ static const char *pf_rule_mode_name(pf_rule_mode_t mode) {
     }
 }
 
-static int write_pf_conf(const char *server_ips, const char *ifname, int redir_port, pf_rule_mode_t mode) {
+static int write_pf_conf(const char *server_ips, char ifnames[][32], size_t if_count, int redir_port, pf_rule_mode_t mode) {
     FILE *fp = fopen("/var/run/vlesscore-pf.conf", "w");
     if (!fp) return -1;
 
-    int rc = 0;
+    if (!server_ips || !*server_ips || !ifnames || if_count == 0) {
+        fclose(fp);
+        return -1;
+    }
+
     if (mode == PF_RULE_ROUTE_TO_LO0) {
-        rc = fprintf(
-            fp,
-            "table <vlesscore_bypass> persist { 127.0.0.0/8, 10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16, 224.0.0.0/4, 255.255.255.255/32, %s }\n"
-            "rdr pass on lo0 inet proto tcp from any to ! <vlesscore_bypass> -> 127.0.0.1 port %d\n"
-            "pass out quick on %s inet proto tcp from any to any user root keep state\n"
-            "pass out quick on %s inet proto tcp from any to <vlesscore_bypass> flags S/SA keep state\n"
-            "pass out quick on %s route-to (lo0 127.0.0.1) inet proto tcp from any to ! <vlesscore_bypass> flags S/SA keep state\n"
-            "pass out on %s all keep state\n"
-            "pass in all keep state\n",
-            server_ips,
-            redir_port,
-            ifname,
-            ifname,
-            ifname,
-            ifname
-        );
+        if (fprintf(fp,
+            "table <vlesscore_bypass> persist { 127.0.0.0/8, 10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16, 224.0.0.0/4, 255.255.255.255/32, %s }\n",
+            server_ips) < 0) {
+            fclose(fp);
+            return -1;
+        }
+
+        for (size_t i = 0; i < if_count; i++) {
+            const char *ifname = ifnames[i];
+            if (fprintf(fp,
+                "nat on %s inet proto tcp from any to ! <vlesscore_bypass> -> 127.0.0.1\n",
+                ifname) < 0) {
+                fclose(fp);
+                return -1;
+            }
+        }
+
+        if (fprintf(fp,
+            "rdr pass on lo0 inet proto tcp from any to ! <vlesscore_bypass> -> 127.0.0.1 port %d\n",
+            redir_port) < 0) {
+            fclose(fp);
+            return -1;
+        }
+
+        for (size_t i = 0; i < if_count; i++) {
+            const char *ifname = ifnames[i];
+            if (fprintf(fp,
+                "pass out quick on %s inet proto tcp from any to <vlesscore_bypass> flags S/SA keep state\n"
+                "pass out quick on %s route-to (lo0 127.0.0.1) inet proto tcp from any to ! <vlesscore_bypass> flags S/SA keep state\n"
+                "pass out on %s all keep state\n",
+                ifname, ifname, ifname) < 0) {
+                fclose(fp);
+                return -1;
+            }
+        }
+
+        if (fprintf(fp, "pass in all keep state\n") < 0) {
+            fclose(fp);
+            return -1;
+        }
     } else if (mode == PF_RULE_ROUTE_TO_LO0_NOGW) {
-        rc = fprintf(
-            fp,
-            "table <vlesscore_bypass> persist { 127.0.0.0/8, 10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16, 224.0.0.0/4, 255.255.255.255/32, %s }\n"
-            "rdr pass on lo0 inet proto tcp from any to ! <vlesscore_bypass> -> 127.0.0.1 port %d\n"
-            "pass out quick on %s inet proto tcp from any to any user root keep state\n"
-            "pass out quick on %s inet proto tcp from any to <vlesscore_bypass> flags S/SA keep state\n"
-            "pass out quick on %s route-to (lo0) inet proto tcp from any to ! <vlesscore_bypass> flags S/SA keep state\n"
-            "pass out on %s all keep state\n"
-            "pass in all keep state\n",
-            server_ips,
-            redir_port,
-            ifname,
-            ifname,
-            ifname,
-            ifname
-        );
+        if (fprintf(fp,
+            "table <vlesscore_bypass> persist { 127.0.0.0/8, 10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16, 224.0.0.0/4, 255.255.255.255/32, %s }\n",
+            server_ips) < 0) {
+            fclose(fp);
+            return -1;
+        }
+
+        for (size_t i = 0; i < if_count; i++) {
+            const char *ifname = ifnames[i];
+            if (fprintf(fp,
+                "nat on %s inet proto tcp from any to ! <vlesscore_bypass> -> 127.0.0.1\n",
+                ifname) < 0) {
+                fclose(fp);
+                return -1;
+            }
+        }
+
+        if (fprintf(fp,
+            "rdr pass on lo0 inet proto tcp from any to ! <vlesscore_bypass> -> 127.0.0.1 port %d\n",
+            redir_port) < 0) {
+            fclose(fp);
+            return -1;
+        }
+
+        for (size_t i = 0; i < if_count; i++) {
+            const char *ifname = ifnames[i];
+            if (fprintf(fp,
+                "pass out quick on %s inet proto tcp from any to <vlesscore_bypass> flags S/SA keep state\n"
+                "pass out quick on %s route-to (lo0) inet proto tcp from any to ! <vlesscore_bypass> flags S/SA keep state\n"
+                "pass out on %s all keep state\n",
+                ifname, ifname, ifname) < 0) {
+                fclose(fp);
+                return -1;
+            }
+        }
+
+        if (fprintf(fp, "pass in all keep state\n") < 0) {
+            fclose(fp);
+            return -1;
+        }
     } else if (mode == PF_RULE_DIVERT_TO) {
-        rc = fprintf(
-            fp,
+        if (fprintf(fp,
             "set skip on lo0\n"
-            "table <vlesscore_bypass> persist { 127.0.0.0/8, 10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16, 224.0.0.0/4, 255.255.255.255/32, %s }\n"
-            "pass out quick on %s inet proto tcp from any to any user root keep state\n"
-            "pass out quick on %s inet proto tcp from any to <vlesscore_bypass> flags S/SA keep state\n"
-            "pass out quick on %s divert-to 127.0.0.1 port %d inet proto tcp from any to ! <vlesscore_bypass> flags S/SA keep state\n"
-            "pass out on %s all keep state\n"
-            "pass in all keep state\n",
-            server_ips,
-            ifname,
-            ifname,
-            ifname,
-            redir_port,
-            ifname
-        );
+            "table <vlesscore_bypass> persist { 127.0.0.0/8, 10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16, 224.0.0.0/4, 255.255.255.255/32, %s }\n",
+            server_ips) < 0) {
+            fclose(fp);
+            return -1;
+        }
+
+        for (size_t i = 0; i < if_count; i++) {
+            const char *ifname = ifnames[i];
+            if (fprintf(fp,
+                "pass out quick on %s inet proto tcp from any to <vlesscore_bypass> flags S/SA keep state\n"
+                "pass out quick on %s divert-to 127.0.0.1 port %d inet proto tcp from any to ! <vlesscore_bypass> flags S/SA keep state\n"
+                "pass out on %s all keep state\n",
+                ifname, ifname, redir_port, ifname) < 0) {
+                fclose(fp);
+                return -1;
+            }
+        }
+
+        if (fprintf(fp, "pass in all keep state\n") < 0) {
+            fclose(fp);
+            return -1;
+        }
     } else if (mode == PF_RULE_DIVERT_TO_OLD) {
-        rc = fprintf(
-            fp,
+        if (fprintf(fp,
             "set skip on lo0\n"
-            "table <vlesscore_bypass> persist { 127.0.0.0/8, 10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16, 224.0.0.0/4, 255.255.255.255/32, %s }\n"
-            "pass out quick on %s inet proto tcp from any to any user root keep state\n"
-            "pass out quick on %s inet proto tcp from any to <vlesscore_bypass> keep state\n"
-            "pass out quick on %s inet proto tcp from any to ! <vlesscore_bypass> divert-to 127.0.0.1 port %d keep state\n"
-            "pass out on %s all keep state\n"
-            "pass in all keep state\n",
-            server_ips,
-            ifname,
-            ifname,
-            ifname,
-            redir_port,
-            ifname
-        );
+            "table <vlesscore_bypass> persist { 127.0.0.0/8, 10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16, 224.0.0.0/4, 255.255.255.255/32, %s }\n",
+            server_ips) < 0) {
+            fclose(fp);
+            return -1;
+        }
+
+        for (size_t i = 0; i < if_count; i++) {
+            const char *ifname = ifnames[i];
+            if (fprintf(fp,
+                "pass out quick on %s inet proto tcp from any to <vlesscore_bypass> keep state\n"
+                "pass out quick on %s inet proto tcp from any to ! <vlesscore_bypass> divert-to 127.0.0.1 port %d keep state\n"
+                "pass out on %s all keep state\n",
+                ifname, ifname, redir_port, ifname) < 0) {
+                fclose(fp);
+                return -1;
+            }
+        }
+
+        if (fprintf(fp, "pass in all keep state\n") < 0) {
+            fclose(fp);
+            return -1;
+        }
     } else if (mode == PF_RULE_RDR_TO) {
-        rc = fprintf(
-            fp,
+        if (fprintf(fp,
             "set skip on lo0\n"
-            "table <vlesscore_bypass> persist { 127.0.0.0/8, 10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16, 224.0.0.0/4, 255.255.255.255/32, %s }\n"
-            "pass out quick on %s inet proto tcp from any to any user root keep state\n"
-            "pass out quick on %s inet proto tcp from any to <vlesscore_bypass> flags S/SA keep state\n"
-            "pass out quick on %s inet proto tcp from any to ! <vlesscore_bypass> rdr-to 127.0.0.1 port %d flags S/SA keep state\n"
-            "pass out on %s all keep state\n"
-            "pass in all keep state\n",
-            server_ips,
-            ifname,
-            ifname,
-            ifname,
-            redir_port,
-            ifname
-        );
+            "table <vlesscore_bypass> persist { 127.0.0.0/8, 10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16, 224.0.0.0/4, 255.255.255.255/32, %s }\n",
+            server_ips) < 0) {
+            fclose(fp);
+            return -1;
+        }
+
+        for (size_t i = 0; i < if_count; i++) {
+            const char *ifname = ifnames[i];
+            if (fprintf(fp,
+                "pass out quick on %s inet proto tcp from any to <vlesscore_bypass> flags S/SA keep state\n"
+                "pass out quick on %s inet proto tcp from any to ! <vlesscore_bypass> rdr-to 127.0.0.1 port %d flags S/SA keep state\n"
+                "pass out on %s all keep state\n",
+                ifname, ifname, redir_port, ifname) < 0) {
+                fclose(fp);
+                return -1;
+            }
+        }
+
+        if (fprintf(fp, "pass in all keep state\n") < 0) {
+            fclose(fp);
+            return -1;
+        }
     } else if (mode == PF_RULE_RDR_TO_OLD) {
-        rc = fprintf(
-            fp,
+        if (fprintf(fp,
             "set skip on lo0\n"
-            "table <vlesscore_bypass> persist { 127.0.0.0/8, 10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16, 224.0.0.0/4, 255.255.255.255/32, %s }\n"
-            "pass out quick on %s inet proto tcp from any to any user root keep state\n"
-            "pass out quick on %s inet proto tcp from any to <vlesscore_bypass> keep state\n"
-            "pass out quick on %s inet proto tcp from any to ! <vlesscore_bypass> rdr-to 127.0.0.1 port %d keep state\n"
-            "pass out on %s all keep state\n"
-            "pass in all keep state\n",
-            server_ips,
-            ifname,
-            ifname,
-            ifname,
-            redir_port,
-            ifname
-        );
+            "table <vlesscore_bypass> persist { 127.0.0.0/8, 10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16, 224.0.0.0/4, 255.255.255.255/32, %s }\n",
+            server_ips) < 0) {
+            fclose(fp);
+            return -1;
+        }
+
+        for (size_t i = 0; i < if_count; i++) {
+            const char *ifname = ifnames[i];
+            if (fprintf(fp,
+                "pass out quick on %s inet proto tcp from any to <vlesscore_bypass> keep state\n"
+                "pass out quick on %s inet proto tcp from any to ! <vlesscore_bypass> rdr-to 127.0.0.1 port %d keep state\n"
+                "pass out on %s all keep state\n",
+                ifname, ifname, redir_port, ifname) < 0) {
+                fclose(fp);
+                return -1;
+            }
+        }
+
+        if (fprintf(fp, "pass in all keep state\n") < 0) {
+            fclose(fp);
+            return -1;
+        }
     } else {
-        rc = fprintf(
-            fp,
+        if (fprintf(fp,
             "set skip on lo0\n"
-            "table <vlesscore_bypass> persist { 127.0.0.0/8, 10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16, 224.0.0.0/4, 255.255.255.255/32, %s }\n"
-            "pass out quick on %s inet proto tcp from any to any user root keep state\n"
-            "rdr pass on %s inet proto tcp from any to ! <vlesscore_bypass> -> 127.0.0.1 port %d\n"
-            "pass out all keep state\n"
-            "pass in all keep state\n",
-            server_ips,
-            ifname,
-            ifname,
-            redir_port
-        );
+            "table <vlesscore_bypass> persist { 127.0.0.0/8, 10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16, 224.0.0.0/4, 255.255.255.255/32, %s }\n",
+            server_ips) < 0) {
+            fclose(fp);
+            return -1;
+        }
+
+        for (size_t i = 0; i < if_count; i++) {
+            const char *ifname = ifnames[i];
+            if (fprintf(fp,
+                "rdr pass on %s inet proto tcp from any to ! <vlesscore_bypass> -> 127.0.0.1 port %d\n",
+                ifname, redir_port) < 0) {
+                fclose(fp);
+                return -1;
+            }
+        }
+
+        for (size_t i = 0; i < if_count; i++) {
+            const char *ifname = ifnames[i];
+            if (fprintf(fp,
+                "pass out on %s all keep state\n",
+                ifname) < 0) {
+                fclose(fp);
+                return -1;
+            }
+        }
+
+        if (fprintf(fp, "pass in all keep state\n") < 0) {
+            fclose(fp);
+            return -1;
+        }
     }
 
     fclose(fp);
-    return (rc > 0) ? 0 : -1;
+    return 0;
 }
 
 static int pf_is_enabled(void) {
@@ -775,13 +947,23 @@ static int apply_pf_rules(const char *server_ips, int redir_port) {
         log_msg("pf already enabled; will reload rules");
     }
 
-    char ifname[32];
-    memset(ifname, 0, sizeof(ifname));
-    if (read_default_interface(ifname, sizeof(ifname)) != 0 || !ifname_is_safe(ifname)) {
-        snprintf(ifname, sizeof(ifname), "%s", "en0");
+    char ifnames[8][32];
+    memset(ifnames, 0, sizeof(ifnames));
+    size_t if_count = collect_pf_interfaces(ifnames, sizeof(ifnames) / sizeof(ifnames[0]));
+    if (if_count == 0) {
+        log_msg("pf: no suitable interfaces found (expected en*/pdp_ip*)");
+        return -6;
     }
 
-    log_msg("pf target interface: %s", ifname);
+    char if_list[256];
+    if_list[0] = '\0';
+    for (size_t i = 0; i < if_count; i++) {
+        if (i > 0) {
+            strncat(if_list, ",", sizeof(if_list) - strlen(if_list) - 1);
+        }
+        strncat(if_list, ifnames[i], sizeof(if_list) - strlen(if_list) - 1);
+    }
+    log_msg("pf target interfaces: %s", if_list);
 
     g.pf_enabled_before = was_enabled ? 1 : 0;
 
@@ -808,7 +990,7 @@ static int apply_pf_rules(const char *server_ips, int redir_port) {
 
     ensure_pf_os_file();
 
-    const pf_rule_mode_t modes[] = {
+    const pf_rule_mode_t modes_default[] = {
         PF_RULE_ROUTE_TO_LO0,
         PF_RULE_ROUTE_TO_LO0_NOGW,
         PF_RULE_LEGACY_RDR,
@@ -817,11 +999,28 @@ static int apply_pf_rules(const char *server_ips, int redir_port) {
         PF_RULE_RDR_TO_OLD,
         PF_RULE_RDR_TO,
     };
+    const pf_rule_mode_t modes_cellular[] = {
+        PF_RULE_ROUTE_TO_LO0,
+        PF_RULE_LEGACY_RDR,
+        PF_RULE_ROUTE_TO_LO0_NOGW,
+        PF_RULE_DIVERT_TO,
+        PF_RULE_RDR_TO,
+        PF_RULE_DIVERT_TO_OLD,
+        PF_RULE_RDR_TO_OLD,
+    };
 
-    for (size_t i = 0; i < sizeof(modes) / sizeof(modes[0]); i++) {
+    const pf_rule_mode_t *modes = modes_default;
+    size_t mode_count = sizeof(modes_default) / sizeof(modes_default[0]);
+    if (interface_list_has_prefix(ifnames, if_count, "pdp_ip")) {
+        modes = modes_cellular;
+        mode_count = sizeof(modes_cellular) / sizeof(modes_cellular[0]);
+        log_msg("pf detected cellular interfaces");
+    }
+
+    for (size_t i = 0; i < mode_count; i++) {
         pf_rule_mode_t mode = modes[i];
 
-        if (write_pf_conf(server_ips, ifname, redir_port, mode) != 0) {
+        if (write_pf_conf(server_ips, ifnames, if_count, redir_port, mode) != 0) {
             continue;
         }
 
