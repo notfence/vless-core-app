@@ -14,6 +14,7 @@
 #include <string.h>
 #include <limits.h>
 #include <fcntl.h>
+#include <dirent.h>
 #include <sys/socket.h>
 #include <sys/stat.h>
 #include <sys/time.h>
@@ -121,6 +122,200 @@ static int find_cmd_path(const char *cmd, char *out, size_t out_cap) {
 static int path_exists(const char *path) {
     struct stat st;
     return stat(path, &st) == 0;
+}
+
+static int write_all_fd(int fd, const char *buf, size_t len) {
+    size_t off = 0;
+    while (off < len) {
+        ssize_t wr = write(fd, buf + off, len - off);
+        if (wr < 0) {
+            if (errno == EINTR) continue;
+            return -1;
+        }
+        if (wr == 0) return -1;
+        off += (size_t)wr;
+    }
+    return 0;
+}
+
+static char *base64_encode_bytes(const unsigned char *data, size_t len, size_t *out_len) {
+    static const char table[] = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    size_t enc_len = ((len + 2) / 3) * 4;
+    char *out = (char *)malloc(enc_len + 1);
+    if (!out) return NULL;
+
+    size_t i = 0;
+    size_t j = 0;
+    while (i < len) {
+        unsigned int a = data[i++];
+        unsigned int b = (i < len) ? data[i++] : 0;
+        unsigned int c = (i < len) ? data[i++] : 0;
+
+        unsigned int triple = (a << 16) | (b << 8) | c;
+        out[j++] = table[(triple >> 18) & 0x3F];
+        out[j++] = table[(triple >> 12) & 0x3F];
+        out[j++] = table[(triple >> 6) & 0x3F];
+        out[j++] = table[triple & 0x3F];
+    }
+
+    size_t mod = len % 3;
+    if (mod == 1) {
+        out[enc_len - 1] = '=';
+        out[enc_len - 2] = '=';
+    } else if (mod == 2) {
+        out[enc_len - 1] = '=';
+    }
+
+    out[enc_len] = '\0';
+    if (out_len) *out_len = enc_len;
+    return out;
+}
+
+static int is_forbidden_path(const char *path) {
+    if (!path || !*path) return 1;
+    for (const char *p = path; *p; p++) {
+        if (*p == '\n' || *p == '\r' || *p == '\t') return 1;
+    }
+    return 0;
+}
+
+static void reply_error(int cfd, const char *reason) {
+    char msg[512];
+    snprintf(msg, sizeof(msg), "ERR %s\n", reason ? reason : "unknown error");
+    write_all_fd(cfd, msg, strlen(msg));
+}
+
+static void handle_listdir_command(int cfd, const char *path) {
+    if (is_forbidden_path(path)) {
+        reply_error(cfd, "invalid path");
+        return;
+    }
+
+    DIR *dir = opendir(path);
+    if (!dir) {
+        char reason[256];
+        snprintf(reason, sizeof(reason), "cannot open directory (%s)", strerror(errno));
+        reply_error(cfd, reason);
+        return;
+    }
+
+    size_t cap = 64 * 1024;
+    char *reply = (char *)malloc(cap);
+    if (!reply) {
+        closedir(dir);
+        reply_error(cfd, "out of memory");
+        return;
+    }
+
+    size_t used = 0;
+    int hdr = snprintf(reply, cap, "OK\n");
+    if (hdr < 0 || (size_t)hdr >= cap) {
+        free(reply);
+        closedir(dir);
+        reply_error(cfd, "internal error");
+        return;
+    }
+    used = (size_t)hdr;
+
+    struct dirent *de = NULL;
+    int entry_count = 0;
+    while ((de = readdir(dir)) != NULL) {
+        const char *name = de->d_name;
+        if (!name || !*name) continue;
+        if (strcmp(name, ".") == 0 || strcmp(name, "..") == 0) continue;
+        if (name[0] == '.') continue;
+        if (strchr(name, '\n') || strchr(name, '\r') || strchr(name, '\t')) continue;
+
+        char full[PATH_MAX];
+        int path_len = snprintf(full, sizeof(full), "%s/%s", path, name);
+        if (path_len <= 0 || (size_t)path_len >= sizeof(full)) continue;
+
+        struct stat st;
+        int is_dir = (lstat(full, &st) == 0 && S_ISDIR(st.st_mode)) ? 1 : 0;
+
+        char line[PATH_MAX + 8];
+        int ln = snprintf(line, sizeof(line), "%c\t%s\n", is_dir ? 'D' : 'F', name);
+        if (ln <= 0) continue;
+        if (used + (size_t)ln >= cap) break;
+
+        memcpy(reply + used, line, (size_t)ln);
+        used += (size_t)ln;
+        reply[used] = '\0';
+
+        entry_count++;
+        if (entry_count >= 400) break;
+    }
+
+    closedir(dir);
+    write_all_fd(cfd, reply, used);
+    free(reply);
+}
+
+static void handle_readfile_command(int cfd, const char *path) {
+    if (is_forbidden_path(path)) {
+        reply_error(cfd, "invalid path");
+        return;
+    }
+
+    int fd = open(path, O_RDONLY);
+    if (fd < 0) {
+        char reason[256];
+        snprintf(reason, sizeof(reason), "cannot open file (%s)", strerror(errno));
+        reply_error(cfd, reason);
+        return;
+    }
+
+    size_t max_bytes = 48 * 1024;
+    unsigned char *data = (unsigned char *)malloc(max_bytes);
+    if (!data) {
+        close(fd);
+        reply_error(cfd, "out of memory");
+        return;
+    }
+
+    size_t total = 0;
+    while (total < max_bytes) {
+        ssize_t rd = read(fd, data + total, max_bytes - total);
+        if (rd < 0) {
+            if (errno == EINTR) continue;
+            char reason[256];
+            snprintf(reason, sizeof(reason), "cannot read file (%s)", strerror(errno));
+            free(data);
+            close(fd);
+            reply_error(cfd, reason);
+            return;
+        }
+        if (rd == 0) break;
+        total += (size_t)rd;
+    }
+    close(fd);
+
+    size_t b64_len = 0;
+    char *b64 = base64_encode_bytes(data, total, &b64_len);
+    free(data);
+    if (!b64) {
+        reply_error(cfd, "encoding error");
+        return;
+    }
+
+    size_t cap = b64_len + 8;
+    char *reply = (char *)malloc(cap);
+    if (!reply) {
+        free(b64);
+        reply_error(cfd, "out of memory");
+        return;
+    }
+
+    int n = snprintf(reply, cap, "OK\t%s\n", b64);
+    free(b64);
+    if (n <= 0 || (size_t)n >= cap) {
+        free(reply);
+        reply_error(cfd, "internal error");
+        return;
+    }
+
+    write_all_fd(cfd, reply, (size_t)n);
+    free(reply);
 }
 
 static const char *mode_name(vpn_mode_t mode) {
@@ -1266,6 +1461,20 @@ static void handle_client(int cfd) {
         return;
     }
     buf[n] = '\0';
+
+    if (strncmp(buf, "LISTDIR\t", 8) == 0) {
+        char *path = buf + 8;
+        char *nl = strchr(path, '\n');
+        if (nl) *nl = '\0';
+        handle_listdir_command(cfd, path);
+        return;
+    } else if (strncmp(buf, "READFILE\t", 9) == 0) {
+        char *path = buf + 9;
+        char *nl = strchr(path, '\n');
+        if (nl) *nl = '\0';
+        handle_readfile_command(cfd, path);
+        return;
+    }
 
     char reply[512];
     memset(reply, 0, sizeof(reply));

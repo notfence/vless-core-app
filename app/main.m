@@ -60,6 +60,7 @@ typedef NS_ENUM(NSInteger, VCAlertTag) {
 
 typedef NS_ENUM(NSInteger, VCActionSheetTag) {
     VCActionSheetTagImport = 2001,
+    VCActionSheetTagImportFileBrowser = 2002,
 };
 
 typedef NS_ENUM(NSInteger, VCIconType) {
@@ -333,7 +334,7 @@ static NSString *SendCommand(NSString *cmdLine) {
             continue;
         }
 
-        char buf[2048];
+        char buf[65536];
         ssize_t rd = SendRawCommandToPort(port, outData, &cmd_tv, 500, buf, sizeof(buf), &last_errno);
         if (rd > 0) {
             return [NSString stringWithUTF8String:buf];
@@ -1871,6 +1872,9 @@ static UIImage *MakeIconImage(VCIconType type, CGFloat size, BOOL active) {
     NSTimer *_uptimeTimer;
     NSTimeInterval _connectedSince;
     NSString *_statusBaseText;
+    NSArray *_importBrowserItems;
+    NSString *_pendingImportDoneStatus;
+    NSArray *_pendingImportRefreshIndices;
 
     NSMutableArray *_configs;
     NSMutableArray *_subscriptions;
@@ -2157,11 +2161,15 @@ static UIImage *MakeIconImage(VCIconType type, CGFloat size, BOOL active) {
 }
 
 - (BOOL)isSubscriptionURL:(NSString *)s {
-    return [s hasPrefix:@"http://"] || [s hasPrefix:@"https://"];
+    NSString *trim = [self safeTrim:s];
+    NSString *lower = [trim lowercaseString];
+    return [lower hasPrefix:@"http://"] || [lower hasPrefix:@"https://"];
 }
 
 - (BOOL)isVLESSURI:(NSString *)s {
-    return [s hasPrefix:@"vless://"];
+    NSString *trim = [self safeTrim:s];
+    NSString *lower = [trim lowercaseString];
+    return [lower hasPrefix:@"vless://"];
 }
 
 - (void)saveData {
@@ -3164,6 +3172,47 @@ static UIImage *MakeIconImage(VCIconType type, CGFloat size, BOOL active) {
     return out;
 }
 
+- (NSArray *)extractImportLinksFromText:(NSString *)text {
+    if (![text isKindOfClass:[NSString class]] || [text length] == 0) {
+        return [NSArray array];
+    }
+
+    NSError *reErr = nil;
+    NSRegularExpression *re = [NSRegularExpression regularExpressionWithPattern:@"(?:vless://|https?://)[^\\s\"'<>]+"
+                                                                         options:NSRegularExpressionCaseInsensitive
+                                                                           error:&reErr];
+    if (!re || reErr) {
+        return [NSArray array];
+    }
+
+    NSArray *matches = [re matchesInString:text options:0 range:NSMakeRange(0, [text length])];
+    NSMutableArray *out = [NSMutableArray array];
+    NSCharacterSet *trailSet = [NSCharacterSet characterSetWithCharactersInString:@",;)]}>\"'"];
+    for (NSTextCheckingResult *m in matches) {
+        if (m.range.location == NSNotFound || m.range.length == 0) continue;
+        NSString *link = [text substringWithRange:m.range];
+        link = [self safeTrim:link];
+        while ([link length] > 0) {
+            unichar c = [link characterAtIndex:([link length] - 1)];
+            if (![trailSet characterIsMember:c]) break;
+            link = [link substringToIndex:([link length] - 1)];
+        }
+        if ([link length] == 0) continue;
+
+        NSString *lower = [link lowercaseString];
+        if (![lower hasPrefix:@"vless://"] &&
+            ![lower hasPrefix:@"http://"] &&
+            ![lower hasPrefix:@"https://"]) {
+            continue;
+        }
+
+        if (![out containsObject:link]) {
+            [out addObject:link];
+        }
+    }
+    return out;
+}
+
 - (NSArray *)parseSubscriptionData:(NSData *)data {
     if (!data || [data length] == 0) return [NSArray array];
 
@@ -3354,17 +3403,68 @@ static UIImage *MakeIconImage(VCIconType type, CGFloat size, BOOL active) {
 
 - (void)startBackgroundSubscriptionRefreshWithStatus:(NSString *)startStatus {
     if ([_subscriptions count] == 0) {
+        if (_pendingImportDoneStatus) {
+            [_pendingImportDoneStatus release];
+            _pendingImportDoneStatus = nil;
+        }
+        if (_pendingImportRefreshIndices) {
+            [_pendingImportRefreshIndices release];
+            _pendingImportRefreshIndices = nil;
+        }
         [self showStatus:@"No subscriptions to update" ok:NO];
         return;
     }
     if (_launchAutoUpdateInProgress) {
+        if (_pendingImportDoneStatus) {
+            [_pendingImportDoneStatus release];
+            _pendingImportDoneStatus = nil;
+        }
+        if (_pendingImportRefreshIndices) {
+            [_pendingImportRefreshIndices release];
+            _pendingImportRefreshIndices = nil;
+        }
         [self showStatus:@"Subscriptions update is already running" ok:YES];
+        return;
+    }
+
+    NSArray *requestedIndices = nil;
+    if (_pendingImportRefreshIndices && [_pendingImportRefreshIndices count] > 0) {
+        requestedIndices = [_pendingImportRefreshIndices copy];
+    }
+    [_pendingImportRefreshIndices release];
+    _pendingImportRefreshIndices = nil;
+
+    NSArray *snapshot = [[NSArray alloc] initWithArray:_subscriptions copyItems:YES];
+    NSMutableArray *refreshIndicesMutable = [NSMutableArray array];
+    if ([requestedIndices count] > 0) {
+        for (id idxObj in requestedIndices) {
+            NSInteger idx = [idxObj integerValue];
+            if (idx >= 0 && idx < (NSInteger)[snapshot count]) {
+                [refreshIndicesMutable addObject:[NSNumber numberWithInteger:idx]];
+            }
+        }
+    } else {
+        for (NSInteger i = 0; i < (NSInteger)[snapshot count]; i++) {
+            [refreshIndicesMutable addObject:[NSNumber numberWithInteger:i]];
+        }
+    }
+    [requestedIndices release];
+
+    if ([refreshIndicesMutable count] == 0) {
+        if (_pendingImportDoneStatus) {
+            [self showStatus:_pendingImportDoneStatus ok:YES];
+            [_pendingImportDoneStatus release];
+            _pendingImportDoneStatus = nil;
+        } else {
+            [self showStatus:@"No subscriptions to update" ok:NO];
+        }
+        [snapshot release];
         return;
     }
 
     _launchAutoUpdateInProgress = YES;
 
-    NSArray *snapshot = [[NSArray alloc] initWithArray:_subscriptions copyItems:YES];
+    NSArray *refreshIndices = [[NSArray alloc] initWithArray:refreshIndicesMutable];
     NSString *startText = ([startStatus isKindOfClass:[NSString class]] && [startStatus length] > 0)
                               ? startStatus
                               : @"Updating subscriptions...";
@@ -3373,9 +3473,10 @@ static UIImage *MakeIconImage(VCIconType type, CGFloat size, BOOL active) {
     dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_DEFAULT, 0), ^{
         NSAutoreleasePool *pool = [[NSAutoreleasePool alloc] init];
 
-        NSMutableArray *updatedSubs = [[NSMutableArray alloc] initWithCapacity:[snapshot count]];
+        NSMutableArray *updatedSubs = [[NSMutableArray alloc] initWithArray:snapshot];
         NSUInteger okCount = 0;
-        for (NSInteger i = 0; i < (NSInteger)[snapshot count]; i++) {
+        for (NSNumber *idxObj in refreshIndices) {
+            NSInteger i = [idxObj integerValue];
             dispatch_sync(dispatch_get_main_queue(), ^{
                 [self setUpdatingSubscriptionIndex:i];
             });
@@ -3384,15 +3485,9 @@ static UIImage *MakeIconImage(VCIconType type, CGFloat size, BOOL active) {
             NSString *errorText = nil;
             NSDictionary *updated = [self updatedSubscriptionDictionaryFromSource:sub errorText:&errorText];
             if (updated) {
-                [updatedSubs addObject:updated];
+                [updatedSubs replaceObjectAtIndex:i withObject:updated];
                 okCount++;
-            } else {
-                [updatedSubs addObject:sub];
             }
-        }
-
-        while ([updatedSubs count] < [snapshot count]) {
-            [updatedSubs addObject:[snapshot objectAtIndex:[updatedSubs count]]];
         }
 
         dispatch_async(dispatch_get_main_queue(), ^{
@@ -3401,7 +3496,12 @@ static UIImage *MakeIconImage(VCIconType type, CGFloat size, BOOL active) {
 
             if (![self subscriptionsMatchSnapshotForLaunchAutoUpdate:snapshot]) {
                 [self showStatus:@"Auto-update skipped: subscriptions changed" ok:YES];
+                if (_pendingImportDoneStatus) {
+                    [_pendingImportDoneStatus release];
+                    _pendingImportDoneStatus = nil;
+                }
                 [updatedSubs release];
+                [refreshIndices release];
                 [snapshot release];
                 return;
             }
@@ -3414,12 +3514,19 @@ static UIImage *MakeIconImage(VCIconType type, CGFloat size, BOOL active) {
             [self saveData];
 
             BOOL ok = okCount > 0;
-            [self showStatus:[NSString stringWithFormat:@"Subscriptions updated: %lu/%lu",
-                              (unsigned long)okCount,
-                              (unsigned long)[snapshot count]]
-                         ok:ok];
+            if (_pendingImportDoneStatus) {
+                [self showStatus:_pendingImportDoneStatus ok:YES];
+                [_pendingImportDoneStatus release];
+                _pendingImportDoneStatus = nil;
+            } else {
+                [self showStatus:[NSString stringWithFormat:@"Subscriptions updated: %lu/%lu",
+                                  (unsigned long)okCount,
+                                  (unsigned long)[refreshIndices count]]
+                             ok:ok];
+            }
 
             [updatedSubs release];
+            [refreshIndices release];
             [snapshot release];
         });
 
@@ -3621,26 +3728,402 @@ static UIImage *MakeIconImage(VCIconType type, CGFloat size, BOOL active) {
         return;
     }
 
-    if ([self isVLESSURI:text]) {
+    BOOL hasWhitespace = ([text rangeOfCharacterFromSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]].location != NSNotFound);
+    if (!hasWhitespace && [self isVLESSURI:text]) {
         [self importDirectURI:text];
         return;
     }
 
-    if ([self isSubscriptionURL:text]) {
+    if (!hasWhitespace && [self isSubscriptionURL:text]) {
         [self importSubscriptionURL:text];
         return;
     }
 
-    NSArray *uris = [self extractVLESSURIsFromText:text];
-    if ([uris count] > 0) {
-        for (NSString *uri in uris) {
-            [self importDirectURI:uri];
+    NSArray *links = [self extractImportLinksFromText:text];
+    if ([links count] > 0) {
+        NSInteger importedConfigs = 0;
+        NSInteger importedSubs = 0;
+        NSInteger skippedConfigs = 0;
+        NSInteger skippedSubs = 0;
+        NSMutableArray *subIndicesToRefresh = [NSMutableArray array];
+
+        for (NSString *link in links) {
+            if ([self isVLESSURI:link]) {
+                BOOL alreadyExists = NO;
+                for (NSInteger i = 0; i < (NSInteger)[_configs count]; i++) {
+                    NSDictionary *it = [_configs objectAtIndex:i];
+                    NSString *uri = [it objectForKey:@"uri"];
+                    if ([uri isKindOfClass:[NSString class]] && [uri isEqualToString:link]) {
+                        alreadyExists = YES;
+                        break;
+                    }
+                }
+                if (alreadyExists) {
+                    skippedConfigs++;
+                    continue;
+                }
+
+                NSString *name = [self displayNameForURI:link index:[_configs count]];
+                NSDictionary *cfg = [NSDictionary dictionaryWithObjectsAndKeys:
+                                     name, @"name",
+                                     link, @"uri",
+                                     nil];
+                [_configs addObject:cfg];
+                importedConfigs++;
+            } else if ([self isSubscriptionURL:link]) {
+                NSString *name = [self subscriptionNameFromURLString:link];
+                NSDictionary *sub = [NSDictionary dictionaryWithObjectsAndKeys:
+                                     name, @"name",
+                                     link, @"url",
+                                     [NSArray array], @"items",
+                                     nil];
+
+                NSInteger existing = -1;
+                for (NSInteger i = 0; i < (NSInteger)[_subscriptions count]; i++) {
+                    NSDictionary *it = [_subscriptions objectAtIndex:i];
+                    if ([[it objectForKey:@"url"] isEqualToString:link]) {
+                        existing = i;
+                        break;
+                    }
+                }
+
+                NSInteger subIndex = -1;
+                if (existing >= 0) {
+                    skippedSubs++;
+                    continue;
+                } else {
+                    [_subscriptions addObject:sub];
+                    subIndex = [_subscriptions count] - 1;
+                }
+
+                if (subIndex >= 0) {
+                    NSNumber *idxObj = [NSNumber numberWithInteger:subIndex];
+                    if (![subIndicesToRefresh containsObject:idxObj]) {
+                        [subIndicesToRefresh addObject:idxObj];
+                    }
+                }
+                importedSubs++;
+            }
         }
-        [self showStatus:[NSString stringWithFormat:@"Imported %lu configurations", (unsigned long)[uris count]] ok:YES];
+
+        if (importedConfigs > 0 || importedSubs > 0) {
+            [self saveData];
+            if (importedConfigs > 0) {
+                _selectedConfigIndex = [_configs count] - 1;
+                _selectedSubIndex = -1;
+                _selectedSubItemIndex = -1;
+            } else {
+                _selectedConfigIndex = -1;
+                if ([subIndicesToRefresh count] > 0) {
+                    _selectedSubIndex = [[subIndicesToRefresh lastObject] integerValue];
+                } else {
+                    _selectedSubIndex = [_subscriptions count] - 1;
+                }
+                _selectedSubItemIndex = 0;
+            }
+            [self normalizeSelection];
+            [_tableView reloadData];
+        }
+
+        NSMutableArray *parts = [NSMutableArray array];
+        if (importedConfigs > 0) {
+            [parts addObject:[NSString stringWithFormat:@"%ld config%@", (long)importedConfigs, (importedConfigs == 1 ? @"" : @"s")]];
+        }
+        if (importedSubs > 0) {
+            [parts addObject:[NSString stringWithFormat:@"%ld subscription%@", (long)importedSubs, (importedSubs == 1 ? @"" : @"s")]];
+        }
+
+        if ([parts count] > 0) {
+            NSString *importText = [NSString stringWithFormat:@"Imported %@", [parts componentsJoinedByString:@", "]];
+            if (skippedConfigs > 0 || skippedSubs > 0) {
+                NSMutableArray *skippedParts = [NSMutableArray array];
+                if (skippedConfigs > 0) {
+                    [skippedParts addObject:[NSString stringWithFormat:@"%ld config%@", (long)skippedConfigs, (skippedConfigs == 1 ? @"" : @"s")]];
+                }
+                if (skippedSubs > 0) {
+                    [skippedParts addObject:[NSString stringWithFormat:@"%ld subscription%@", (long)skippedSubs, (skippedSubs == 1 ? @"" : @"s")]];
+                }
+                importText = [NSString stringWithFormat:@"%@ (skipped duplicates: %@)",
+                              importText,
+                              [skippedParts componentsJoinedByString:@", "]];
+            }
+            BOOL needsBackgroundRefresh = ([subIndicesToRefresh count] > 0);
+            if (needsBackgroundRefresh) {
+                if (_pendingImportRefreshIndices) {
+                    [_pendingImportRefreshIndices release];
+                    _pendingImportRefreshIndices = nil;
+                }
+                _pendingImportRefreshIndices = [subIndicesToRefresh copy];
+                if (_pendingImportDoneStatus) {
+                    [_pendingImportDoneStatus release];
+                    _pendingImportDoneStatus = nil;
+                }
+                _pendingImportDoneStatus = [importText copy];
+                [self startBackgroundSubscriptionRefreshWithStatus:@"Importing data from file..."];
+            } else {
+                [self showStatus:importText ok:YES];
+            }
+        } else {
+            if (skippedConfigs > 0 || skippedSubs > 0) {
+                NSMutableArray *skippedParts = [NSMutableArray array];
+                if (skippedConfigs > 0) {
+                    [skippedParts addObject:[NSString stringWithFormat:@"%ld config%@", (long)skippedConfigs, (skippedConfigs == 1 ? @"" : @"s")]];
+                }
+                if (skippedSubs > 0) {
+                    [skippedParts addObject:[NSString stringWithFormat:@"%ld subscription%@", (long)skippedSubs, (skippedSubs == 1 ? @"" : @"s")]];
+                }
+                [self showStatus:[NSString stringWithFormat:@"Nothing imported: all links already exist (%@)",
+                                  [skippedParts componentsJoinedByString:@", "]]
+                             ok:YES];
+            } else {
+                [self showStatus:@"No importable links found" ok:NO];
+            }
+        }
         return;
     }
 
     [self showStatus:@"Unsupported import format (use vless:// or http(s) subscription)" ok:NO];
+}
+
+- (NSString *)decodeImportTextData:(NSData *)data {
+    if (!data || [data length] == 0) return nil;
+
+    const unsigned char *bytes = (const unsigned char *)[data bytes];
+    NSUInteger len = [data length];
+
+    NSString *text = [[[NSString alloc] initWithData:data encoding:NSUTF8StringEncoding] autorelease];
+    if (!text) text = [[[NSString alloc] initWithData:data encoding:NSWindowsCP1251StringEncoding] autorelease];
+    if (!text) text = [[[NSString alloc] initWithData:data encoding:NSISOLatin1StringEncoding] autorelease];
+    if (!text && len >= 2 && bytes[0] == 0xFF && bytes[1] == 0xFE) {
+        text = [[[NSString alloc] initWithData:data encoding:NSUTF16LittleEndianStringEncoding] autorelease];
+    }
+    if (!text && len >= 2 && bytes[0] == 0xFE && bytes[1] == 0xFF) {
+        text = [[[NSString alloc] initWithData:data encoding:NSUTF16BigEndianStringEncoding] autorelease];
+    }
+    if (!text) text = [[[NSString alloc] initWithData:data encoding:NSASCIIStringEncoding] autorelease];
+    return text;
+}
+
+- (void)importTextFileAtPath:(NSString *)rawPath {
+    NSString *path = [self safeTrim:rawPath];
+    if ([path hasPrefix:@"\""] && [path hasSuffix:@"\""] && [path length] >= 2) {
+        path = [path substringWithRange:NSMakeRange(1, [path length] - 2)];
+        path = [self safeTrim:path];
+    }
+    path = [path stringByExpandingTildeInPath];
+    if ([path length] == 0) {
+        [self showStatus:@"File path is empty" ok:NO];
+        return;
+    }
+
+    BOOL isDir = NO;
+    BOOL exists = [[NSFileManager defaultManager] fileExistsAtPath:path isDirectory:&isDir];
+    if (exists && isDir) {
+        [self showStatus:@"Text file not found" ok:NO];
+        return;
+    }
+
+    [self showStatus:@"Importing data from file..." ok:YES];
+
+    NSData *data = [NSData dataWithContentsOfFile:path];
+    if ((!data || [data length] == 0) &&
+        [path rangeOfString:@"\n"].location == NSNotFound &&
+        [path rangeOfString:@"\r"].location == NSNotFound &&
+        [path rangeOfString:@"\t"].location == NSNotFound) {
+        NSString *resp = SendCommand([NSString stringWithFormat:@"READFILE\t%@\n", path]);
+        if ([resp isKindOfClass:[NSString class]] && [resp hasPrefix:@"OK\t"]) {
+            NSString *b64 = [resp substringFromIndex:3];
+            b64 = [b64 stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
+            NSData *decoded = ([b64 length] > 0) ? DecodeBase64String(b64) : [NSData data];
+            if (decoded) data = decoded;
+        }
+    }
+    if (!data || [data length] == 0) {
+        if (!exists) {
+            [self showStatus:@"Text file not found" ok:NO];
+            return;
+        }
+        [self showStatus:@"Failed to read text file" ok:NO];
+        return;
+    }
+
+    NSString *text = [self decodeImportTextData:data];
+    if (![text isKindOfClass:[NSString class]] || [text length] == 0) {
+        [self showStatus:@"Unsupported text encoding" ok:NO];
+        return;
+    }
+
+    [self importTextEntry:text];
+}
+
+- (BOOL)isDirectoryPath:(NSString *)path {
+    if (![path isKindOfClass:[NSString class]] || [path length] == 0) return NO;
+    BOOL isDir = NO;
+    if (![[NSFileManager defaultManager] fileExistsAtPath:path isDirectory:&isDir]) return NO;
+    return isDir;
+}
+
+- (NSArray *)fileBrowserEntriesAtPath:(NSString *)dirPath {
+    if (![self isDirectoryPath:dirPath]) return [NSArray array];
+
+    NSFileManager *fm = [NSFileManager defaultManager];
+    NSArray *names = [fm contentsOfDirectoryAtPath:dirPath error:nil];
+    if (![names isKindOfClass:[NSArray class]]) {
+        if ([dirPath rangeOfString:@"\n"].location == NSNotFound &&
+            [dirPath rangeOfString:@"\r"].location == NSNotFound &&
+            [dirPath rangeOfString:@"\t"].location == NSNotFound) {
+            NSString *resp = SendCommand([NSString stringWithFormat:@"LISTDIR\t%@\n", dirPath]);
+            if ([resp isKindOfClass:[NSString class]] && [resp hasPrefix:@"OK"]) {
+                NSArray *lines = [resp componentsSeparatedByCharactersInSet:[NSCharacterSet newlineCharacterSet]];
+                NSMutableArray *dirs = [NSMutableArray array];
+                NSMutableArray *files = [NSMutableArray array];
+
+                for (NSInteger i = 1; i < (NSInteger)[lines count]; i++) {
+                    id lineObj = [lines objectAtIndex:i];
+                    if (![lineObj isKindOfClass:[NSString class]]) continue;
+                    NSString *line = (NSString *)lineObj;
+                    if ([line length] < 3) continue;
+                    unichar kind = [line characterAtIndex:0];
+                    if ((kind != 'D' && kind != 'F') || [line characterAtIndex:1] != '\t') continue;
+
+                    NSString *name = [self safeTrim:[line substringFromIndex:2]];
+                    if ([name length] == 0 || [name hasPrefix:@"."]) continue;
+
+                    NSString *childPath = [dirPath stringByAppendingPathComponent:name];
+                    BOOL childIsDir = (kind == 'D');
+                    NSString *title = childIsDir ? [NSString stringWithFormat:@"[DIR] %@", name] : name;
+                    NSDictionary *item = [NSDictionary dictionaryWithObjectsAndKeys:
+                                          title, @"title",
+                                          childPath, @"path",
+                                          [NSNumber numberWithBool:childIsDir], @"is_dir",
+                                          nil];
+                    if (childIsDir) [dirs addObject:item];
+                    else [files addObject:item];
+                }
+
+                NSArray *sortedDirs = [dirs sortedArrayUsingComparator:^NSComparisonResult(id a, id b) {
+                    NSString *la = [a objectForKey:@"title"];
+                    NSString *lb = [b objectForKey:@"title"];
+                    if (![la isKindOfClass:[NSString class]]) la = @"";
+                    if (![lb isKindOfClass:[NSString class]]) lb = @"";
+                    return [la localizedCaseInsensitiveCompare:lb];
+                }];
+                NSArray *sortedFiles = [files sortedArrayUsingComparator:^NSComparisonResult(id a, id b) {
+                    NSString *la = [a objectForKey:@"title"];
+                    NSString *lb = [b objectForKey:@"title"];
+                    if (![la isKindOfClass:[NSString class]]) la = @"";
+                    if (![lb isKindOfClass:[NSString class]]) lb = @"";
+                    return [la localizedCaseInsensitiveCompare:lb];
+                }];
+
+                NSMutableArray *out = [NSMutableArray array];
+                if (![dirPath isEqualToString:@"/"]) {
+                    NSString *parent = [dirPath stringByDeletingLastPathComponent];
+                    if ([parent length] == 0) parent = @"/";
+                    NSDictionary *up = [NSDictionary dictionaryWithObjectsAndKeys:
+                                        @"[..]", @"title",
+                                        parent, @"path",
+                                        [NSNumber numberWithBool:YES], @"is_dir",
+                                        nil];
+                    [out addObject:up];
+                }
+                [out addObjectsFromArray:sortedDirs];
+                [out addObjectsFromArray:sortedFiles];
+
+                NSInteger cap = 90;
+                if ((NSInteger)[out count] > cap) {
+                    return [out subarrayWithRange:NSMakeRange(0, cap)];
+                }
+                return out;
+            }
+        }
+        names = [NSArray array];
+    }
+    NSArray *sortedNames = [names sortedArrayUsingSelector:@selector(localizedCaseInsensitiveCompare:)];
+
+    NSMutableArray *dirs = [NSMutableArray array];
+    NSMutableArray *files = [NSMutableArray array];
+
+    for (id obj in sortedNames) {
+        if (![obj isKindOfClass:[NSString class]]) continue;
+        NSString *name = (NSString *)obj;
+        if ([name hasPrefix:@"."] || [name length] == 0) continue;
+
+        NSString *path = [dirPath stringByAppendingPathComponent:name];
+        BOOL childIsDir = NO;
+        if (![fm fileExistsAtPath:path isDirectory:&childIsDir]) continue;
+
+        NSString *title = childIsDir ? [NSString stringWithFormat:@"[DIR] %@", name] : name;
+        NSDictionary *item = [NSDictionary dictionaryWithObjectsAndKeys:
+                              title, @"title",
+                              path, @"path",
+                              [NSNumber numberWithBool:childIsDir], @"is_dir",
+                              nil];
+        if (childIsDir) [dirs addObject:item];
+        else [files addObject:item];
+    }
+
+    NSMutableArray *out = [NSMutableArray array];
+
+    if (![dirPath isEqualToString:@"/"]) {
+        NSString *parent = [dirPath stringByDeletingLastPathComponent];
+        if ([parent length] == 0) parent = @"/";
+        NSDictionary *up = [NSDictionary dictionaryWithObjectsAndKeys:
+                            @"[..]", @"title",
+                            parent, @"path",
+                            [NSNumber numberWithBool:YES], @"is_dir",
+                            nil];
+        [out addObject:up];
+    }
+
+    [out addObjectsFromArray:dirs];
+    [out addObjectsFromArray:files];
+
+    NSInteger cap = 90;
+    if ((NSInteger)[out count] > cap) {
+        return [out subarrayWithRange:NSMakeRange(0, cap)];
+    }
+    return out;
+}
+
+- (void)presentImportFileBrowserAtPath:(NSString *)rawPath {
+    NSString *path = [self safeTrim:rawPath];
+    if ([path length] == 0) path = @"/var/mobile";
+    if (![self isDirectoryPath:path]) {
+        [self showStatus:@"Directory not found" ok:NO];
+        return;
+    }
+
+    NSArray *items = [self fileBrowserEntriesAtPath:path];
+    if ([items count] == 0) {
+        [self showStatus:@"Directory is empty" ok:NO];
+        return;
+    }
+
+    [_importBrowserItems release];
+    _importBrowserItems = [items copy];
+
+    NSString *title = [NSString stringWithFormat:@"Directory:\n%@", path];
+    [self showStatus:[NSString stringWithFormat:@"Current directory: %@", path] ok:YES];
+
+    UIActionSheet *sheet = [[[UIActionSheet alloc] initWithTitle:title
+                                                         delegate:self
+                                                cancelButtonTitle:nil
+                                           destructiveButtonTitle:nil
+                                                otherButtonTitles:nil] autorelease];
+    for (NSDictionary *item in _importBrowserItems) {
+        NSString *t = [item objectForKey:@"title"];
+        if (![t isKindOfClass:[NSString class]] || [t length] == 0) t = @"(unnamed)";
+        [sheet addButtonWithTitle:t];
+    }
+    NSInteger cancelIndex = [sheet addButtonWithTitle:@"Cancel"];
+    sheet.cancelButtonIndex = cancelIndex;
+    sheet.tag = VCActionSheetTagImportFileBrowser;
+    [sheet showInView:self.view];
+}
+
+- (void)startFileBrowserImportFlow {
+    [self presentImportFileBrowserAtPath:@"/var/mobile"];
 }
 
 - (NSString *)uriForCurrentSelection {
@@ -3752,7 +4235,7 @@ static UIImage *MakeIconImage(VCIconType type, CGFloat size, BOOL active) {
                                                          delegate:self
                                                 cancelButtonTitle:@"Cancel"
                                            destructiveButtonTitle:nil
-                                                otherButtonTitles:@"Import from Clipboard", @"Manual Input", nil] autorelease];
+                                                otherButtonTitles:@"Import from Clipboard", @"Import from File", @"Manual Input", nil] autorelease];
     sheet.tag = VCActionSheetTagImport;
     [sheet showInView:self.view];
 }
@@ -4010,6 +4493,9 @@ static UIImage *MakeIconImage(VCIconType type, CGFloat size, BOOL active) {
 
     [_tableView release];
     [_logView release];
+    [_importBrowserItems release];
+    [_pendingImportDoneStatus release];
+    [_pendingImportRefreshIndices release];
 
     [_configs release];
     [_subscriptions release];
@@ -4372,6 +4858,8 @@ static UIImage *MakeIconImage(VCIconType type, CGFloat size, BOOL active) {
             NSString *clip = [[UIPasteboard generalPasteboard] string];
             [self importTextEntry:clip];
         } else if (buttonIndex == 1) {
+            [self startFileBrowserImportFlow];
+        } else if (buttonIndex == 2) {
             UIAlertView *av = [[[UIAlertView alloc] initWithTitle:@"Manual Import"
                                                           message:@"Paste vless:// or subscription URL"
                                                          delegate:self
@@ -4388,6 +4876,33 @@ static UIImage *MakeIconImage(VCIconType type, CGFloat size, BOOL active) {
             tf.autocorrectionType = UITextAutocorrectionTypeNo;
 
             [av show];
+        }
+        return;
+    }
+
+    if (actionSheet.tag == VCActionSheetTagImportFileBrowser) {
+        NSDictionary *selectedItem = nil;
+        if (buttonIndex >= 0 &&
+            buttonIndex != actionSheet.cancelButtonIndex &&
+            buttonIndex < (NSInteger)[_importBrowserItems count]) {
+            id obj = [_importBrowserItems objectAtIndex:buttonIndex];
+            if ([obj isKindOfClass:[NSDictionary class]]) {
+                selectedItem = [obj retain];
+            }
+        }
+        [_importBrowserItems release];
+        _importBrowserItems = nil;
+
+        if (selectedItem) {
+            NSString *path = [[selectedItem objectForKey:@"path"] copy];
+            BOOL isDir = [[selectedItem objectForKey:@"is_dir"] boolValue];
+            [selectedItem release];
+            if (isDir) {
+                [self presentImportFileBrowserAtPath:path];
+            } else {
+                [self importTextFileAtPath:path];
+            }
+            [path release];
         }
         return;
     }
