@@ -28,13 +28,13 @@ VPNICON_TWEAK_BIN := $(BUILD_DIR)/vlesscorevpnicon.dylib
 PKG_ROOT := $(BUILD_DIR)/pkgroot
 DEB_OUT := $(BUILD_DIR)/com.vlesscore.app_iphoneos-arm.deb
 
-APP_SRC := app/main.m
+APP_SRC := app/main.m third_party/quirc/quirc.c third_party/quirc/decode.c third_party/quirc/identify.c third_party/quirc/version_db.c
 DAEMON_SRC := daemon/vpnctld.c
 BOOTSTRAP_SRC := daemon/vpnctld_bootstrap.c
 VPNICON_TWEAK_SRC := tweak/vlesscore_vpnicon.m
 
-APP_CFLAGS := -fno-objc-arc -Wall -Wextra -O2 -arch armv7 -miphoneos-version-min=6.0 -isysroot $(IOS_SDK)
-APP_LDFLAGS := -framework UIKit -framework Foundation -framework CoreGraphics -framework QuartzCore
+APP_CFLAGS := -fno-objc-arc -Wall -Wextra -O2 -arch armv7 -miphoneos-version-min=6.0 -isysroot $(IOS_SDK) -Ithird_party/quirc
+APP_LDFLAGS := -framework UIKit -framework Foundation -framework CoreGraphics -framework QuartzCore -framework AVFoundation -framework CoreMedia -framework CoreVideo
 
 DAEMON_CFLAGS := -Wall -Wextra -O2 -std=c11 -arch armv7 -miphoneos-version-min=6.0 -isysroot $(IOS_SDK)
 TWEAK_CFLAGS := -fno-objc-arc -Wall -Wextra -O2 -arch armv7 -miphoneos-version-min=6.0 -isysroot $(IOS_SDK)

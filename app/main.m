@@ -1,5 +1,9 @@
 #import <UIKit/UIKit.h>
 #import <QuartzCore/QuartzCore.h>
+#import <AVFoundation/AVFoundation.h>
+#import <CoreMedia/CoreMedia.h>
+#import <CoreVideo/CoreVideo.h>
+#include "quirc.h"
 
 #include <sys/socket.h>
 #include <sys/types.h>
@@ -83,6 +87,7 @@ static NSInteger const kVCMainDetailTailTag = 7412;
 static CGFloat const kVCDetailMarqueeGap = 4.0f;
 static NSTimeInterval const kVCMarqueePauseSeconds = 1.0;
 static CGFloat const kVCMarqueePixelsPerSecond = 28.0f;
+static NSString *const kVCQRMetadataType = @"org.iso.QRCode";
 
 static int TryBootstrapDaemon(void) {
     posix_spawn_file_actions_t actions;
@@ -1857,7 +1862,449 @@ static UIImage *MakeIconImage(VCIconType type, CGFloat size, BOOL active) {
 
 @end
 
-@interface MainVC : UIViewController <UITableViewDataSource, UITableViewDelegate, UIActionSheetDelegate, UIAlertViewDelegate, UITextViewDelegate, SettingsVCDelegate> {
+@protocol QRScanVCDelegate <NSObject>
+- (void)qrScanVCDidCancel:(UIViewController *)vc;
+- (void)qrScanVC:(UIViewController *)vc didScanText:(NSString *)text;
+@end
+
+@interface QRScanVC : UIViewController <AVCaptureMetadataOutputObjectsDelegate, AVCaptureVideoDataOutputSampleBufferDelegate> {
+    id<QRScanVCDelegate> _delegate;
+    AVCaptureSession *_captureSession;
+    AVCaptureMetadataOutput *_metadataOutput;
+    AVCaptureVideoDataOutput *_videoOutput;
+    dispatch_queue_t _videoQueue;
+    AVCaptureVideoPreviewLayer *_previewLayer;
+    UILabel *_hintLabel;
+    UIButton *_cancelButton;
+    UILabel *_cancelButtonLabel;
+    struct quirc *_qrDecoder;
+    int _frameSkipCounter;
+    BOOL _didFinish;
+    BOOL _metadataCanScanQR;
+}
+@property (nonatomic, assign) id<QRScanVCDelegate> delegate;
+@end
+
+@implementation QRScanVC
+
+@synthesize delegate = _delegate;
+
+- (AVCaptureVideoOrientation)captureVideoOrientationForCurrentInterfaceOrientation {
+    UIInterfaceOrientation ui = CurrentInterfaceOrientation();
+    switch (ui) {
+        case UIInterfaceOrientationLandscapeLeft:
+            return AVCaptureVideoOrientationLandscapeLeft;
+        case UIInterfaceOrientationLandscapeRight:
+            return AVCaptureVideoOrientationLandscapeRight;
+        case UIInterfaceOrientationPortraitUpsideDown:
+            return AVCaptureVideoOrientationPortraitUpsideDown;
+        case UIInterfaceOrientationPortrait:
+        default:
+            return AVCaptureVideoOrientationPortrait;
+    }
+}
+
+- (void)updateCaptureConnectionOrientations {
+    AVCaptureVideoOrientation v = [self captureVideoOrientationForCurrentInterfaceOrientation];
+
+    AVCaptureConnection *previewConn = [_previewLayer connection];
+    if (previewConn && [previewConn isVideoOrientationSupported]) {
+        [previewConn setVideoOrientation:v];
+    }
+
+    AVCaptureConnection *metadataConn = [_metadataOutput connectionWithMediaType:AVMediaTypeVideo];
+    if (metadataConn && [metadataConn isVideoOrientationSupported]) {
+        [metadataConn setVideoOrientation:v];
+    }
+
+    AVCaptureConnection *videoConn = [_videoOutput connectionWithMediaType:AVMediaTypeVideo];
+    if (videoConn && [videoConn isVideoOrientationSupported]) {
+        [videoConn setVideoOrientation:v];
+    }
+}
+
+- (void)deliverScanResult:(NSString *)rawValue {
+    if (_didFinish) return;
+    NSString *value = [rawValue stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
+    if (![value isKindOfClass:[NSString class]] || [value length] == 0) return;
+
+    _didFinish = YES;
+    if (_captureSession && [_captureSession isRunning]) {
+        [_captureSession stopRunning];
+    }
+    if ([_delegate respondsToSelector:@selector(qrScanVC:didScanText:)]) {
+        [_delegate qrScanVC:self didScanText:value];
+    }
+}
+
+- (BOOL)tryDecodeFrameWithQuirc:(CMSampleBufferRef)sampleBuffer decodedText:(NSString **)decodedText {
+    if (!sampleBuffer || !decodedText) return NO;
+
+    CVImageBufferRef imageBuffer = CMSampleBufferGetImageBuffer(sampleBuffer);
+    if (!imageBuffer) return NO;
+
+    CVPixelBufferLockBaseAddress(imageBuffer, 0);
+
+    size_t width = 0;
+    size_t height = 0;
+    size_t bytesPerRow = 0;
+    const uint8_t *source = NULL;
+    BOOL isPlanar = CVPixelBufferIsPlanar(imageBuffer);
+
+    if (isPlanar && CVPixelBufferGetPlaneCount(imageBuffer) > 0) {
+        width = CVPixelBufferGetWidthOfPlane(imageBuffer, 0);
+        height = CVPixelBufferGetHeightOfPlane(imageBuffer, 0);
+        bytesPerRow = CVPixelBufferGetBytesPerRowOfPlane(imageBuffer, 0);
+        source = (const uint8_t *)CVPixelBufferGetBaseAddressOfPlane(imageBuffer, 0);
+    } else {
+        width = CVPixelBufferGetWidth(imageBuffer);
+        height = CVPixelBufferGetHeight(imageBuffer);
+        bytesPerRow = CVPixelBufferGetBytesPerRow(imageBuffer);
+        source = (const uint8_t *)CVPixelBufferGetBaseAddress(imageBuffer);
+    }
+
+    if (!source || width < 40 || height < 40) {
+        CVPixelBufferUnlockBaseAddress(imageBuffer, 0);
+        return NO;
+    }
+
+    if (!_qrDecoder) {
+        _qrDecoder = quirc_new();
+    }
+    if (!_qrDecoder) {
+        CVPixelBufferUnlockBaseAddress(imageBuffer, 0);
+        return NO;
+    }
+
+    if (quirc_resize(_qrDecoder, (int)width, (int)height) < 0) {
+        CVPixelBufferUnlockBaseAddress(imageBuffer, 0);
+        return NO;
+    }
+
+    uint8_t *dst = quirc_begin(_qrDecoder, NULL, NULL);
+    if (!dst) {
+        CVPixelBufferUnlockBaseAddress(imageBuffer, 0);
+        return NO;
+    }
+
+    if (isPlanar) {
+        for (size_t y = 0; y < height; y++) {
+            memcpy(dst + (y * width), source + (y * bytesPerRow), width);
+        }
+    } else {
+        OSType pixelType = CVPixelBufferGetPixelFormatType(imageBuffer);
+        if (pixelType == kCVPixelFormatType_32BGRA || pixelType == kCVPixelFormatType_32ARGB) {
+            for (size_t y = 0; y < height; y++) {
+                const uint8_t *row = source + (y * bytesPerRow);
+                uint8_t *dstRow = dst + (y * width);
+                for (size_t x = 0; x < width; x++) {
+                    const uint8_t *px = row + (x * 4);
+                    dstRow[x] = px[1];
+                }
+            }
+        } else {
+            for (size_t y = 0; y < height; y++) {
+                memcpy(dst + (y * width), source + (y * bytesPerRow), width);
+            }
+        }
+    }
+
+    quirc_end(_qrDecoder);
+    CVPixelBufferUnlockBaseAddress(imageBuffer, 0);
+
+    int count = quirc_count(_qrDecoder);
+    for (int i = 0; i < count; i++) {
+        struct quirc_code code;
+        struct quirc_data data;
+        quirc_extract(_qrDecoder, i, &code);
+        quirc_decode_error_t err = quirc_decode(&code, &data);
+        if (err != QUIRC_SUCCESS) {
+            quirc_flip(&code);
+            err = quirc_decode(&code, &data);
+        }
+        if (err != QUIRC_SUCCESS) continue;
+        if (data.payload_len <= 0) continue;
+
+        NSData *payloadData = [NSData dataWithBytes:data.payload length:(NSUInteger)data.payload_len];
+        NSString *text = [[[NSString alloc] initWithData:payloadData encoding:NSUTF8StringEncoding] autorelease];
+        if (!text) {
+            text = [[[NSString alloc] initWithData:payloadData encoding:NSISOLatin1StringEncoding] autorelease];
+        }
+        if (!text || [text length] == 0) continue;
+
+        *decodedText = text;
+        return YES;
+    }
+
+    return NO;
+}
+
+- (void)configureCaptureSession {
+    AVCaptureDevice *camera = [AVCaptureDevice defaultDeviceWithMediaType:AVMediaTypeVideo];
+    if (!camera) {
+        _hintLabel.text = @"Camera is unavailable on this device";
+        return;
+    }
+
+    NSError *error = nil;
+    AVCaptureDeviceInput *input = [AVCaptureDeviceInput deviceInputWithDevice:camera error:&error];
+    if (!input) {
+        _hintLabel.text = @"Failed to access camera";
+        return;
+    }
+
+    _captureSession = [[AVCaptureSession alloc] init];
+    if ([_captureSession canSetSessionPreset:AVCaptureSessionPreset640x480]) {
+        _captureSession.sessionPreset = AVCaptureSessionPreset640x480;
+    }
+    if ([_captureSession canAddInput:input]) {
+        [_captureSession addInput:input];
+    } else {
+        [_captureSession release];
+        _captureSession = nil;
+        _hintLabel.text = @"Camera input is not supported";
+        return;
+    }
+
+    AVCaptureMetadataOutput *metadataOutput = [[[AVCaptureMetadataOutput alloc] init] autorelease];
+    if ([_captureSession canAddOutput:metadataOutput]) {
+        [_captureSession addOutput:metadataOutput];
+        [metadataOutput setMetadataObjectsDelegate:self queue:dispatch_get_main_queue()];
+        _metadataOutput = [metadataOutput retain];
+    }
+
+    _videoOutput = [[AVCaptureVideoDataOutput alloc] init];
+    _videoOutput.alwaysDiscardsLateVideoFrames = YES;
+    NSDictionary *settings = [NSDictionary dictionaryWithObject:[NSNumber numberWithUnsignedInt:kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange]
+                                                         forKey:(id)kCVPixelBufferPixelFormatTypeKey];
+    [_videoOutput setVideoSettings:settings];
+    _videoQueue = dispatch_queue_create("com.vlesscore.qrscan.video", DISPATCH_QUEUE_SERIAL);
+    [_videoOutput setSampleBufferDelegate:self queue:_videoQueue];
+    if ([_captureSession canAddOutput:_videoOutput]) {
+        [_captureSession addOutput:_videoOutput];
+    } else {
+        [_videoOutput release];
+        _videoOutput = nil;
+    }
+
+    _previewLayer = [[AVCaptureVideoPreviewLayer alloc] initWithSession:_captureSession];
+    _previewLayer.videoGravity = AVLayerVideoGravityResizeAspectFill;
+    [self.view.layer insertSublayer:_previewLayer atIndex:0];
+}
+
+- (void)applyPreferredMetadataTypes {
+    _metadataCanScanQR = NO;
+    if (!_metadataOutput) {
+        _hintLabel.text = @"Legacy QR mode: hold camera steady";
+        return;
+    }
+
+    NSArray *availableTypes = [_metadataOutput availableMetadataObjectTypes];
+    if (![availableTypes isKindOfClass:[NSArray class]] || [availableTypes count] == 0) {
+        _hintLabel.text = @"Legacy QR mode: hold camera steady";
+        return;
+    }
+
+    @try {
+        if ([availableTypes containsObject:kVCQRMetadataType]) {
+            [_metadataOutput setMetadataObjectTypes:[NSArray arrayWithObject:kVCQRMetadataType]];
+            _metadataCanScanQR = YES;
+            _hintLabel.text = @"Point camera at QR code with vless:// or subscription URL";
+            return;
+        }
+        [_metadataOutput setMetadataObjectTypes:availableTypes];
+    }
+    @catch (NSException *exception) {
+        (void)exception;
+    }
+
+    _hintLabel.text = @"Legacy QR mode: hold camera steady";
+}
+
+- (void)viewDidLoad {
+    [super viewDidLoad];
+    self.view.backgroundColor = [UIColor blackColor];
+
+    _hintLabel = [[UILabel alloc] initWithFrame:CGRectZero];
+    _hintLabel.backgroundColor = [UIColor colorWithWhite:0 alpha:0.55];
+    _hintLabel.textColor = [UIColor whiteColor];
+    _hintLabel.font = [UIFont boldSystemFontOfSize:16.0];
+    _hintLabel.textAlignment = NSTextAlignmentCenter;
+    _hintLabel.numberOfLines = 2;
+    _hintLabel.text = @"Point camera at QR code with vless:// or subscription URL";
+    [self.view addSubview:_hintLabel];
+
+    _cancelButton = [UIButton buttonWithType:UIButtonTypeCustom];
+    [_cancelButton setTitle:@"" forState:UIControlStateNormal];
+    _cancelButton.backgroundColor = [UIColor colorWithWhite:0 alpha:0.55];
+    _cancelButton.layer.cornerRadius = 8.0f;
+    _cancelButton.layer.borderWidth = 1.0f;
+    _cancelButton.layer.borderColor = [UIColor colorWithWhite:1.0 alpha:0.45].CGColor;
+    _cancelButton.titleLabel.font = [UIFont boldSystemFontOfSize:17.0];
+    [_cancelButton addTarget:self action:@selector(cancelPressed) forControlEvents:UIControlEventTouchUpInside];
+    [self.view addSubview:_cancelButton];
+
+    _cancelButtonLabel = [[UILabel alloc] initWithFrame:CGRectZero];
+    _cancelButtonLabel.backgroundColor = [UIColor clearColor];
+    _cancelButtonLabel.text = @"Cancel";
+    _cancelButtonLabel.font = [UIFont boldSystemFontOfSize:17.0];
+    _cancelButtonLabel.textAlignment = NSTextAlignmentCenter;
+    _cancelButtonLabel.textColor = [UIColor whiteColor];
+    _cancelButtonLabel.shadowColor = [UIColor colorWithWhite:0.0 alpha:0.7];
+    _cancelButtonLabel.shadowOffset = CGSizeMake(0.0f, -1.0f);
+    _cancelButtonLabel.userInteractionEnabled = NO;
+    [_cancelButton addSubview:_cancelButtonLabel];
+
+    [self configureCaptureSession];
+}
+
+- (void)viewDidLayoutSubviews {
+    [super viewDidLayoutSubviews];
+    CGRect b = self.view.bounds;
+    _previewLayer.frame = b;
+    [self updateCaptureConnectionOrientations];
+
+    CGFloat pad = 14.0f;
+    CGFloat top = 28.0f;
+    CGRect sb = [UIApplication sharedApplication].statusBarFrame;
+    CGFloat statusInset = MIN(sb.size.width, sb.size.height);
+    if (statusInset > 0.0f && statusInset < 64.0f) {
+        top = statusInset + 8.0f;
+    }
+    _hintLabel.frame = CGRectMake(pad, top, b.size.width - (pad * 2.0f), 58.0f);
+    _cancelButton.frame = CGRectMake(pad, b.size.height - 62.0f - pad, b.size.width - (pad * 2.0f), 62.0f);
+    _cancelButtonLabel.frame = _cancelButton.bounds;
+}
+
+- (void)viewWillAppear:(BOOL)animated {
+    [super viewWillAppear:animated];
+    _didFinish = NO;
+    _frameSkipCounter = 0;
+    if (_captureSession) {
+        [_captureSession startRunning];
+        [self updateCaptureConnectionOrientations];
+        [self applyPreferredMetadataTypes];
+        [self performSelector:@selector(applyPreferredMetadataTypes) withObject:nil afterDelay:0.25];
+        [self performSelector:@selector(applyPreferredMetadataTypes) withObject:nil afterDelay:0.9];
+    }
+}
+
+- (void)viewWillDisappear:(BOOL)animated {
+    [super viewWillDisappear:animated];
+    [NSObject cancelPreviousPerformRequestsWithTarget:self selector:@selector(applyPreferredMetadataTypes) object:nil];
+    if (_captureSession && [_captureSession isRunning]) {
+        [_captureSession stopRunning];
+    }
+}
+
+- (void)cancelPressed {
+    _didFinish = YES;
+    if (_captureSession && [_captureSession isRunning]) {
+        [_captureSession stopRunning];
+    }
+    if ([_delegate respondsToSelector:@selector(qrScanVCDidCancel:)]) {
+        [_delegate qrScanVCDidCancel:self];
+    }
+}
+
+- (void)captureOutput:(AVCaptureOutput *)captureOutput
+didOutputMetadataObjects:(NSArray *)metadataObjects
+       fromConnection:(AVCaptureConnection *)connection {
+    (void)captureOutput;
+    (void)connection;
+    if (_didFinish || !_metadataCanScanQR || ![metadataObjects isKindOfClass:[NSArray class]]) return;
+
+    for (id obj in metadataObjects) {
+        if (![obj respondsToSelector:@selector(type)] ||
+            ![obj respondsToSelector:@selector(stringValue)]) {
+            continue;
+        }
+
+        NSString *type = [obj performSelector:@selector(type)];
+        if (![type isKindOfClass:[NSString class]] || ![type isEqualToString:kVCQRMetadataType]) continue;
+        NSString *value = [obj performSelector:@selector(stringValue)];
+        if (![value isKindOfClass:[NSString class]] || [value length] == 0) continue;
+        [self deliverScanResult:value];
+        return;
+    }
+}
+
+- (void)captureOutput:(AVCaptureOutput *)captureOutput
+didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
+       fromConnection:(AVCaptureConnection *)connection {
+    (void)captureOutput;
+    (void)connection;
+    if (_didFinish) return;
+
+    _frameSkipCounter++;
+    if ((_frameSkipCounter % 3) != 0) return;
+
+    NSString *decoded = nil;
+    if (![self tryDecodeFrameWithQuirc:sampleBuffer decodedText:&decoded]) {
+        return;
+    }
+    if (![decoded isKindOfClass:[NSString class]] || [decoded length] == 0) return;
+
+    NSString *captured = [decoded copy];
+    dispatch_async(dispatch_get_main_queue(), ^{
+        [self deliverScanResult:captured];
+        [captured release];
+    });
+}
+
+- (BOOL)shouldAutorotateToInterfaceOrientation:(UIInterfaceOrientation)interfaceOrientation {
+    if (IsPadDevice()) {
+        return UIInterfaceOrientationIsPortrait(interfaceOrientation) || UIInterfaceOrientationIsLandscape(interfaceOrientation);
+    }
+    return interfaceOrientation == UIInterfaceOrientationPortrait;
+}
+
+- (BOOL)shouldAutorotate {
+    return IsPadDevice();
+}
+
+- (NSUInteger)supportedInterfaceOrientations {
+    if (IsPadDevice()) {
+        return UIInterfaceOrientationMaskAllButUpsideDown;
+    }
+    return UIInterfaceOrientationMaskPortrait;
+}
+
+- (UIInterfaceOrientation)preferredInterfaceOrientationForPresentation {
+    if (IsPadDevice()) {
+        UIInterfaceOrientation current = CurrentInterfaceOrientation();
+        if (current == UIInterfaceOrientationPortraitUpsideDown) {
+            return UIInterfaceOrientationPortrait;
+        }
+        return current;
+    }
+    return UIInterfaceOrientationPortrait;
+}
+
+- (void)dealloc {
+    if (_captureSession && [_captureSession isRunning]) {
+        [_captureSession stopRunning];
+    }
+    if (_videoQueue) {
+        dispatch_release(_videoQueue);
+        _videoQueue = NULL;
+    }
+    if (_qrDecoder) {
+        quirc_destroy(_qrDecoder);
+        _qrDecoder = NULL;
+    }
+    [_captureSession release];
+    [_metadataOutput release];
+    [_videoOutput release];
+    [_previewLayer release];
+    [_hintLabel release];
+    [_cancelButtonLabel release];
+    [super dealloc];
+}
+
+@end
+
+@interface MainVC : UIViewController <UITableViewDataSource, UITableViewDelegate, UIActionSheetDelegate, UIAlertViewDelegate, UITextViewDelegate, SettingsVCDelegate, QRScanVCDelegate> {
     UIButton *_connectBtn;
     UIButton *_plusBtn;
     UIButton *_terminalBtn;
@@ -3668,11 +4115,52 @@ static UIImage *MakeIconImage(VCIconType type, CGFloat size, BOOL active) {
     return v;
 }
 
+- (NSInteger)existingConfigIndexForURI:(NSString *)uri {
+    if (![uri isKindOfClass:[NSString class]] || [uri length] == 0) return -1;
+    for (NSInteger i = 0; i < (NSInteger)[_configs count]; i++) {
+        NSDictionary *it = [_configs objectAtIndex:i];
+        NSString *existingURI = [it objectForKey:@"uri"];
+        if ([existingURI isKindOfClass:[NSString class]] && [existingURI isEqualToString:uri]) {
+            return i;
+        }
+    }
+    return -1;
+}
+
+- (NSInteger)existingSubscriptionIndexForURL:(NSString *)urlString {
+    if (![urlString isKindOfClass:[NSString class]] || [urlString length] == 0) return -1;
+    for (NSInteger i = 0; i < (NSInteger)[_subscriptions count]; i++) {
+        NSDictionary *it = [_subscriptions objectAtIndex:i];
+        NSString *existingURL = [it objectForKey:@"url"];
+        if ([existingURL isKindOfClass:[NSString class]] && [existingURL isEqualToString:urlString]) {
+            return i;
+        }
+    }
+    return -1;
+}
+
 - (void)importDirectURI:(NSString *)uri {
-    NSString *name = [self displayNameForURI:uri index:[_configs count]];
+    NSString *normalizedURI = [self safeTrim:uri];
+    if (![normalizedURI isKindOfClass:[NSString class]] || [normalizedURI length] == 0) {
+        [self showStatus:@"Invalid configuration link" ok:NO];
+        return;
+    }
+
+    NSInteger existing = [self existingConfigIndexForURI:normalizedURI];
+    if (existing >= 0) {
+        _selectedConfigIndex = existing;
+        _selectedSubIndex = -1;
+        _selectedSubItemIndex = -1;
+        [self normalizeSelection];
+        [_tableView reloadData];
+        [self showStatus:@"Configuration already exists (skipped)" ok:YES];
+        return;
+    }
+
+    NSString *name = [self displayNameForURI:normalizedURI index:[_configs count]];
     NSDictionary *cfg = [NSDictionary dictionaryWithObjectsAndKeys:
                          name, @"name",
-                         uri, @"uri",
+                         normalizedURI, @"uri",
                          nil];
     [_configs addObject:cfg];
     [self saveData];
@@ -3685,31 +4173,34 @@ static UIImage *MakeIconImage(VCIconType type, CGFloat size, BOOL active) {
 }
 
 - (void)importSubscriptionURL:(NSString *)urlString {
-    NSString *name = [self subscriptionNameFromURLString:urlString];
+    NSString *normalizedURL = [self safeTrim:urlString];
+    if (![normalizedURL isKindOfClass:[NSString class]] || [normalizedURL length] == 0) {
+        [self showStatus:@"Invalid subscription URL" ok:NO];
+        return;
+    }
+
+    NSInteger existing = [self existingSubscriptionIndexForURL:normalizedURL];
+    if (existing >= 0) {
+        _expandedSubscription = existing;
+        _selectedConfigIndex = -1;
+        _selectedSubIndex = existing;
+        _selectedSubItemIndex = 0;
+        [self normalizeSelection];
+        [_tableView reloadData];
+        [self showStatus:@"Subscription already exists (skipped)" ok:YES];
+        return;
+    }
+
+    NSString *name = [self subscriptionNameFromURLString:normalizedURL];
 
     NSDictionary *sub = [NSDictionary dictionaryWithObjectsAndKeys:
                          name, @"name",
-                         urlString, @"url",
+                         normalizedURL, @"url",
                          [NSArray array], @"items",
                          nil];
 
-    NSInteger existing = -1;
-    for (NSInteger i = 0; i < (NSInteger)[_subscriptions count]; i++) {
-        NSDictionary *it = [_subscriptions objectAtIndex:i];
-        if ([[it objectForKey:@"url"] isEqualToString:urlString]) {
-            existing = i;
-            break;
-        }
-    }
-
-    NSInteger subIndex = 0;
-    if (existing >= 0) {
-        [_subscriptions replaceObjectAtIndex:existing withObject:sub];
-        subIndex = existing;
-    } else {
-        [_subscriptions addObject:sub];
-        subIndex = [_subscriptions count] - 1;
-    }
+    [_subscriptions addObject:sub];
+    NSInteger subIndex = [_subscriptions count] - 1;
 
     _expandedSubscription = subIndex;
     [self saveData];
@@ -3749,16 +4240,7 @@ static UIImage *MakeIconImage(VCIconType type, CGFloat size, BOOL active) {
 
         for (NSString *link in links) {
             if ([self isVLESSURI:link]) {
-                BOOL alreadyExists = NO;
-                for (NSInteger i = 0; i < (NSInteger)[_configs count]; i++) {
-                    NSDictionary *it = [_configs objectAtIndex:i];
-                    NSString *uri = [it objectForKey:@"uri"];
-                    if ([uri isKindOfClass:[NSString class]] && [uri isEqualToString:link]) {
-                        alreadyExists = YES;
-                        break;
-                    }
-                }
-                if (alreadyExists) {
+                if ([self existingConfigIndexForURI:link] >= 0) {
                     skippedConfigs++;
                     continue;
                 }
@@ -3778,17 +4260,8 @@ static UIImage *MakeIconImage(VCIconType type, CGFloat size, BOOL active) {
                                      [NSArray array], @"items",
                                      nil];
 
-                NSInteger existing = -1;
-                for (NSInteger i = 0; i < (NSInteger)[_subscriptions count]; i++) {
-                    NSDictionary *it = [_subscriptions objectAtIndex:i];
-                    if ([[it objectForKey:@"url"] isEqualToString:link]) {
-                        existing = i;
-                        break;
-                    }
-                }
-
                 NSInteger subIndex = -1;
-                if (existing >= 0) {
+                if ([self existingSubscriptionIndexForURL:link] >= 0) {
                     skippedSubs++;
                     continue;
                 } else {
@@ -4126,6 +4599,19 @@ static UIImage *MakeIconImage(VCIconType type, CGFloat size, BOOL active) {
     [self presentImportFileBrowserAtPath:@"/var/mobile"];
 }
 
+- (void)startQRImportFlow {
+    if (![UIImagePickerController isSourceTypeAvailable:UIImagePickerControllerSourceTypeCamera]) {
+        [self showStatus:@"Camera is unavailable" ok:NO];
+        return;
+    }
+
+    QRScanVC *scanner = [[[QRScanVC alloc] init] autorelease];
+    scanner.delegate = self;
+    scanner.modalPresentationStyle = UIModalPresentationFullScreen;
+    [self presentViewController:scanner animated:YES completion:nil];
+    [self showStatus:@"Scan QR code to import links..." ok:YES];
+}
+
 - (NSString *)uriForCurrentSelection {
     if (_selectedConfigIndex >= 0 && _selectedConfigIndex < (NSInteger)[_configs count]) {
         NSDictionary *cfg = [_configs objectAtIndex:_selectedConfigIndex];
@@ -4235,7 +4721,7 @@ static UIImage *MakeIconImage(VCIconType type, CGFloat size, BOOL active) {
                                                          delegate:self
                                                 cancelButtonTitle:@"Cancel"
                                            destructiveButtonTitle:nil
-                                                otherButtonTitles:@"Import from Clipboard", @"Import from File", @"Manual Input", nil] autorelease];
+                                                otherButtonTitles:@"Import from Clipboard", @"Import from File", @"Scan QR Code", @"Manual Input", nil] autorelease];
     sheet.tag = VCActionSheetTagImport;
     [sheet showInView:self.view];
 }
@@ -4860,6 +5346,8 @@ static UIImage *MakeIconImage(VCIconType type, CGFloat size, BOOL active) {
         } else if (buttonIndex == 1) {
             [self startFileBrowserImportFlow];
         } else if (buttonIndex == 2) {
+            [self startQRImportFlow];
+        } else if (buttonIndex == 3) {
             UIAlertView *av = [[[UIAlertView alloc] initWithTitle:@"Manual Import"
                                                           message:@"Paste vless:// or subscription URL"
                                                          delegate:self
@@ -4906,6 +5394,45 @@ static UIImage *MakeIconImage(VCIconType type, CGFloat size, BOOL active) {
         }
         return;
     }
+}
+
+- (void)qrScanVCDidCancel:(UIViewController *)vc {
+    (void)vc;
+    [self dismissViewControllerAnimated:YES completion:nil];
+    [self showStatus:@"QR import canceled" ok:YES];
+}
+
+- (void)qrScanVC:(UIViewController *)vc didScanText:(NSString *)text {
+    (void)vc;
+    NSString *payload = [self safeTrim:text];
+    [self dismissViewControllerAnimated:YES completion:nil];
+    if (![payload isKindOfClass:[NSString class]] || [payload length] == 0) {
+        [self showStatus:@"QR code does not contain import data" ok:NO];
+        return;
+    }
+
+    NSArray *links = [self extractImportLinksFromText:payload];
+    if ([links isKindOfClass:[NSArray class]] && [links count] > 0) {
+        NSString *subscriptionURL = nil;
+        for (NSString *candidate in links) {
+            if ([self isSubscriptionURL:candidate]) {
+                subscriptionURL = candidate;
+                break;
+            }
+        }
+        if ([subscriptionURL isKindOfClass:[NSString class]] && [subscriptionURL length] > 0) {
+            [self importSubscriptionURL:subscriptionURL];
+            return;
+        }
+
+        if ([links count] == 1) {
+            NSString *single = [links objectAtIndex:0];
+            [self importTextEntry:single];
+            return;
+        }
+    }
+
+    [self importTextEntry:payload];
 }
 
 - (void)alertView:(UIAlertView *)alertView clickedButtonAtIndex:(NSInteger)buttonIndex {
