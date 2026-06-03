@@ -915,8 +915,10 @@ static int write_pf_conf(const char *server_ips, char ifnames[][32], size_t if_c
             if (fprintf(fp,
                 "pass out quick on %s inet proto tcp from any to <vlesscore_bypass> flags S/SA keep state\n"
                 "pass out quick on %s route-to (lo0 127.0.0.1) inet proto tcp from any to ! <vlesscore_bypass> flags S/SA keep state\n"
+                "block return out quick on %s inet proto udp from any to ! <vlesscore_bypass> port 443\n"
+                "block return out quick on %s inet6 all\n"
                 "pass out on %s all keep state\n",
-                ifname, ifname, ifname) < 0) {
+                ifname, ifname, ifname, ifname, ifname) < 0) {
                 fclose(fp);
                 return -1;
             }
@@ -956,8 +958,10 @@ static int write_pf_conf(const char *server_ips, char ifnames[][32], size_t if_c
             if (fprintf(fp,
                 "pass out quick on %s inet proto tcp from any to <vlesscore_bypass> flags S/SA keep state\n"
                 "pass out quick on %s route-to (lo0) inet proto tcp from any to ! <vlesscore_bypass> flags S/SA keep state\n"
+                "block return out quick on %s inet proto udp from any to ! <vlesscore_bypass> port 443\n"
+                "block return out quick on %s inet6 all\n"
                 "pass out on %s all keep state\n",
-                ifname, ifname, ifname) < 0) {
+                ifname, ifname, ifname, ifname, ifname) < 0) {
                 fclose(fp);
                 return -1;
             }
@@ -981,8 +985,10 @@ static int write_pf_conf(const char *server_ips, char ifnames[][32], size_t if_c
             if (fprintf(fp,
                 "pass out quick on %s inet proto tcp from any to <vlesscore_bypass> flags S/SA keep state\n"
                 "pass out quick on %s divert-to 127.0.0.1 port %d inet proto tcp from any to ! <vlesscore_bypass> flags S/SA keep state\n"
+                "block return out quick on %s inet proto udp from any to ! <vlesscore_bypass> port 443\n"
+                "block return out quick on %s inet6 all\n"
                 "pass out on %s all keep state\n",
-                ifname, ifname, redir_port, ifname) < 0) {
+                ifname, ifname, redir_port, ifname, ifname, ifname) < 0) {
                 fclose(fp);
                 return -1;
             }
@@ -1006,8 +1012,10 @@ static int write_pf_conf(const char *server_ips, char ifnames[][32], size_t if_c
             if (fprintf(fp,
                 "pass out quick on %s inet proto tcp from any to <vlesscore_bypass> keep state\n"
                 "pass out quick on %s inet proto tcp from any to ! <vlesscore_bypass> divert-to 127.0.0.1 port %d keep state\n"
+                "block return out quick on %s inet proto udp from any to ! <vlesscore_bypass> port 443\n"
+                "block return out quick on %s inet6 all\n"
                 "pass out on %s all keep state\n",
-                ifname, ifname, redir_port, ifname) < 0) {
+                ifname, ifname, redir_port, ifname, ifname, ifname) < 0) {
                 fclose(fp);
                 return -1;
             }
@@ -1031,8 +1039,10 @@ static int write_pf_conf(const char *server_ips, char ifnames[][32], size_t if_c
             if (fprintf(fp,
                 "pass out quick on %s inet proto tcp from any to <vlesscore_bypass> flags S/SA keep state\n"
                 "pass out quick on %s inet proto tcp from any to ! <vlesscore_bypass> rdr-to 127.0.0.1 port %d flags S/SA keep state\n"
+                "block return out quick on %s inet proto udp from any to ! <vlesscore_bypass> port 443\n"
+                "block return out quick on %s inet6 all\n"
                 "pass out on %s all keep state\n",
-                ifname, ifname, redir_port, ifname) < 0) {
+                ifname, ifname, redir_port, ifname, ifname, ifname) < 0) {
                 fclose(fp);
                 return -1;
             }
@@ -1056,8 +1066,10 @@ static int write_pf_conf(const char *server_ips, char ifnames[][32], size_t if_c
             if (fprintf(fp,
                 "pass out quick on %s inet proto tcp from any to <vlesscore_bypass> keep state\n"
                 "pass out quick on %s inet proto tcp from any to ! <vlesscore_bypass> rdr-to 127.0.0.1 port %d keep state\n"
+                "block return out quick on %s inet proto udp from any to ! <vlesscore_bypass> port 443\n"
+                "block return out quick on %s inet6 all\n"
                 "pass out on %s all keep state\n",
-                ifname, ifname, redir_port, ifname) < 0) {
+                ifname, ifname, redir_port, ifname, ifname, ifname) < 0) {
                 fclose(fp);
                 return -1;
             }
@@ -1089,8 +1101,10 @@ static int write_pf_conf(const char *server_ips, char ifnames[][32], size_t if_c
         for (size_t i = 0; i < if_count; i++) {
             const char *ifname = ifnames[i];
             if (fprintf(fp,
+                "block return out quick on %s inet proto udp from any to ! <vlesscore_bypass> port 443\n"
+                "block return out quick on %s inet6 all\n"
                 "pass out on %s all keep state\n",
-                ifname) < 0) {
+                ifname, ifname, ifname) < 0) {
                 fclose(fp);
                 return -1;
             }
@@ -1128,6 +1142,17 @@ static void ensure_pf_os_file(void) {
     (void)write(fd, placeholder, strlen(placeholder));
     close(fd);
     log_msg("created placeholder /etc/pf.os");
+}
+
+static void flush_pf_states(void) {
+    const char *pfctl = find_pfctl_bin();
+    if (!pfctl) return;
+
+    char cmd[320];
+    snprintf(cmd, sizeof(cmd), "%s -q -F states >/dev/null 2>&1", pfctl);
+    if (run_cmd(cmd) == 0) {
+        log_msg("pf states flushed after rule load");
+    }
 }
 
 static int apply_pf_rules(const char *server_ips, int redir_port) {
@@ -1223,6 +1248,7 @@ static int apply_pf_rules(const char *server_ips, int redir_port) {
         snprintf(cmd, sizeof(cmd), "%s -q -f /var/run/vlesscore-pf.conf >/dev/null 2>&1", pfctl);
         if (run_cmd(cmd) == 0) {
             log_msg("pf rules loaded mode=%s", pf_rule_mode_name(mode));
+            flush_pf_states();
             return 0;
         }
     }

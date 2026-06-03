@@ -1530,15 +1530,16 @@ static UIImage *MakeIconImage(VCIconType type, CGFloat size, BOOL active) {
     _textView.text =
         @"Q: Why can't I connect?\n"
         @"A: Most failures come from an unsupported configuration tuple, wrong server parameters, or a server that is offline. "
-        @"This app currently allows only [vless/tcp/reality] and [vless/xhttp/tls]. Recheck the link, server details, and network reachability.\n\n"
+        @"This app currently allows only [vless/tcp/reality] with flow=xtls-rprx-vision and fp=chrome/firefox/random/qq, or [vless/xhttp/tls]. "
+        @"Recheck the link, server details, and network reachability.\n\n"
         @"Q: Why isn't the subscription added?\n"
         @"A: The app accepts only direct vless:// links or http(s) subscription URLs that return valid vless:// entries. "
         @"If your provider blocks requests, redirects heavily, or returns an empty list, import will fail.\n\n"
         @"Q: Which protocols are supported?\n"
-        @"A: VLESS links are supported. For now, supported transport/security sets are tcp+reality and xhttp+tls. "
+        @"A: VLESS links are supported. For now, supported sets are tcp+reality+xtls-rprx-vision and xhttp+tls. "
         @"Other tuples are blocked on purpose to prevent broken connections.\n\n"
         @"Q: Why are some protocol tuples marked in red?\n"
-        @"A: Red means the tuple is not supported by the app right now. "
+        @"A: Red means the tuple or a required option such as flow/fp is not supported by the app right now. "
         @"This warning is shown to help you avoid failed connection attempts.\n\n"
         @"Q: Up to which iOS version is the app supported?\n"
         @"A: This package targets legacy 32-bit iOS devices (minimum iOS 6.0). "
@@ -2568,6 +2569,26 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
     return [security lowercaseString];
 }
 
+- (NSString *)realityFlowFromURI:(NSString *)uri {
+    NSString *flow = [self queryValueForURLString:uri key:@"flow"];
+    return [self safeTrim:flow];
+}
+
+- (NSString *)realityFingerprintFromURI:(NSString *)uri {
+    NSString *fp = [self queryValueForURLString:uri key:@"fp"];
+    fp = [self safeTrim:fp];
+    if ([fp length] == 0) return @"chrome";
+    return fp;
+}
+
+- (BOOL)isSupportedRealityFingerprint:(NSString *)fp {
+    if (![fp isKindOfClass:[NSString class]] || [fp length] == 0) return NO;
+    return [fp isEqualToString:@"chrome"] ||
+           [fp isEqualToString:@"firefox"] ||
+           [fp isEqualToString:@"random"] ||
+           [fp isEqualToString:@"qq"];
+}
+
 - (NSString *)subscriptionNameFromURLString:(NSString *)urlString {
     if (![urlString isKindOfClass:[NSString class]] || [urlString length] == 0) {
         return @"subscription";
@@ -2932,22 +2953,45 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
     return [self maskedLinkText:endpoint];
 }
 
-- (BOOL)isSupportedConfigTupleForURI:(NSString *)uri {
+- (NSString *)unsupportedConfigReasonForURI:(NSString *)uri {
     NSString *scheme = [[self schemeFromURIString:uri] lowercaseString];
     NSString *transport = [[self transportTypeFromURI:uri] lowercaseString];
     NSString *security = [[self securityTypeFromURI:uri] lowercaseString];
 
-    if (![scheme isEqualToString:@"vless"]) return NO;
+    if (![scheme isEqualToString:@"vless"]) {
+        return @"protocol must be vless";
+    }
 
     // Supported tuple #1: [vless/tcp/reality]
     BOOL vision = [transport isEqualToString:@"tcp"] &&
                   [security isEqualToString:@"reality"];
+    if (vision) {
+        NSString *flow = [self realityFlowFromURI:uri];
+        if (![flow isEqualToString:@"xtls-rprx-vision"]) {
+            if ([flow length] == 0) {
+                return @"flow must be xtls-rprx-vision";
+            }
+            return [NSString stringWithFormat:@"unsupported flow=%@", flow];
+        }
+
+        NSString *fp = [self realityFingerprintFromURI:uri];
+        if (![self isSupportedRealityFingerprint:fp]) {
+            return [NSString stringWithFormat:@"unsupported fp=%@", fp];
+        }
+
+        return nil;
+    }
 
     // Supported tuple #2: [vless/xhttp/tls]
     BOOL xhttp = [transport isEqualToString:@"xhttp"] &&
                  [security isEqualToString:@"tls"];
+    if (xhttp) return nil;
 
-    return vision || xhttp;
+    return @"supported sets are vless/tcp/reality and vless/xhttp/tls";
+}
+
+- (BOOL)isSupportedConfigTupleForURI:(NSString *)uri {
+    return ([self unsupportedConfigReasonForURI:uri] == nil);
 }
 
 - (UIColor *)configPrefixColorForURI:(NSString *)uri {
@@ -2961,6 +3005,12 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
     NSString *prefix = [self configPrefixTextFromURI:uri];
     if (![prefix isKindOfClass:[NSString class]] || [prefix length] == 0) {
         prefix = @"[unknown]";
+    }
+    NSString *reason = [self unsupportedConfigReasonForURI:uri];
+    if ([reason length] > 0) {
+        return [NSString stringWithFormat:@"Error: unsupported config %@ (%@)",
+                prefix,
+                reason];
     }
     return [NSString stringWithFormat:@"Error: unsupported config %@",
             prefix];
