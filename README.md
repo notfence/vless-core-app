@@ -77,7 +77,7 @@ Build or download it from:
 
 `vless-core-app` package build expects these files:
 
-- `../vless-core-cli/vless-core-darwin-amrv7`
+- `../vless-core-cli/vless-core-darwin-armv7`
 - `../vless-core-cli/third_party/curl-ios6-armv7/bin/curl`
 - `../vless-core-cli/third_party/cacert.pem`
 
@@ -103,7 +103,7 @@ Output:
 - `build/com.vlesscore.app_iphoneos-arm.deb`
 By default, package build takes binaries from sibling repo:
 
-- `../vless-core-cli/vless-core-darwin-amrv7`
+- `../vless-core-cli/vless-core-darwin-armv7`
 - `../vless-core-cli/third_party/curl-ios6-armv7/bin/curl`
 - `../vless-core-cli/third_party/cacert.pem`
 
@@ -111,7 +111,7 @@ Override paths if needed:
 
 ```bash
 make deb \
-  VLESS_CORE_BIN=/abs/path/to/vless-core-darwin-amrv7 \
+  VLESS_CORE_BIN=/abs/path/to/vless-core-darwin-armv7 \
   VLESS_CORE_CURL_BIN=/abs/path/to/curl \
   CA_BUNDLE=/abs/path/to/cacert.pem
 ```
@@ -122,7 +122,7 @@ Package uses `gzip` compression for old iOS 6 `dpkg` compatibility.
 
 - App: `/Applications/vless-core.app`
 - Daemon API: `127.0.0.1:9093`
-- Core binary: `/usr/bin/vless-core-darwin-amrv7`
+- Core binary: `/usr/bin/vless-core-darwin-armv7`
 - Subscription fetch binary: `/usr/bin/vless-core-curl`
 - CA bundle: `/usr/share/vless-core/cacert.pem`
 - Redsocks helper: `/usr/bin/redsocks-vless-core`

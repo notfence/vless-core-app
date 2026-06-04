@@ -376,7 +376,7 @@ static const char *find_redsocks_bin(void) {
 }
 
 static const char *find_vless_core_bin(void) {
-    if (can_exec("/usr/bin/vless-core-darwin-amrv7")) return "/usr/bin/vless-core-darwin-amrv7";
+    if (can_exec("/usr/bin/vless-core-darwin-armv7")) return "/usr/bin/vless-core-darwin-armv7";
     return NULL;
 }
 

@@ -556,7 +556,7 @@ static void stop_child_process(pid_t pid) {
 
 static pid_t spawn_temp_core_for_ping(const char *uri, uint16_t port) {
     if (!uri || !*uri) return -1;
-    const char *core = "/usr/bin/vless-core-darwin-amrv7";
+    const char *core = "/usr/bin/vless-core-darwin-armv7";
     if (access(core, X_OK) != 0) {
         return -1;
     }
@@ -573,7 +573,7 @@ static pid_t spawn_temp_core_for_ping(const char *uri, uint16_t port) {
             (void)dup2(dn, STDERR_FILENO);
             if (dn > STDERR_FILENO) close(dn);
         }
-        execl(core, "vless-core-darwin-amrv7", "--uri", uri, "--listen-port", port_str, (char *)NULL);
+        execl(core, "vless-core-darwin-armv7", "--uri", uri, "--listen-port", port_str, (char *)NULL);
         _exit(127);
     }
     return pid;
@@ -707,9 +707,9 @@ static NSString *RunCommandFirstLine(const char *cmdLine) {
 }
 
 static NSString *DetectCoreBinaryVersion(void) {
-    NSString *v = RunCommandFirstLine("/usr/bin/vless-core-darwin-amrv7 -v 2>/dev/null");
+    NSString *v = RunCommandFirstLine("/usr/bin/vless-core-darwin-armv7 -v 2>/dev/null");
     if (!v || [v length] == 0) {
-        v = RunCommandFirstLine("vless-core-darwin-amrv7 -v 2>/dev/null");
+        v = RunCommandFirstLine("vless-core-darwin-armv7 -v 2>/dev/null");
     }
     if (!v || [v length] == 0) {
         v = @"unknown";
@@ -4070,7 +4070,7 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
     if (![ver isKindOfClass:[NSString class]] || [ver length] == 0) {
         ver = @"0.0.0";
     }
-    NSString *coreBinary = @"vless-core-darwin-amrv7";
+    NSString *coreBinary = @"vless-core-darwin-armv7";
     NSString *coreVersion = DetectCoreBinaryVersion();
 
     NSString *msg =
