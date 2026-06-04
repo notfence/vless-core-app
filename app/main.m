@@ -1530,13 +1530,13 @@ static UIImage *MakeIconImage(VCIconType type, CGFloat size, BOOL active) {
     _textView.text =
         @"Q: Why can't I connect?\n"
         @"A: Most failures come from an unsupported configuration tuple, wrong server parameters, or a server that is offline. "
-        @"This app currently allows only [vless/tcp/reality] with flow=xtls-rprx-vision and fp=chrome/firefox/random/qq, or [vless/xhttp/tls]. "
+        @"This app currently allows [vless/tcp/reality] with flow=xtls-rprx-vision and fp=chrome/firefox/random/qq, [vless/xhttp/tls], or [vless/xhttp/reality]. "
         @"Recheck the link, server details, and network reachability.\n\n"
         @"Q: Why isn't the subscription added?\n"
         @"A: The app accepts only direct vless:// links or http(s) subscription URLs that return valid vless:// entries. "
         @"If your provider blocks requests, redirects heavily, or returns an empty list, import will fail.\n\n"
         @"Q: Which protocols are supported?\n"
-        @"A: VLESS links are supported. For now, supported sets are tcp+reality+xtls-rprx-vision and xhttp+tls. "
+        @"A: VLESS links are supported. For now, supported sets are tcp+reality+xtls-rprx-vision, xhttp+tls, and xhttp+reality. "
         @"Other tuples are blocked on purpose to prevent broken connections.\n\n"
         @"Q: Why are some protocol tuples marked in red?\n"
         @"A: Red means the tuple or a required option such as flow/fp is not supported by the app right now. "
@@ -2578,7 +2578,7 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
     NSString *fp = [self queryValueForURLString:uri key:@"fp"];
     fp = [self safeTrim:fp];
     if ([fp length] == 0) return @"chrome";
-    return fp;
+    return [fp lowercaseString];
 }
 
 - (BOOL)isSupportedRealityFingerprint:(NSString *)fp {
@@ -2982,12 +2982,22 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
         return nil;
     }
 
-    // Supported tuple #2: [vless/xhttp/tls]
-    BOOL xhttp = [transport isEqualToString:@"xhttp"] &&
-                 [security isEqualToString:@"tls"];
-    if (xhttp) return nil;
+    BOOL xhttpTransport = [transport isEqualToString:@"xhttp"] ||
+                          [transport isEqualToString:@"splithttp"];
 
-    return @"supported sets are vless/tcp/reality and vless/xhttp/tls";
+    // Supported tuple #2: [vless/xhttp/tls]
+    if (xhttpTransport && [security isEqualToString:@"tls"]) return nil;
+
+    // Supported tuple #3: [vless/xhttp/reality]
+    if (xhttpTransport && [security isEqualToString:@"reality"]) {
+        NSString *fp = [self realityFingerprintFromURI:uri];
+        if (![self isSupportedRealityFingerprint:fp]) {
+            return [NSString stringWithFormat:@"unsupported fp=%@", fp];
+        }
+        return nil;
+    }
+
+    return @"supported sets are vless/tcp/reality, vless/xhttp/tls, and vless/xhttp/reality";
 }
 
 - (BOOL)isSupportedConfigTupleForURI:(NSString *)uri {
@@ -3267,7 +3277,7 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
         if (decoded) v = decoded;
         v = [v lowercaseString];
 
-        if ([k isEqualToString:@"type"] && [v isEqualToString:@"xhttp"]) {
+        if ([k isEqualToString:@"type"] && ([v isEqualToString:@"xhttp"] || [v isEqualToString:@"splithttp"])) {
             return YES;
         }
     }
