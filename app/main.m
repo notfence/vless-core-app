@@ -969,9 +969,8 @@ static NSData *FetchURLViaVlessCoreCurl(NSString *urlString, NSString **errOut, 
     return body;
 }
 
-static void ClearLogsViaDaemon(void) {
-    NSString *resp = SendCommand(@"CLEAR_LOGS\n");
-    (void)resp;
+static NSString *ClearLogsViaDaemon(void) {
+    return SendCommand(@"CLEAR_LOGS\n");
 }
 
 static NSString *ReadFileTail(NSString *path, NSUInteger maxBytes) {
@@ -2309,6 +2308,7 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
     UIButton *_connectBtn;
     UIButton *_plusBtn;
     UIButton *_terminalBtn;
+    UIButton *_clearLogsBtn;
     UIButton *_refreshBtn;
     UIButton *_settingsBtn;
     UILabel *_statusLabel;
@@ -3642,10 +3642,13 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
         ? LoadBundledIconScaled(@"icon-list", 20.0f)
         : LoadBundledIconScaled(@"icon-terminal", 20.0f);
     UIImage *settings = LoadBundledIconScaled(@"icon-settings", 20.0f);
+    UIImage *trash = LoadBundledIconScaled(@"icon-trash", 20.0f);
 
     [_refreshBtn setImage:(refresh ? refresh : MakeIconImage(VCIconTypeRefresh, 20.0f, NO)) forState:UIControlStateNormal];
     [_terminalBtn setImage:(terminal ? terminal : MakeIconImage(_showingTerminal ? VCIconTypeList : VCIconTypeTerminal, 20.0f, _showingTerminal))
                   forState:UIControlStateNormal];
+    [_clearLogsBtn setImage:trash forState:UIControlStateNormal];
+    _clearLogsBtn.hidden = !_showingTerminal;
     [_settingsBtn setImage:(settings ? settings : MakeIconImage(VCIconTypeSettings, 20.0f, NO)) forState:UIControlStateNormal];
 }
 
@@ -4847,6 +4850,23 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
     }
 }
 
+- (void)forceRefreshLogs {
+    _logView.text = BuildCombinedLogs();
+    [_logView setContentOffset:CGPointZero animated:NO];
+}
+
+- (void)clearLogsPressed {
+    NSString *resp = [self sanitizeDaemonText:ClearLogsViaDaemon()];
+    [self forceRefreshLogs];
+
+    if ([resp hasPrefix:@"OK"]) {
+        [self showStatus:@"Logs cleared" ok:YES];
+    } else {
+        NSString *msg = ([resp length] > 0) ? resp : @"Failed to clear logs";
+        [self showStatus:msg ok:NO];
+    }
+}
+
 - (void)refreshLogsTick:(NSTimer *)timer {
     (void)timer;
     [self refreshLogs];
@@ -4895,6 +4915,7 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
     CGFloat refreshX = settingsX - gap - iconW;
     CGFloat terminalX = refreshX - gap - iconW;
     CGFloat plusX = terminalX - gap - iconW;
+    CGFloat clearLogsY = topY + iconW + gap;
 
     _titleLabel = [[UILabel alloc] initWithFrame:CGRectMake(12, 6, plusX - 20, 28)];
     _titleLabel.text = @"vless-core";
@@ -4917,6 +4938,14 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
     [_terminalBtn addTarget:self action:@selector(terminalPressed) forControlEvents:UIControlEventTouchUpInside];
     [self applyTopButtonFeedbackToButton:_terminalBtn];
     [self.view addSubview:_terminalBtn];
+
+    _clearLogsBtn = [[UIButton buttonWithType:UIButtonTypeCustom] retain];
+    _clearLogsBtn.frame = CGRectMake(settingsX, clearLogsY, iconW, iconW);
+    _clearLogsBtn.autoresizingMask = UIViewAutoresizingFlexibleLeftMargin;
+    _clearLogsBtn.hidden = YES;
+    [_clearLogsBtn addTarget:self action:@selector(clearLogsPressed) forControlEvents:UIControlEventTouchUpInside];
+    [self applyTopButtonFeedbackToButton:_clearLogsBtn];
+    [self.view addSubview:_clearLogsBtn];
 
     _refreshBtn = [[UIButton buttonWithType:UIButtonTypeCustom] retain];
     _refreshBtn.frame = CGRectMake(refreshX, topY, iconW, iconW);
@@ -5032,6 +5061,7 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
     [_connectBtn release];
     [_plusBtn release];
     [_terminalBtn release];
+    [_clearLogsBtn release];
     [_refreshBtn release];
     [_settingsBtn release];
     [_statusLabel release];

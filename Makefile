@@ -97,6 +97,7 @@ package-root: check-package-inputs $(APP_BIN) $(DAEMON_BIN) $(BOOTSTRAP_BIN) $(V
 	cp app/icons/icon-terminal.png $(PKG_ROOT)/Applications/vless-core.app/icon-terminal.png
 	cp app/icons/icon-list.png $(PKG_ROOT)/Applications/vless-core.app/icon-list.png
 	cp app/icons/icon-settings.png $(PKG_ROOT)/Applications/vless-core.app/icon-settings.png
+	cp app/icons/icon-trash.png $(PKG_ROOT)/Applications/vless-core.app/icon-trash.png
 	cp app/icons/icon-ping.png $(PKG_ROOT)/Applications/vless-core.app/icon-ping.png
 	cp $(APP_BIN) $(PKG_ROOT)/Applications/vless-core.app/vless-core
 	cp $(DAEMON_BIN) $(PKG_ROOT)/usr/bin/vpnctld
