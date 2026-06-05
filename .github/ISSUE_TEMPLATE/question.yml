@@ -1,0 +1,70 @@
+name: ❓ Question
+description: Ask a question about vless-core-app
+title: "[Question]: "
+labels: ["question"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Before asking, install the latest release and check whether the question is still relevant:
+        https://github.com/notfence/vless-core-app/releases/latest
+
+  - type: textarea
+    id: question
+    attributes:
+      label: Question
+      description: What do you want to know?
+      placeholder: Ask your question clearly.
+    validations:
+      required: true
+
+  - type: dropdown
+    id: area
+    attributes:
+      label: Topic
+      description: What is the question about?
+      options:
+        - Usage / setup
+        - UI / app screens
+        - Networking / VPN routing
+        - Core connection / protocol
+        - Config import / validation
+        - Subscription update
+        - Installation / update / deb package
+        - Logs / diagnostics
+        - Other / not sure
+    validations:
+      required: true
+
+  - type: textarea
+    id: context
+    attributes:
+      label: Context
+      description: What have you already tried, and what result did you get?
+      placeholder: Describe your setup, command, config type, or app screen if relevant.
+    validations:
+      required: true
+
+  - type: input
+    id: device
+    attributes:
+      label: Device
+      placeholder: iPhone 4S, iPad 4, etc.
+    validations:
+      required: false
+
+  - type: input
+    id: ios_version
+    attributes:
+      label: iOS version
+      placeholder: 6.1.3, 10.3.3, etc.
+    validations:
+      required: false
+
+  - type: input
+    id: app_version
+    attributes:
+      label: vless-core-app version
+      placeholder: 0.3.6
+    validations:
+      required: false

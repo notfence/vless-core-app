@@ -1,0 +1,74 @@
+name: ✨ Feature request
+description: Suggest an improvement or a new feature for vless-core-app
+title: "[Feature]: "
+labels: ["enhancement"]
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem or use case
+      description: What problem should this feature solve?
+      placeholder: Describe the workflow, limitation, or missing behavior.
+    validations:
+      required: true
+
+  - type: textarea
+    id: solution
+    attributes:
+      label: Proposed solution
+      description: What should be added or changed?
+      placeholder: Describe the feature you want to see.
+    validations:
+      required: true
+
+  - type: dropdown
+    id: area
+    attributes:
+      label: Feature area
+      description: Which part of the app would this affect?
+      options:
+        - UI / app screens
+        - Networking / VPN routing
+        - Core connection / protocol
+        - Config import / validation
+        - Subscription update
+        - Installation / update / deb package
+        - Logs / diagnostics
+        - Performance / stability
+        - Other / not sure
+    validations:
+      required: true
+
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered
+      description: Is there a workaround or another way to solve this?
+      placeholder: Describe any workaround, existing client behavior, or why another approach is not enough.
+    validations:
+      required: false
+
+  - type: input
+    id: device
+    attributes:
+      label: Device
+      placeholder: iPhone 4S, iPad 4, etc.
+    validations:
+      required: false
+
+  - type: input
+    id: ios_version
+    attributes:
+      label: iOS version
+      placeholder: 6.1.3, 10.3.3, etc.
+    validations:
+      required: false
+
+  - type: textarea
+    id: extra
+    attributes:
+      label: Extra context
+      description: Add screenshots, examples, links, or config details if they help explain the request.
+      placeholder: Any extra context.
+    validations:
+      required: false

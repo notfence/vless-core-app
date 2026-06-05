@@ -1,0 +1,138 @@
+name: 🐞 Bug report
+description: Report a problem with vless-core-app
+title: "[Bug]: "
+labels: ["bug"]
+body:
+  - type: dropdown
+    id: area
+    attributes:
+      label: Bug area
+      description: Where do you think the problem is?
+      options:
+        - UI / app screens
+        - Networking / VPN routing
+        - Core connection / protocol
+        - Config import / validation
+        - Subscription update
+        - Installation / update / deb package
+        - Logs / diagnostics
+        - Performance / stability
+        - Other / not sure
+    validations:
+      required: true
+
+  - type: textarea
+    id: summary
+    attributes:
+      label: Problem summary
+      description: Describe the actual problem in a few sentences.
+      placeholder: What happened? What did you expect to happen instead?
+    validations:
+      required: true
+
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce
+      description: List the exact steps that reproduce the bug.
+      placeholder: |
+        1. Open ...
+        2. Select ...
+        3. Tap ...
+        4. See ...
+    validations:
+      required: true
+
+  - type: textarea
+    id: vless_core_log
+    attributes:
+      label: vless-core.log
+      description: |
+        Required for Networking / VPN routing, Core connection / protocol, Subscription update,
+        Performance / stability, and crash-like bugs.
+        Paste or attach /var/log/vless-core.log.
+        For UI-only bugs, write "not needed". Remove IP, port, UUID, host, pbk, sid, or other secrets if needed.
+      placeholder: Paste /var/log/vless-core.log here or attach the file.
+    validations:
+      required: true
+
+  - type: textarea
+    id: vpnctld_log
+    attributes:
+      label: vpnctld.log
+      description: |
+        Required for Networking / VPN routing, Installation / update / deb package,
+        Performance / stability, and crash-like bugs.
+        Paste or attach /var/log/vpnctld.log.
+        For UI-only bugs, write "not needed". Remove IP, port, UUID, host, pbk, sid, or other secrets if needed.
+      placeholder: Paste /var/log/vpnctld.log here or attach the file.
+    validations:
+      required: true
+
+  - type: input
+    id: device
+    attributes:
+      label: Device
+      placeholder: iPhone 4S, iPad 4, etc.
+    validations:
+      required: true
+
+  - type: input
+    id: ios_version
+    attributes:
+      label: iOS version
+      placeholder: 6.1.3, 10.3.3, etc.
+    validations:
+      required: true
+
+  - type: textarea
+    id: appeared_after_update
+    attributes:
+      label: Did the bug appear after updating to a new version?
+      description: Write yes, no, or not sure. If yes, include what version you updated from and to.
+      placeholder: Yes, after updating from 0.3.5 to 0.3.6.
+    validations:
+      required: true
+
+  - type: checkboxes
+    id: latest_version
+    attributes:
+      label: Version
+      options:
+        - label: I am using the latest version of vless-core-app.
+          required: true
+
+  - type: input
+    id: vless-core-app_version
+    attributes:
+      label: vless-core-app version
+      placeholder: 0.3.6
+    validations:
+      required: true
+
+  - type: checkboxes
+    id: valid_config
+    attributes:
+      label: Configuration
+      description: For UI-only bugs, just check this box.
+      options:
+        - label: My configuration/URI is valid and works on other devices.
+          required: true
+
+  - type: textarea
+    id: config
+    attributes:
+      label: Config / URI
+      description: Paste the config only if it is safe to share. Remove IP, port, UUID, host, pbk, sid, or other secrets if needed.
+      placeholder: vless://...
+    validations:
+      required: false
+
+  - type: textarea
+    id: extra
+    attributes:
+      label: Extra context
+      description: Anything else that may help debug the issue.
+      placeholder: Screenshots, frequency, network type, carrier, Wi-Fi/3G, what changed before the bug appeared, etc.
+    validations:
+      required: false

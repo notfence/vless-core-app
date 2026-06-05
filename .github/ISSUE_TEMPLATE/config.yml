@@ -1,0 +1,5 @@
+blank_issues_enabled: false
+contact_links:
+  - name: ⚠️ Install the latest release first
+    url: https://github.com/notfence/vless-core-app/releases/latest
+    about: Please install the latest vless-core-app release before reporting a problem.
