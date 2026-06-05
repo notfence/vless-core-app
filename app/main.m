@@ -1530,13 +1530,13 @@ static UIImage *MakeIconImage(VCIconType type, CGFloat size, BOOL active) {
     _textView.text =
         @"Q: Why can't I connect?\n"
         @"A: Most failures come from an unsupported configuration tuple, wrong server parameters, or a server that is offline. "
-        @"This app currently allows [vless/tcp/reality] with flow=xtls-rprx-vision and fp=chrome/firefox/random/qq, [vless/xhttp/tls], or [vless/xhttp/reality]. "
+        @"This app currently allows [vless/tcp/reality] or [vless/tcp/tls] with flow=xtls-rprx-vision and fp=chrome/firefox/random/qq, [vless/xhttp/tls], or [vless/xhttp/reality]. "
         @"Recheck the link, server details, and network reachability.\n\n"
         @"Q: Why isn't the subscription added?\n"
         @"A: The app accepts only direct vless:// links or http(s) subscription URLs that return valid vless:// entries. "
         @"If your provider blocks requests, redirects heavily, or returns an empty list, import will fail.\n\n"
         @"Q: Which protocols are supported?\n"
-        @"A: VLESS links are supported. For now, supported sets are tcp+reality+xtls-rprx-vision, xhttp+tls, and xhttp+reality. "
+        @"A: VLESS links are supported. For now, supported sets are tcp+reality+xtls-rprx-vision, tcp+tls+xtls-rprx-vision, xhttp+tls, and xhttp+reality. "
         @"Other tuples are blocked on purpose to prevent broken connections.\n\n"
         @"Q: Why are some protocol tuples marked in red?\n"
         @"A: Red means the tuple or a required option such as flow/fp is not supported by the app right now. "
@@ -2962,9 +2962,9 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
         return @"protocol must be vless";
     }
 
-    // Supported tuple #1: [vless/tcp/reality]
+    // Supported tuple #1: [vless/tcp/reality] and [vless/tcp/tls]
     BOOL vision = [transport isEqualToString:@"tcp"] &&
-                  [security isEqualToString:@"reality"];
+                  ([security isEqualToString:@"reality"] || [security isEqualToString:@"tls"]);
     if (vision) {
         NSString *flow = [self realityFlowFromURI:uri];
         if (![flow isEqualToString:@"xtls-rprx-vision"]) {
@@ -2997,7 +2997,7 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
         return nil;
     }
 
-    return @"supported sets are vless/tcp/reality, vless/xhttp/tls, and vless/xhttp/reality";
+    return @"supported sets are vless/tcp/reality, vless/tcp/tls, vless/xhttp/tls, and vless/xhttp/reality";
 }
 
 - (BOOL)isSupportedConfigTupleForURI:(NSString *)uri {

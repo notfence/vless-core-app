@@ -62,7 +62,11 @@ dpkg -r com.vlesscore.app
 Bundled core supports:
 
 - `VLESS + TCP + Reality + xtls-rprx-vision`
+- `VLESS + TCP + TLS + xtls-rprx-vision`
 - `VLESS + TLS + XHTTP (mode=packet-up)`
+- `VLESS + Reality + XHTTP (mode=stream-one)`
+
+`fp=chrome/firefox/random/qq` (firefox fallback to chrome)
 
 Protocol semantics are aligned with `xray-core` for the supported transports and URI parameters.
 
