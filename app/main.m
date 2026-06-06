@@ -1529,7 +1529,7 @@ static UIImage *MakeIconImage(VCIconType type, CGFloat size, BOOL active) {
     _textView.text =
         @"Q: Why can't I connect?\n"
         @"A: Most failures come from an unsupported configuration tuple, wrong server parameters, or a server that is offline. "
-        @"This app currently allows [vless/tcp/reality] or [vless/tcp/tls] with flow=xtls-rprx-vision and fp=chrome/firefox/random/randomized/qq, [vless/xhttp/tls], or [vless/xhttp/reality]. "
+        @"This app currently allows [vless/tcp/reality] or [vless/tcp/tls] with flow=xtls-rprx-vision and fp=chrome/firefox/edge/random/randomized/qq, [vless/xhttp/tls], or [vless/xhttp/reality]. "
         @"Recheck the link, server details, and network reachability.\n\n"
         @"Q: Why isn't the subscription added?\n"
         @"A: The app accepts only direct vless:// links or http(s) subscription URLs that return valid vless:// entries. "
@@ -2585,6 +2585,7 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
     if (![fp isKindOfClass:[NSString class]] || [fp length] == 0) return NO;
     return [fp isEqualToString:@"chrome"] ||
            [fp isEqualToString:@"firefox"] ||
+           [fp isEqualToString:@"edge"] ||
            [fp isEqualToString:@"random"] ||
            [fp isEqualToString:@"randomized"] ||
            [fp isEqualToString:@"qq"];
