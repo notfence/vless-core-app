@@ -30,6 +30,7 @@ static NSString *const kDefaultsSubsKey = @"vlesscore.subscriptions";
 static NSString *const kDefaultsAutoUpdateSubsKey = @"vlesscore.auto_update_subs";
 static NSString *const kDefaultsStealthModeKey = @"vlesscore.stealth_mode";
 static NSString *const kDefaultsSubHWIDKey = @"vlesscore.subscription_hwid";
+static NSString *const kSubscriptionAllowInsecureFetchKey = @"allow_insecure_fetch";
 static const char *kDaemonPortPath = "/var/run/vpnctld.port";
 static const int kDaemonDefaultPort = 9093;
 static const int kDaemonPortMax = 9113;
@@ -60,6 +61,7 @@ static UIInterfaceOrientation CurrentInterfaceOrientation(void) {
 
 typedef NS_ENUM(NSInteger, VCAlertTag) {
     VCAlertTagImportManual = 1001,
+    VCAlertTagImportInsecureSubscription = 1002,
 };
 
 typedef NS_ENUM(NSInteger, VCActionSheetTag) {
@@ -768,11 +770,56 @@ static void CleanupSubscriptionFetchTempFiles(const char *out_path, const char *
     if (hdr_path && *hdr_path) unlink(hdr_path);
 }
 
-static NSData *FetchURLViaVlessCoreCurl(NSString *urlString, NSString **errOut, NSString **headersOut) {
+static BOOL SubscriptionDictionaryAllowsInsecureFetch(NSDictionary *sub) {
+    if (![sub isKindOfClass:[NSDictionary class]]) return NO;
+
+    id value = [sub objectForKey:kSubscriptionAllowInsecureFetchKey];
+    if ([value respondsToSelector:@selector(boolValue)]) {
+        return [value boolValue] ? YES : NO;
+    }
+    return NO;
+}
+
+static BOOL CurlExitCodeCanRetryInsecurely(int exitCode) {
+    return exitCode == 60; /* CURLE_PEER_FAILED_VERIFICATION */
+}
+
+static BOOL NSURLErrorCanRetryInsecurely(NSError *err) {
+    if (![err isKindOfClass:[NSError class]]) return NO;
+    if (![[err domain] isEqualToString:NSURLErrorDomain]) return NO;
+
+    NSInteger code = [err code];
+    return code == NSURLErrorSecureConnectionFailed ||
+           code == NSURLErrorServerCertificateHasBadDate ||
+           code == NSURLErrorServerCertificateUntrusted ||
+           code == NSURLErrorServerCertificateHasUnknownRoot ||
+           code == NSURLErrorServerCertificateNotYetValid;
+}
+
+static BOOL SubscriptionDataLooksLikeHTML(NSData *data) {
+    if (!data || [data length] == 0) return NO;
+
+    NSUInteger len = [data length];
+    if (len > 4096) len = 4096;
+    NSData *prefix = [NSData dataWithBytes:[data bytes] length:len];
+    NSString *text = [[[NSString alloc] initWithData:prefix encoding:NSUTF8StringEncoding] autorelease];
+    if (!text) text = [[[NSString alloc] initWithData:prefix encoding:NSISOLatin1StringEncoding] autorelease];
+    if (![text isKindOfClass:[NSString class]] || [text length] == 0) return NO;
+
+    NSString *trim = TrimSimpleString(text);
+    NSString *lower = [trim lowercaseString];
+    return [lower hasPrefix:@"<!doctype html"] ||
+           [lower hasPrefix:@"<html"] ||
+           [lower rangeOfString:@"<body"].location != NSNotFound;
+}
+
+static NSData *FetchURLViaVlessCoreCurl(NSString *urlString, BOOL allowInsecureFetch, NSString **errOut, NSString **headersOut, int *exitCodeOut) {
     const char *curl_path = "/usr/bin/vless-core-curl";
     const char *ca_bundle_path = "/usr/share/vless-core/cacert.pem";
 
+    if (errOut) *errOut = nil;
     if (headersOut) *headersOut = nil;
+    if (exitCodeOut) *exitCodeOut = -1;
 
     if (!urlString || [urlString length] == 0) {
         if (errOut) *errOut = @"Invalid subscription URL";
@@ -846,59 +893,40 @@ static NSData *FetchURLViaVlessCoreCurl(NSString *urlString, NSString **errOut, 
         close(out_fd);
         close(err_fd);
 
-        if (access(ca_bundle_path, R_OK) == 0 && hwid_header[0] != '\0') {
-            execl(curl_path, "vless-core-curl",
-                  "--fail",
-                  "--location",
-                  "--silent",
-                  "--show-error",
-                  "--connect-timeout", "10",
-                  "--max-time", "25",
-                  "--proto", "=https,http",
-                  "-D", hdr_tmpl,
-                  "-H", hwid_header,
-                  "--cacert", ca_bundle_path,
-                  url_c,
-                  (char *)NULL);
-        } else if (access(ca_bundle_path, R_OK) == 0) {
-            execl(curl_path, "vless-core-curl",
-                  "--fail",
-                  "--location",
-                  "--silent",
-                  "--show-error",
-                  "--connect-timeout", "10",
-                  "--max-time", "25",
-                  "--proto", "=https,http",
-                  "-D", hdr_tmpl,
-                  "--cacert", ca_bundle_path,
-                  url_c,
-                  (char *)NULL);
-        } else if (hwid_header[0] != '\0') {
-            execl(curl_path, "vless-core-curl",
-                  "--fail",
-                  "--location",
-                  "--silent",
-                  "--show-error",
-                  "--connect-timeout", "10",
-                  "--max-time", "25",
-                  "--proto", "=https,http",
-                  "-D", hdr_tmpl,
-                  "-H", hwid_header,
-                  url_c,
-                  (char *)NULL);
-        } else {
-            execl(curl_path, "vless-core-curl",
-                  "--fail",
-                  "--location",
-                  "--silent",
-                  "--show-error",
-                  "--connect-timeout", "10",
-                  "--max-time", "25",
-                  "--proto", "=https,http",
-                  "-D", hdr_tmpl,
-                  url_c,
-                  (char *)NULL);
+        char *argv[32];
+        int argc = 0;
+        argv[argc++] = (char *)"vless-core-curl";
+        argv[argc++] = (char *)"--fail";
+        argv[argc++] = (char *)"--location";
+        argv[argc++] = (char *)"--silent";
+        argv[argc++] = (char *)"--show-error";
+        argv[argc++] = (char *)"--connect-timeout";
+        argv[argc++] = (char *)"10";
+        argv[argc++] = (char *)"--max-time";
+        argv[argc++] = (char *)"25";
+        argv[argc++] = (char *)"--proto";
+        argv[argc++] = (char *)"=https,http";
+        argv[argc++] = (char *)"-D";
+        argv[argc++] = hdr_tmpl;
+
+        if (allowInsecureFetch) {
+            argv[argc++] = (char *)"--insecure";
         }
+
+        if (hwid_header[0] != '\0') {
+            argv[argc++] = (char *)"-H";
+            argv[argc++] = hwid_header;
+        }
+
+        if (!allowInsecureFetch && access(ca_bundle_path, R_OK) == 0) {
+            argv[argc++] = (char *)"--cacert";
+            argv[argc++] = (char *)ca_bundle_path;
+        }
+
+        argv[argc++] = (char *)url_c;
+        argv[argc] = NULL;
+
+        execv(curl_path, argv);
         _exit(127);
     }
 
@@ -949,6 +977,9 @@ static NSData *FetchURLViaVlessCoreCurl(NSString *urlString, NSString **errOut, 
     }
 
     if (!WIFEXITED(status) || WEXITSTATUS(status) != 0) {
+        if (exitCodeOut && WIFEXITED(status)) {
+            *exitCodeOut = WEXITSTATUS(status);
+        }
         if (errOut) {
             if ([curl_err length] > 0) {
                 *errOut = curl_err;
@@ -1531,6 +1562,8 @@ static UIImage *MakeIconImage(VCIconType type, CGFloat size, BOOL active) {
         @"A: Most failures come from an unsupported configuration tuple, wrong server parameters, or a server that is offline. "
         @"This app currently allows [vless/tcp/reality] or [vless/tcp/tls] with flow=xtls-rprx-vision and fp=chrome/firefox/edge/random/randomized/qq, [vless/xhttp/tls], or [vless/xhttp/reality]. "
         @"Recheck the link, server details, and network reachability.\n\n"
+        @"Q: How can I delete my config/subscription?\n"
+        @"A: Just swipe on it from right to the left.\n\n"
         @"Q: Why isn't the subscription added?\n"
         @"A: The app accepts only direct vless:// links or http(s) subscription URLs that return valid vless:// entries. "
         @"If your provider blocks requests, redirects heavily, or returns an empty list, import will fail.\n\n"
@@ -2323,6 +2356,7 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
     NSArray *_importBrowserItems;
     NSString *_pendingImportDoneStatus;
     NSArray *_pendingImportRefreshIndices;
+    NSArray *_pendingInsecureImportURLs;
 
     NSMutableArray *_configs;
     NSMutableArray *_subscriptions;
@@ -3785,8 +3819,9 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
     return ([filtered count] > 0) ? filtered : clean;
 }
 
-- (NSDictionary *)updatedSubscriptionDictionaryFromSource:(NSDictionary *)sub errorText:(NSString **)errorTextOut {
+- (NSDictionary *)updatedSubscriptionDictionaryFromSource:(NSDictionary *)sub errorText:(NSString **)errorTextOut insecureRetryAvailable:(BOOL *)insecureRetryAvailableOut {
     if (errorTextOut) *errorTextOut = nil;
+    if (insecureRetryAvailableOut) *insecureRetryAvailableOut = NO;
     if (![sub isKindOfClass:[NSDictionary class]]) {
         if (errorTextOut) *errorTextOut = @"Subscription entry is invalid";
         return nil;
@@ -3807,14 +3842,19 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
     NSString *nameFromURL = [self subscriptionNameFromURLString:urlString];
     NSString *hostName = [self hostFromURLString:urlString];
     NSString *nameFromMeta = nil;
+    BOOL allowInsecureFetch = SubscriptionDictionaryAllowsInsecureFetch(sub);
 
     NSString *fetchErr = nil;
     NSString *curlHeaders = nil;
-    NSData *data = FetchURLViaVlessCoreCurl(urlString, &fetchErr, &curlHeaders);
+    int curlExitCode = -1;
+    NSData *data = FetchURLViaVlessCoreCurl(urlString, allowInsecureFetch, &fetchErr, &curlHeaders, &curlExitCode);
+    if (!data && !allowInsecureFetch && CurlExitCodeCanRetryInsecurely(curlExitCode)) {
+        if (insecureRetryAvailableOut) *insecureRetryAvailableOut = YES;
+    }
     if ([nameFromMeta length] == 0 && [curlHeaders length] > 0) {
         nameFromMeta = [self subscriptionTitleFromMetadataText:curlHeaders];
     }
-    if (!data && (!fetchErr || [fetchErr hasPrefix:@"vless-core-curl not found"])) {
+    if (!data && !allowInsecureFetch && (!fetchErr || [fetchErr hasPrefix:@"vless-core-curl not found"])) {
         NSMutableURLRequest *req = [NSMutableURLRequest requestWithURL:url
                                                            cachePolicy:NSURLRequestReloadIgnoringLocalCacheData
                                                        timeoutInterval:20.0];
@@ -3827,6 +3867,9 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
         data = [NSURLConnection sendSynchronousRequest:req returningResponse:&resp error:&err];
         if (!data || err) {
             fetchErr = [err localizedDescription];
+            if (!allowInsecureFetch && NSURLErrorCanRetryInsecurely(err)) {
+                if (insecureRetryAvailableOut) *insecureRetryAvailableOut = YES;
+            }
         } else if ([resp isKindOfClass:[NSHTTPURLResponse class]]) {
             NSDictionary *headers = [(NSHTTPURLResponse *)resp allHeaderFields];
             nameFromMeta = [self subscriptionTitleFromHTTPHeaders:headers];
@@ -3847,7 +3890,13 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
 
     NSArray *uris = [self parseSubscriptionData:data];
     if ([uris count] == 0) {
-        if (errorTextOut) *errorTextOut = @"Subscription has no valid vless:// entries";
+        if (errorTextOut) {
+            if (SubscriptionDataLooksLikeHTML(data)) {
+                *errorTextOut = @"Server returned a web page, not subscription data";
+            } else {
+                *errorTextOut = @"Subscription has no valid vless:// entries";
+            }
+        }
         return nil;
     }
 
@@ -3866,6 +3915,10 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
     }
 
     return updated;
+}
+
+- (NSDictionary *)updatedSubscriptionDictionaryFromSource:(NSDictionary *)sub errorText:(NSString **)errorTextOut {
+    return [self updatedSubscriptionDictionaryFromSource:sub errorText:errorTextOut insecureRetryAvailable:NULL];
 }
 
 - (BOOL)refreshSubscriptionAtIndex:(NSInteger)idx showStatus:(BOOL)showStatus {
@@ -4204,6 +4257,269 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
     return -1;
 }
 
+- (NSDictionary *)subscriptionDictionaryForURL:(NSString *)urlString allowInsecureFetch:(BOOL)allowInsecureFetch {
+    NSString *name = [self subscriptionNameFromURLString:urlString];
+    NSMutableDictionary *sub = [NSMutableDictionary dictionaryWithObjectsAndKeys:
+                                name, @"name",
+                                urlString, @"url",
+                                [NSArray array], @"items",
+                                nil];
+    if (allowInsecureFetch) {
+        [sub setObject:[NSNumber numberWithBool:YES] forKey:kSubscriptionAllowInsecureFetchKey];
+    }
+    return sub;
+}
+
+- (void)selectSubscriptionAtIndex:(NSInteger)subIndex {
+    _expandedSubscription = subIndex;
+    _selectedConfigIndex = -1;
+    _selectedSubIndex = subIndex;
+    _selectedSubItemIndex = 0;
+    [self normalizeSelection];
+    [_tableView reloadData];
+}
+
+- (void)showInsecureSubscriptionImportPromptForURLs:(NSArray *)urlStrings fromBatchImport:(BOOL)fromBatchImport {
+    NSMutableArray *cleanURLs = [NSMutableArray array];
+    for (id obj in urlStrings) {
+        if (![obj isKindOfClass:[NSString class]]) continue;
+        NSString *urlString = [self safeTrim:(NSString *)obj];
+        if ([urlString length] == 0) continue;
+        if (![cleanURLs containsObject:urlString]) {
+            [cleanURLs addObject:urlString];
+        }
+    }
+
+    if ([cleanURLs count] == 0) {
+        [self showStatus:@"Invalid subscription URL" ok:NO];
+        return;
+    }
+
+    [_pendingInsecureImportURLs release];
+    _pendingInsecureImportURLs = [cleanURLs copy];
+
+    NSUInteger count = [cleanURLs count];
+    NSString *detail = nil;
+    if (!fromBatchImport && count == 1) {
+        detail = @"This subscription cannot be fetched securely because certificate verification failed. In insecure mode, certificate verification will be disabled only for this subscription. Continue?";
+    } else {
+        detail = @"One of your subscriptions cannot be fetched securely because certificate verification failed. In insecure mode, certificate verification will be disabled only for subscriptions that need it. Continue?";
+    }
+
+    UIAlertView *av = [[[UIAlertView alloc] initWithTitle:@"Warning"
+                                                  message:detail
+                                                 delegate:self
+                                        cancelButtonTitle:@"No"
+                                        otherButtonTitles:@"Yes", nil] autorelease];
+    av.tag = VCAlertTagImportInsecureSubscription;
+    [av show];
+    [self showStatus:((!fromBatchImport && count == 1) ? @"Subscription requires insecure fetch confirmation"
+                                                       : @"Some subscriptions require insecure fetch confirmation")
+                  ok:NO];
+}
+
+- (void)showInsecureSubscriptionImportPromptForURL:(NSString *)urlString {
+    [self showInsecureSubscriptionImportPromptForURLs:[NSArray arrayWithObject:urlString] fromBatchImport:NO];
+}
+
+- (void)commitUpdatedSubscription:(NSDictionary *)updated existingIndex:(NSInteger)existingIndex {
+    if (![updated isKindOfClass:[NSDictionary class]]) return;
+
+    NSArray *uris = [updated objectForKey:@"items"];
+    NSInteger subIndex = existingIndex;
+    if (existingIndex >= 0 && existingIndex < (NSInteger)[_subscriptions count]) {
+        [_subscriptions replaceObjectAtIndex:existingIndex withObject:updated];
+    } else {
+        [_subscriptions addObject:updated];
+        subIndex = [_subscriptions count] - 1;
+    }
+
+    [self saveData];
+    [self selectSubscriptionAtIndex:subIndex];
+
+    NSString *verb = (existingIndex >= 0) ? @"updated" : @"imported";
+    [self showStatus:[NSString stringWithFormat:@"Subscription %@ (%lu configs)",
+                      verb,
+                      (unsigned long)[uris count]]
+                 ok:YES];
+}
+
+- (NSString *)subscriptionImportCountText:(NSUInteger)count {
+    return [NSString stringWithFormat:@"%lu subscription%@",
+            (unsigned long)count,
+            (count == 1 ? @"" : @"s")];
+}
+
+- (NSString *)shortImportFailureTextForURL:(NSString *)urlString errorText:(NSString *)errorText {
+    NSString *host = [self hostFromURLString:urlString];
+    if (![host isKindOfClass:[NSString class]] || [host length] == 0) {
+        host = @"subscription";
+    }
+
+    NSString *reason = [self safeTrim:errorText];
+    NSString *prefix = @"Subscription fetch failed: ";
+    if ([reason hasPrefix:prefix] && [reason length] > [prefix length]) {
+        reason = [reason substringFromIndex:[prefix length]];
+    }
+    if ([reason length] == 0) {
+        reason = @"import failed";
+    }
+    if ([reason length] > 120) {
+        reason = [[reason substringToIndex:120] stringByAppendingString:@"..."];
+    }
+
+    return [NSString stringWithFormat:@"%@: %@", host, reason];
+}
+
+- (void)showSubscriptionImportFailures:(NSArray *)failureTexts {
+    if (![failureTexts isKindOfClass:[NSArray class]] || [failureTexts count] == 0) return;
+
+    NSMutableString *message = [NSMutableString string];
+    NSUInteger limit = MIN((NSUInteger)[failureTexts count], (NSUInteger)5);
+    for (NSUInteger i = 0; i < limit; i++) {
+        id obj = [failureTexts objectAtIndex:i];
+        if (![obj isKindOfClass:[NSString class]] || [(NSString *)obj length] == 0) continue;
+        if ([message length] > 0) [message appendString:@"\n"];
+        [message appendFormat:@"- %@", (NSString *)obj];
+    }
+    if ([failureTexts count] > limit) {
+        [message appendFormat:@"\n- ... and %lu more", (unsigned long)([failureTexts count] - limit)];
+    }
+
+    UIAlertView *av = [[[UIAlertView alloc] initWithTitle:@"Some subscriptions were not imported"
+                                                  message:message
+                                                 delegate:nil
+                                        cancelButtonTitle:@"OK"
+                                        otherButtonTitles:nil] autorelease];
+    [av show];
+}
+
+- (void)startBackgroundSubscriptionImportForURLs:(NSArray *)urlStrings
+                              allowInsecureFetch:(BOOL)allowInsecureFetch
+                                     startStatus:(NSString *)startStatus
+                              importedPrefixPart:(NSString *)importedPrefixPart {
+    NSMutableArray *cleanURLs = [NSMutableArray array];
+    for (id obj in urlStrings) {
+        if (![obj isKindOfClass:[NSString class]]) continue;
+        NSString *urlString = [self safeTrim:(NSString *)obj];
+        if ([urlString length] == 0) continue;
+        if (![cleanURLs containsObject:urlString]) {
+            [cleanURLs addObject:urlString];
+        }
+    }
+
+    if ([cleanURLs count] == 0) {
+        [self showStatus:@"No subscriptions to import" ok:NO];
+        return;
+    }
+
+    if (_launchAutoUpdateInProgress) {
+        [self showStatus:@"Subscriptions update is already running" ok:YES];
+        return;
+    }
+
+    _launchAutoUpdateInProgress = YES;
+    NSString *startText = ([startStatus isKindOfClass:[NSString class]] && [startStatus length] > 0)
+                              ? startStatus
+                              : @"Importing subscriptions...";
+    [self showStatus:startText ok:YES];
+
+    NSArray *urlsToImport = [[NSArray alloc] initWithArray:cleanURLs];
+    NSString *prefixPart = [importedPrefixPart copy];
+
+    dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_DEFAULT, 0), ^{
+        NSAutoreleasePool *pool = [[NSAutoreleasePool alloc] init];
+
+        NSMutableArray *importedSubs = [[NSMutableArray alloc] init];
+        NSMutableArray *insecureURLs = [[NSMutableArray alloc] init];
+        NSMutableArray *failureTexts = [[NSMutableArray alloc] init];
+        NSUInteger failedCount = 0;
+
+        for (NSString *urlString in urlsToImport) {
+            NSDictionary *sub = [self subscriptionDictionaryForURL:urlString allowInsecureFetch:allowInsecureFetch];
+            NSString *errorText = nil;
+            BOOL insecureRetryAvailable = NO;
+            NSDictionary *updated = [self updatedSubscriptionDictionaryFromSource:sub
+                                                                        errorText:&errorText
+                                                           insecureRetryAvailable:&insecureRetryAvailable];
+            if ([updated isKindOfClass:[NSDictionary class]]) {
+                [importedSubs addObject:updated];
+            } else if (!allowInsecureFetch && insecureRetryAvailable) {
+                [insecureURLs addObject:urlString];
+            } else {
+                failedCount++;
+                [failureTexts addObject:[self shortImportFailureTextForURL:urlString errorText:errorText]];
+            }
+        }
+
+        dispatch_async(dispatch_get_main_queue(), ^{
+            _launchAutoUpdateInProgress = NO;
+
+            NSUInteger addedCount = 0;
+            NSInteger lastAddedIndex = -1;
+            for (NSDictionary *sub in importedSubs) {
+                NSString *urlString = [sub objectForKey:@"url"];
+                if (![urlString isKindOfClass:[NSString class]] || [urlString length] == 0) continue;
+                if ([self existingSubscriptionIndexForURL:urlString] >= 0) continue;
+
+                [_subscriptions addObject:sub];
+                addedCount++;
+                lastAddedIndex = [_subscriptions count] - 1;
+            }
+
+            if (addedCount > 0) {
+                [self saveData];
+                [self selectSubscriptionAtIndex:lastAddedIndex];
+            } else {
+                [self normalizeSelection];
+                [_tableView reloadData];
+            }
+
+            NSMutableArray *parts = [NSMutableArray array];
+            if ([prefixPart isKindOfClass:[NSString class]] && [prefixPart length] > 0) {
+                [parts addObject:prefixPart];
+            }
+            if (addedCount > 0) {
+                [parts addObject:[self subscriptionImportCountText:addedCount]];
+            }
+
+            NSString *status = nil;
+            if ([parts count] > 0) {
+                status = [NSString stringWithFormat:@"Imported %@", [parts componentsJoinedByString:@", "]];
+            } else {
+                status = @"No subscriptions imported";
+            }
+            if (failedCount > 0) {
+                status = [NSString stringWithFormat:@"%@ (failed: %@)",
+                          status,
+                          [self subscriptionImportCountText:failedCount]];
+            }
+            if ([insecureURLs count] > 0) {
+                status = [NSString stringWithFormat:@"%@; %@ require insecure mode",
+                          status,
+                          [self subscriptionImportCountText:[insecureURLs count]]];
+            }
+            [self showStatus:status ok:([parts count] > 0 || [insecureURLs count] > 0)];
+
+            if ([insecureURLs count] > 0) {
+                [self showInsecureSubscriptionImportPromptForURLs:insecureURLs
+                                                   fromBatchImport:([urlsToImport count] > 1)];
+            }
+            if ([failureTexts count] > 0) {
+                [self showSubscriptionImportFailures:failureTexts];
+            }
+
+            [importedSubs release];
+            [insecureURLs release];
+            [failureTexts release];
+            [urlsToImport release];
+            [prefixPart release];
+        });
+
+        [pool drain];
+    });
+}
+
 - (void)importDirectURI:(NSString *)uri {
     NSString *normalizedURI = [self safeTrim:uri];
     if (![normalizedURI isKindOfClass:[NSString class]] || [normalizedURI length] == 0) {
@@ -4237,7 +4553,7 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
     [self showStatus:@"Configuration imported" ok:YES];
 }
 
-- (void)importSubscriptionURL:(NSString *)urlString {
+- (void)importSubscriptionURL:(NSString *)urlString allowInsecureFetch:(BOOL)allowInsecureFetch {
     NSString *normalizedURL = [self safeTrim:urlString];
     if (![normalizedURL isKindOfClass:[NSString class]] || [normalizedURL length] == 0) {
         [self showStatus:@"Invalid subscription URL" ok:NO];
@@ -4246,35 +4562,61 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
 
     NSInteger existing = [self existingSubscriptionIndexForURL:normalizedURL];
     if (existing >= 0) {
-        _expandedSubscription = existing;
-        _selectedConfigIndex = -1;
-        _selectedSubIndex = existing;
-        _selectedSubItemIndex = 0;
-        [self normalizeSelection];
-        [_tableView reloadData];
-        [self showStatus:@"Subscription already exists (skipped)" ok:YES];
+        NSArray *items = [self subscriptionItemsAtIndex:existing];
+        if (!allowInsecureFetch && [items count] > 0) {
+            [self selectSubscriptionAtIndex:existing];
+            [self showStatus:@"Subscription already exists (skipped)" ok:YES];
+            return;
+        }
+
+        NSMutableDictionary *sub = [NSMutableDictionary dictionaryWithDictionary:[_subscriptions objectAtIndex:existing]];
+        [sub setObject:normalizedURL forKey:@"url"];
+        if (allowInsecureFetch) {
+            [sub setObject:[NSNumber numberWithBool:YES] forKey:kSubscriptionAllowInsecureFetchKey];
+        }
+
+        NSString *errorText = nil;
+        BOOL insecureRetryAvailable = NO;
+        NSDictionary *updated = [self updatedSubscriptionDictionaryFromSource:sub
+                                                                    errorText:&errorText
+                                                       insecureRetryAvailable:&insecureRetryAvailable];
+        if ([updated isKindOfClass:[NSDictionary class]]) {
+            [self commitUpdatedSubscription:updated existingIndex:existing];
+            return;
+        }
+
+        if (!allowInsecureFetch &&
+            !SubscriptionDictionaryAllowsInsecureFetch(sub) &&
+            insecureRetryAvailable) {
+            [self showInsecureSubscriptionImportPromptForURL:normalizedURL];
+            return;
+        }
+
+        [self showStatus:([errorText length] > 0 ? errorText : @"Subscription import failed") ok:NO];
         return;
     }
 
-    NSString *name = [self subscriptionNameFromURLString:normalizedURL];
+    NSDictionary *sub = [self subscriptionDictionaryForURL:normalizedURL allowInsecureFetch:allowInsecureFetch];
+    NSString *errorText = nil;
+    BOOL insecureRetryAvailable = NO;
+    NSDictionary *updated = [self updatedSubscriptionDictionaryFromSource:sub
+                                                                errorText:&errorText
+                                                   insecureRetryAvailable:&insecureRetryAvailable];
+    if ([updated isKindOfClass:[NSDictionary class]]) {
+        [self commitUpdatedSubscription:updated existingIndex:-1];
+        return;
+    }
 
-    NSDictionary *sub = [NSDictionary dictionaryWithObjectsAndKeys:
-                         name, @"name",
-                         normalizedURL, @"url",
-                         [NSArray array], @"items",
-                         nil];
+    if (!allowInsecureFetch && insecureRetryAvailable) {
+        [self showInsecureSubscriptionImportPromptForURL:normalizedURL];
+        return;
+    }
 
-    [_subscriptions addObject:sub];
-    NSInteger subIndex = [_subscriptions count] - 1;
+    [self showStatus:([errorText length] > 0 ? errorText : @"Subscription import failed") ok:NO];
+}
 
-    _expandedSubscription = subIndex;
-    [self saveData];
-    [self refreshSubscriptionAtIndex:subIndex showStatus:YES];
-    _selectedConfigIndex = -1;
-    _selectedSubIndex = subIndex;
-    _selectedSubItemIndex = 0;
-    [self normalizeSelection];
-    [_tableView reloadData];
+- (void)importSubscriptionURL:(NSString *)urlString {
+    [self importSubscriptionURL:urlString allowInsecureFetch:NO];
 }
 
 - (void)importTextEntry:(NSString *)rawText {
@@ -4297,11 +4639,23 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
 
     NSArray *links = [self extractImportLinksFromText:text];
     if ([links count] > 0) {
+        if ([links count] == 1) {
+            NSString *single = [links objectAtIndex:0];
+            if ([self isVLESSURI:single]) {
+                [self importDirectURI:single];
+            } else if ([self isSubscriptionURL:single]) {
+                [self importSubscriptionURL:single];
+            } else {
+                [self showStatus:@"No importable links found" ok:NO];
+            }
+            return;
+        }
+
         NSInteger importedConfigs = 0;
-        NSInteger importedSubs = 0;
+        NSInteger pendingSubs = 0;
         NSInteger skippedConfigs = 0;
         NSInteger skippedSubs = 0;
-        NSMutableArray *subIndicesToRefresh = [NSMutableArray array];
+        NSMutableArray *subscriptionURLsToImport = [NSMutableArray array];
 
         for (NSString *link in links) {
             if ([self isVLESSURI:link]) {
@@ -4318,57 +4672,35 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
                 [_configs addObject:cfg];
                 importedConfigs++;
             } else if ([self isSubscriptionURL:link]) {
-                NSString *name = [self subscriptionNameFromURLString:link];
-                NSDictionary *sub = [NSDictionary dictionaryWithObjectsAndKeys:
-                                     name, @"name",
-                                     link, @"url",
-                                     [NSArray array], @"items",
-                                     nil];
-
-                NSInteger subIndex = -1;
                 if ([self existingSubscriptionIndexForURL:link] >= 0) {
                     skippedSubs++;
                     continue;
-                } else {
-                    [_subscriptions addObject:sub];
-                    subIndex = [_subscriptions count] - 1;
                 }
 
-                if (subIndex >= 0) {
-                    NSNumber *idxObj = [NSNumber numberWithInteger:subIndex];
-                    if (![subIndicesToRefresh containsObject:idxObj]) {
-                        [subIndicesToRefresh addObject:idxObj];
-                    }
+                if (![subscriptionURLsToImport containsObject:link]) {
+                    [subscriptionURLsToImport addObject:link];
+                    pendingSubs++;
                 }
-                importedSubs++;
             }
         }
 
-        if (importedConfigs > 0 || importedSubs > 0) {
-            [self saveData];
+        if (importedConfigs > 0 || pendingSubs > 0) {
             if (importedConfigs > 0) {
+                [self saveData];
                 _selectedConfigIndex = [_configs count] - 1;
                 _selectedSubIndex = -1;
                 _selectedSubItemIndex = -1;
-            } else {
-                _selectedConfigIndex = -1;
-                if ([subIndicesToRefresh count] > 0) {
-                    _selectedSubIndex = [[subIndicesToRefresh lastObject] integerValue];
-                } else {
-                    _selectedSubIndex = [_subscriptions count] - 1;
-                }
-                _selectedSubItemIndex = 0;
+                [self normalizeSelection];
+                [_tableView reloadData];
             }
-            [self normalizeSelection];
-            [_tableView reloadData];
         }
 
         NSMutableArray *parts = [NSMutableArray array];
         if (importedConfigs > 0) {
             [parts addObject:[NSString stringWithFormat:@"%ld config%@", (long)importedConfigs, (importedConfigs == 1 ? @"" : @"s")]];
         }
-        if (importedSubs > 0) {
-            [parts addObject:[NSString stringWithFormat:@"%ld subscription%@", (long)importedSubs, (importedSubs == 1 ? @"" : @"s")]];
+        if (pendingSubs > 0) {
+            [parts addObject:[NSString stringWithFormat:@"%ld subscription%@", (long)pendingSubs, (pendingSubs == 1 ? @"" : @"s")]];
         }
 
         if ([parts count] > 0) {
@@ -4385,19 +4717,18 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
                               importText,
                               [skippedParts componentsJoinedByString:@", "]];
             }
-            BOOL needsBackgroundRefresh = ([subIndicesToRefresh count] > 0);
-            if (needsBackgroundRefresh) {
-                if (_pendingImportRefreshIndices) {
-                    [_pendingImportRefreshIndices release];
-                    _pendingImportRefreshIndices = nil;
+
+            if ([subscriptionURLsToImport count] > 0) {
+                NSString *configPart = nil;
+                if (importedConfigs > 0) {
+                    configPart = [NSString stringWithFormat:@"%ld config%@",
+                                  (long)importedConfigs,
+                                  (importedConfigs == 1 ? @"" : @"s")];
                 }
-                _pendingImportRefreshIndices = [subIndicesToRefresh copy];
-                if (_pendingImportDoneStatus) {
-                    [_pendingImportDoneStatus release];
-                    _pendingImportDoneStatus = nil;
-                }
-                _pendingImportDoneStatus = [importText copy];
-                [self startBackgroundSubscriptionRefreshWithStatus:@"Importing data from file..."];
+                [self startBackgroundSubscriptionImportForURLs:subscriptionURLsToImport
+                                            allowInsecureFetch:NO
+                                                   startStatus:@"Importing subscriptions from file..."
+                                            importedPrefixPart:configPart];
             } else {
                 [self showStatus:importText ok:YES];
             }
@@ -5074,6 +5405,7 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
     [_importBrowserItems release];
     [_pendingImportDoneStatus release];
     [_pendingImportRefreshIndices release];
+    [_pendingInsecureImportURLs release];
 
     [_configs release];
     [_subscriptions release];
@@ -5528,10 +5860,35 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
 }
 
 - (void)alertView:(UIAlertView *)alertView clickedButtonAtIndex:(NSInteger)buttonIndex {
-    if (buttonIndex != 1) return;
     if (alertView.tag == VCAlertTagImportManual) {
+        if (buttonIndex != 1) return;
         NSString *txt = [[alertView textFieldAtIndex:0] text];
         [self importTextEntry:txt];
+        return;
+    }
+
+    if (alertView.tag == VCAlertTagImportInsecureSubscription) {
+        NSArray *urlStrings = [_pendingInsecureImportURLs retain];
+        [_pendingInsecureImportURLs release];
+        _pendingInsecureImportURLs = nil;
+
+        if (buttonIndex == 1) {
+            if ([urlStrings count] == 1) {
+                NSString *urlString = [urlStrings objectAtIndex:0];
+                [self importSubscriptionURL:urlString allowInsecureFetch:YES];
+            } else if ([urlStrings count] > 1) {
+                [self startBackgroundSubscriptionImportForURLs:urlStrings
+                                            allowInsecureFetch:YES
+                                                   startStatus:@"Importing insecure subscriptions..."
+                                            importedPrefixPart:nil];
+            }
+        } else {
+            [self showStatus:([urlStrings count] == 1 ? @"Subscription import canceled"
+                                                      : @"Insecure subscriptions skipped")
+                          ok:YES];
+        }
+        [urlStrings release];
+        return;
     }
 }
 
