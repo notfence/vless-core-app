@@ -65,6 +65,8 @@ Bundled core supports:
 - `VLESS + TCP + TLS + xtls-rprx-vision`
 - `VLESS + TLS + XHTTP (mode=packet-up)`
 - `VLESS + Reality + XHTTP (mode=stream-one)`
+- `VLESS + TLS + WebSocket`
+- `VLESS + WebSocket`
 
 `fp=chrome/firefox/edge/random/randomized/qq`
 

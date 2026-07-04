@@ -1560,7 +1560,7 @@ static UIImage *MakeIconImage(VCIconType type, CGFloat size, BOOL active) {
     _textView.text =
         @"Q: Why can't I connect?\n"
         @"A: Most failures come from an unsupported configuration tuple, wrong server parameters, or a server that is offline. "
-        @"This app currently allows [vless/tcp/reality] or [vless/tcp/tls] with flow=xtls-rprx-vision and fp=chrome/firefox/edge/random/randomized/qq, [vless/xhttp/tls], or [vless/xhttp/reality]. "
+        @"This app currently allows [vless/tcp/reality] or [vless/tcp/tls] with flow=xtls-rprx-vision and fp=chrome/firefox/edge/random/randomized/qq, [vless/xhttp/tls], [vless/xhttp/reality], [vless/ws/tls], or [vless/ws/none]. "
         @"Recheck the link, server details, and network reachability.\n\n"
         @"Q: How can I delete my config/subscription?\n"
         @"A: Just swipe on it from right to the left.\n\n"
@@ -1568,7 +1568,7 @@ static UIImage *MakeIconImage(VCIconType type, CGFloat size, BOOL active) {
         @"A: The app accepts only direct vless:// links or http(s) subscription URLs that return valid vless:// entries. "
         @"If your provider blocks requests, redirects heavily, or returns an empty list, import will fail.\n\n"
         @"Q: Which protocols are supported?\n"
-        @"A: VLESS links are supported. For now, supported sets are tcp+reality+xtls-rprx-vision, tcp+tls+xtls-rprx-vision, xhttp+tls, and xhttp+reality. "
+        @"A: VLESS links are supported. For now, supported sets are tcp+reality+xtls-rprx-vision, tcp+tls+xtls-rprx-vision, xhttp+tls, xhttp+reality, ws+tls, and ws+none. "
         @"Other tuples are blocked on purpose to prevent broken connections.\n\n"
         @"Q: Why are some protocol tuples marked in red?\n"
         @"A: Red means the tuple or a required option such as flow/fp is not supported by the app right now. "
@@ -3033,7 +3033,13 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
         return nil;
     }
 
-    return @"supported sets are vless/tcp/reality, vless/tcp/tls, vless/xhttp/tls, and vless/xhttp/reality";
+    // Supported tuple #4: [vless/ws/tls] and [vless/ws/none]
+    if (([transport isEqualToString:@"ws"] || [transport isEqualToString:@"websocket"]) &&
+        ([security isEqualToString:@"tls"] || [security isEqualToString:@"none"])) {
+        return nil;
+    }
+
+    return @"supported sets are vless/tcp/reality, vless/tcp/tls, vless/xhttp/tls, vless/xhttp/reality, vless/ws/tls, and vless/ws/none";
 }
 
 - (BOOL)isSupportedConfigTupleForURI:(NSString *)uri {
