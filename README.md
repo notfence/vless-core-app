@@ -1,6 +1,6 @@
 # vless-core-app
 
-`vless-core-app` is an iOS 6.x app + root daemon for full-device VLESS routing.
+`vless-core-app` is an iOS 6.x app + root daemon for full-device VLESS/SOCKS5 routing.
 
 **Jailbreak required**
 
@@ -67,6 +67,7 @@ Bundled core supports:
 - `VLESS + Reality + XHTTP (mode=stream-one)`
 - `VLESS + TLS + WebSocket`
 - `VLESS + WebSocket`
+- `SOCKS5`
 
 `fp=chrome/firefox/edge/random/randomized/qq`
 

@@ -405,16 +405,54 @@ static int pick_port(int requested) {
     return pick_free_port_range(1083, 1183);
 }
 
+static int starts_with_ci(const char *s, const char *prefix) {
+    if (!s || !prefix) return 0;
+    while (*prefix) {
+        char a = *s;
+        char b = *prefix;
+        if (!a) return 0;
+        if (a >= 'A' && a <= 'Z') a = (char)(a - 'A' + 'a');
+        if (b >= 'A' && b <= 'Z') b = (char)(b - 'A' + 'a');
+        if (a != b) return 0;
+        s++;
+        prefix++;
+    }
+    return 1;
+}
+
+static int is_supported_config_uri(const char *uri) {
+    return starts_with_ci(uri, "vless://") || starts_with_ci(uri, "socks5://");
+}
+
 static int parse_server_host(const char *uri, char *out, size_t out_cap) {
-    const char *scheme = strstr(uri, "vless://");
-    if (scheme != uri) return -1;
+    size_t scheme_len = 0;
+    if (starts_with_ci(uri, "vless://")) {
+        scheme_len = 8;
+    } else if (starts_with_ci(uri, "socks5://")) {
+        scheme_len = 9;
+    } else {
+        return -1;
+    }
 
-    const char *at = strchr(uri, '@');
-    if (!at) return -1;
+    const char *authority = uri + scheme_len;
+    const char *authority_end = authority;
+    while (*authority_end && *authority_end != '/' && *authority_end != '?' && *authority_end != '#') authority_end++;
 
-    const char *host = at + 1;
+    const char *host = authority;
+    for (const char *p = authority; p < authority_end; p++) {
+        if (*p == '@') host = p + 1;
+    }
+    if (host >= authority_end) return -1;
+
     const char *end = host;
-    while (*end && *end != ':' && *end != '?' && *end != '/' && *end != '#') end++;
+    if (*host == '[') {
+        host++;
+        end = host;
+        while (end < authority_end && *end != ']') end++;
+        if (end >= authority_end) return -1;
+    } else {
+        while (end < authority_end && *end != ':') end++;
+    }
 
     size_t n = (size_t)(end - host);
     if (n == 0 || n >= out_cap) return -1;
@@ -1442,7 +1480,7 @@ static int connect_all(const char *uri, int requested_port, char *msg, size_t ms
 
     char host[256];
     if (parse_server_host(uri, host, sizeof(host)) != 0) {
-        snprintf(msg, msg_cap, "ERR invalid vless URI (cannot parse host)");
+        snprintf(msg, msg_cap, "ERR invalid config URI (cannot parse host)");
         return -1;
     }
 
@@ -1530,8 +1568,8 @@ static void handle_client(int cfd) {
             char *nl = strchr(uri, '\n');
             if (nl) *nl = '\0';
 
-            if (strncmp(uri, "vless://", 8) != 0) {
-                snprintf(reply, sizeof(reply), "ERR uri must start with vless://\\n");
+            if (!is_supported_config_uri(uri)) {
+                snprintf(reply, sizeof(reply), "ERR uri must start with vless:// or socks5://\\n");
             } else {
                 connect_all(uri, port, reply, sizeof(reply));
                 strncat(reply, "\\n", sizeof(reply) - strlen(reply) - 1);

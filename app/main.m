@@ -1560,15 +1560,15 @@ static UIImage *MakeIconImage(VCIconType type, CGFloat size, BOOL active) {
     _textView.text =
         @"Q: Why can't I connect?\n"
         @"A: Most failures come from an unsupported configuration tuple, wrong server parameters, or a server that is offline. "
-        @"This app currently allows [vless/tcp/reality] or [vless/tcp/tls] with flow=xtls-rprx-vision and fp=chrome/firefox/edge/random/randomized/qq, [vless/xhttp/tls], [vless/xhttp/reality], [vless/ws/tls], or [vless/ws/none]. "
+        @"This app currently allows [vless/tcp/reality] or [vless/tcp/tls] with flow=xtls-rprx-vision and fp=chrome/firefox/edge/random/randomized/qq, [vless/xhttp/tls], [vless/xhttp/reality], [vless/ws/tls], [vless/ws/none], or [socks5]. "
         @"Recheck the link, server details, and network reachability.\n\n"
         @"Q: How can I delete my config/subscription?\n"
         @"A: Just swipe on it from right to the left.\n\n"
         @"Q: Why isn't the subscription added?\n"
-        @"A: The app accepts only direct vless:// links or http(s) subscription URLs that return valid vless:// entries. "
+        @"A: The app accepts direct vless:// or socks5:// links, or http(s) subscription URLs that return valid config entries. "
         @"If your provider blocks requests, redirects heavily, or returns an empty list, import will fail.\n\n"
         @"Q: Which protocols are supported?\n"
-        @"A: VLESS links are supported. For now, supported sets are tcp+reality+xtls-rprx-vision, tcp+tls+xtls-rprx-vision, xhttp+tls, xhttp+reality, ws+tls, and ws+none. "
+        @"A: VLESS and SOCKS5 links are supported. For now, supported sets are vless tcp+reality+xtls-rprx-vision, vless tcp+tls+xtls-rprx-vision, vless xhttp+tls, vless xhttp+reality, vless ws+tls, vless ws+none, and [socks5]. "
         @"Other tuples are blocked on purpose to prevent broken connections.\n\n"
         @"Q: Why are some protocol tuples marked in red?\n"
         @"A: Red means the tuple or a required option such as flow/fp is not supported by the app right now. "
@@ -2142,7 +2142,7 @@ static UIImage *MakeIconImage(VCIconType type, CGFloat size, BOOL active) {
         if ([availableTypes containsObject:kVCQRMetadataType]) {
             [_metadataOutput setMetadataObjectTypes:[NSArray arrayWithObject:kVCQRMetadataType]];
             _metadataCanScanQR = YES;
-            _hintLabel.text = @"Point camera at QR code with vless:// or subscription URL";
+            _hintLabel.text = @"Point camera at QR code with vless://, socks5://, or subscription URL";
             return;
         }
         [_metadataOutput setMetadataObjectTypes:availableTypes];
@@ -2164,7 +2164,7 @@ static UIImage *MakeIconImage(VCIconType type, CGFloat size, BOOL active) {
     _hintLabel.font = [UIFont boldSystemFontOfSize:16.0];
     _hintLabel.textAlignment = NSTextAlignmentCenter;
     _hintLabel.numberOfLines = 2;
-    _hintLabel.text = @"Point camera at QR code with vless:// or subscription URL";
+    _hintLabel.text = @"Point camera at QR code with vless://, socks5://, or subscription URL";
     [self.view addSubview:_hintLabel];
 
     _cancelButton = [UIButton buttonWithType:UIButtonTypeCustom];
@@ -2419,11 +2419,81 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
     return [scheme lowercaseString];
 }
 
+- (BOOL)parseSOCKS5Host:(NSString **)hostOut port:(uint16_t *)portOut fromURI:(NSString *)uri {
+    NSString *trim = [self safeTrim:uri];
+    NSString *lower = [trim lowercaseString];
+    if (![lower hasPrefix:@"socks5://"]) return NO;
+
+    NSString *authority = [trim substringFromIndex:9];
+    NSCharacterSet *endSet = [NSCharacterSet characterSetWithCharactersInString:@"/?#"];
+    NSRange end = [authority rangeOfCharacterFromSet:endSet];
+    if (end.location != NSNotFound) {
+        authority = [authority substringToIndex:end.location];
+    }
+    authority = [self safeTrim:authority];
+    if ([authority length] == 0) return NO;
+
+    NSRange at = [authority rangeOfString:@"@" options:NSBackwardsSearch];
+    if (at.location != NSNotFound && at.location + 1 < [authority length]) {
+        authority = [authority substringFromIndex:(at.location + 1)];
+    }
+    authority = [self safeTrim:authority];
+    if ([authority length] == 0) return NO;
+
+    NSString *host = nil;
+    uint16_t port = 1080;
+    if ([authority hasPrefix:@"["]) {
+        NSRange rb = [authority rangeOfString:@"]"];
+        if (rb.location == NSNotFound || rb.location <= 1) return NO;
+        host = [authority substringWithRange:NSMakeRange(1, rb.location - 1)];
+        if (rb.location + 1 < [authority length] && [authority characterAtIndex:(rb.location + 1)] == ':') {
+            NSString *rawPort = [authority substringFromIndex:(rb.location + 2)];
+            NSInteger p = [rawPort integerValue];
+            if (p <= 0 || p > 65535) return NO;
+            port = (uint16_t)p;
+        }
+    } else {
+        NSRange colon = [authority rangeOfString:@":" options:NSBackwardsSearch];
+        if (colon.location != NSNotFound) {
+            host = [authority substringToIndex:colon.location];
+            NSString *rawPort = [authority substringFromIndex:(colon.location + 1)];
+            NSInteger p = [rawPort integerValue];
+            if (p <= 0 || p > 65535) return NO;
+            port = (uint16_t)p;
+        } else {
+            host = authority;
+        }
+    }
+
+    host = [self safeTrim:host];
+    if ([host length] == 0) return NO;
+    if (hostOut) *hostOut = host;
+    if (portOut) *portOut = port;
+    return YES;
+}
+
+- (NSString *)hostFromConfigURI:(NSString *)uri {
+    NSURL *u = [NSURL URLWithString:uri];
+    NSString *host = [self safeTrim:[u host]];
+    if ([host length] > 0) return host;
+
+    NSString *scheme = [self schemeFromURIString:uri];
+    if ([scheme isEqualToString:@"socks5"]) {
+        NSString *parsedHost = nil;
+        if ([self parseSOCKS5Host:&parsedHost port:NULL fromURI:uri] && [parsedHost length] > 0) {
+            return parsedHost;
+        }
+        return @"socks5";
+    }
+
+    return [self hostFromVLESSURI:uri];
+}
+
 - (NSString *)displayNameForURI:(NSString *)uri index:(NSInteger)index {
     NSString *name = [self decodedFragmentFromURI:uri];
     if (name) return name;
 
-    NSString *host = [self hostFromVLESSURI:uri];
+    NSString *host = [self hostFromConfigURI:uri];
     return [NSString stringWithFormat:@"Config %ld (%@)", (long)(index + 1), host];
 }
 
@@ -2586,6 +2656,9 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
 }
 
 - (NSString *)transportTypeFromURI:(NSString *)uri {
+    NSString *scheme = [self schemeFromURIString:uri];
+    if ([scheme isEqualToString:@"socks5"]) return @"tcp";
+
     NSString *transport = [self queryValueForURLString:uri key:@"type"];
     if ([transport length] == 0) transport = [self queryValueForURLString:uri key:@"transport"];
     if ([transport length] == 0) transport = [self queryValueForURLString:uri key:@"network"];
@@ -2597,6 +2670,9 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
 }
 
 - (NSString *)securityTypeFromURI:(NSString *)uri {
+    NSString *scheme = [self schemeFromURIString:uri];
+    if ([scheme isEqualToString:@"socks5"]) return @"plain";
+
     NSString *security = [self queryValueForURLString:uri key:@"security"];
     security = [self safeTrim:security];
     if ([security length] == 0) return @"none";
@@ -2645,7 +2721,7 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
     if ([trim length] == 0) return NO;
 
     NSString *lower = [trim lowercaseString];
-    if ([lower hasPrefix:@"http://"] || [lower hasPrefix:@"https://"] || [lower hasPrefix:@"vless://"]) return YES;
+    if ([lower hasPrefix:@"http://"] || [lower hasPrefix:@"https://"] || [lower hasPrefix:@"vless://"] || [lower hasPrefix:@"socks5://"]) return YES;
     if ([trim rangeOfString:@"/"].location != NSNotFound) return YES;
     if ([trim rangeOfString:@"."].location != NSNotFound) return YES;
     if ([trim rangeOfString:@":"].location != NSNotFound) return YES;
@@ -2674,6 +2750,16 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
     NSString *trim = [self safeTrim:s];
     NSString *lower = [trim lowercaseString];
     return [lower hasPrefix:@"vless://"];
+}
+
+- (BOOL)isSOCKS5URI:(NSString *)s {
+    NSString *trim = [self safeTrim:s];
+    NSString *lower = [trim lowercaseString];
+    return [lower hasPrefix:@"socks5://"];
+}
+
+- (BOOL)isDirectConfigURI:(NSString *)s {
+    return [self isVLESSURI:s] || [self isSOCKS5URI:s];
 }
 
 - (void)saveData {
@@ -2949,6 +3035,8 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
             NSString *scheme = [self schemeFromURIString:uri];
             if ([scheme isEqualToString:@"vless"]) {
                 port = 443;
+            } else if ([scheme isEqualToString:@"socks5"]) {
+                port = 1080;
             }
         }
 
@@ -2961,6 +3049,10 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
     NSString *parsedHost = nil;
     uint16_t parsedPort = 443;
     if ([self parseVLESSHost:&parsedHost port:&parsedPort fromURI:uri] && [parsedHost length] > 0) {
+        return [NSString stringWithFormat:@"%@:%u", parsedHost, (unsigned int)parsedPort];
+    }
+
+    if ([self parseSOCKS5Host:&parsedHost port:&parsedPort fromURI:uri] && [parsedHost length] > 0) {
         return [NSString stringWithFormat:@"%@:%u", parsedHost, (unsigned int)parsedPort];
     }
 
@@ -2979,6 +3071,8 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
 
 - (NSString *)configPrefixTextFromURI:(NSString *)uri {
     NSString *scheme = [self schemeFromURIString:uri];
+    if ([scheme isEqualToString:@"socks5"]) return @"[socks5]";
+
     NSString *transport = [self transportTypeFromURI:uri];
     NSString *security = [self securityTypeFromURI:uri];
     return [NSString stringWithFormat:@"[%@/%@/%@]", scheme, transport, security];
@@ -2994,8 +3088,17 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
     NSString *transport = [[self transportTypeFromURI:uri] lowercaseString];
     NSString *security = [[self securityTypeFromURI:uri] lowercaseString];
 
+    if ([scheme isEqualToString:@"socks5"]) {
+        NSString *host = nil;
+        uint16_t port = 0;
+        if (![self parseSOCKS5Host:&host port:&port fromURI:uri] || [host length] == 0 || port == 0) {
+            return @"invalid socks5 endpoint";
+        }
+        return nil;
+    }
+
     if (![scheme isEqualToString:@"vless"]) {
-        return @"protocol must be vless";
+        return @"protocol must be vless or socks5";
     }
 
     // Supported tuple #1: [vless/tcp/reality] and [vless/tcp/tls]
@@ -3039,7 +3142,7 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
         return nil;
     }
 
-    return @"supported sets are vless/tcp/reality, vless/tcp/tls, vless/xhttp/tls, vless/xhttp/reality, vless/ws/tls, and vless/ws/none";
+    return @"supported sets are vless/tcp/reality, vless/tcp/tls, vless/xhttp/tls, vless/xhttp/reality, vless/ws/tls, vless/ws/none, and [socks5]";
 }
 
 - (BOOL)isSupportedConfigTupleForURI:(NSString *)uri {
@@ -3555,13 +3658,20 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
     NSString *host = nil;
     uint16_t port = 0;
     NSString *result = nil;
-    if (![self parseVLESSHost:&host port:&port fromURI:uri]) {
+    NSString *scheme = [self schemeFromURIString:uri];
+    BOOL isSOCKS5Config = [scheme isEqualToString:@"socks5"];
+    BOOL parsed = isSOCKS5Config
+        ? [self parseSOCKS5Host:&host port:&port fromURI:uri]
+        : [self parseVLESSHost:&host port:&port fromURI:uri];
+    if (!parsed) {
         result = [NSString stringWithFormat:@"Ping failed (%@): invalid URI", title ? title : @"config"];
     } else {
         int ms = 0;
         int rc = -1;
 
-        if ([self isXHTTPTransportURI:uri]) {
+        if (isSOCKS5Config) {
+            rc = RealPingViaTempCoreMs([uri UTF8String], 5000, 2, &ms);
+        } else if ([self isXHTTPTransportURI:uri]) {
             // For xhttp we keep a real tunnel ping (same flow as runtime), but take best-of-2.
             rc = RealPingViaTempCoreMs([uri UTF8String], 5000, 2, &ms);
             if (rc != 0) {
@@ -3694,11 +3804,11 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
     [_settingsBtn setImage:(settings ? settings : MakeIconImage(VCIconTypeSettings, 20.0f, NO)) forState:UIControlStateNormal];
 }
 
-- (NSArray *)extractVLESSURIsFromText:(NSString *)text {
+- (NSArray *)extractConfigURIsFromText:(NSString *)text {
     if (!text || [text length] == 0) return [NSArray array];
 
     NSError *reErr = nil;
-    NSRegularExpression *re = [NSRegularExpression regularExpressionWithPattern:@"vless://[^\\s\"'<>]+"
+    NSRegularExpression *re = [NSRegularExpression regularExpressionWithPattern:@"(?:vless://|socks5://)[^\\s\"'<>]+"
                                                                          options:NSRegularExpressionCaseInsensitive
                                                                            error:&reErr];
     if (!re || reErr) {
@@ -3717,6 +3827,8 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
         }
 
         if ([uri length] == 0) continue;
+        NSString *lower = [uri lowercaseString];
+        if (![lower hasPrefix:@"vless://"] && ![lower hasPrefix:@"socks5://"]) continue;
         if (![out containsObject:uri]) {
             [out addObject:uri];
         }
@@ -3730,7 +3842,7 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
     }
 
     NSError *reErr = nil;
-    NSRegularExpression *re = [NSRegularExpression regularExpressionWithPattern:@"(?:vless://|https?://)[^\\s\"'<>]+"
+    NSRegularExpression *re = [NSRegularExpression regularExpressionWithPattern:@"(?:vless://|socks5://|https?://)[^\\s\"'<>]+"
                                                                          options:NSRegularExpressionCaseInsensitive
                                                                            error:&reErr];
     if (!re || reErr) {
@@ -3753,6 +3865,7 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
 
         NSString *lower = [link lowercaseString];
         if (![lower hasPrefix:@"vless://"] &&
+            ![lower hasPrefix:@"socks5://"] &&
             ![lower hasPrefix:@"http://"] &&
             ![lower hasPrefix:@"https://"]) {
             continue;
@@ -3773,7 +3886,7 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
 
     NSArray *uris = [NSArray array];
     if (raw) {
-        uris = [self extractVLESSURIsFromText:raw];
+        uris = [self extractConfigURIsFromText:raw];
         if ([uris count] > 0) return [self sanitizeSubscriptionURIs:uris];
 
         NSString *b64 = [[raw componentsSeparatedByCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]] componentsJoinedByString:@""];
@@ -3782,7 +3895,7 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
             NSString *decodedText = [[[NSString alloc] initWithData:decoded encoding:NSUTF8StringEncoding] autorelease];
             if (!decodedText) decodedText = [[[NSString alloc] initWithData:decoded encoding:NSISOLatin1StringEncoding] autorelease];
             if (decodedText) {
-                uris = [self extractVLESSURIsFromText:decodedText];
+                uris = [self extractConfigURIsFromText:decodedText];
                 if ([uris count] > 0) return [self sanitizeSubscriptionURIs:uris];
             }
         }
@@ -3900,7 +4013,7 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
             if (SubscriptionDataLooksLikeHTML(data)) {
                 *errorTextOut = @"Server returned a web page, not subscription data";
             } else {
-                *errorTextOut = @"Subscription has no valid vless:// entries";
+                *errorTextOut = @"Subscription has no valid config entries";
             }
         }
         return nil;
@@ -4633,7 +4746,7 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
     }
 
     BOOL hasWhitespace = ([text rangeOfCharacterFromSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]].location != NSNotFound);
-    if (!hasWhitespace && [self isVLESSURI:text]) {
+    if (!hasWhitespace && [self isDirectConfigURI:text]) {
         [self importDirectURI:text];
         return;
     }
@@ -4647,7 +4760,7 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
     if ([links count] > 0) {
         if ([links count] == 1) {
             NSString *single = [links objectAtIndex:0];
-            if ([self isVLESSURI:single]) {
+            if ([self isDirectConfigURI:single]) {
                 [self importDirectURI:single];
             } else if ([self isSubscriptionURL:single]) {
                 [self importSubscriptionURL:single];
@@ -4664,7 +4777,7 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
         NSMutableArray *subscriptionURLsToImport = [NSMutableArray array];
 
         for (NSString *link in links) {
-            if ([self isVLESSURI:link]) {
+            if ([self isDirectConfigURI:link]) {
                 if ([self existingConfigIndexForURI:link] >= 0) {
                     skippedConfigs++;
                     continue;
@@ -4757,7 +4870,7 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
         return;
     }
 
-    [self showStatus:@"Unsupported import format (use vless:// or http(s) subscription)" ok:NO];
+    [self showStatus:@"Unsupported import format (use vless://, socks5://, or http(s) subscription)" ok:NO];
 }
 
 - (NSString *)decodeImportTextData:(NSData *)data {
@@ -5779,7 +5892,7 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
             [self startQRImportFlow];
         } else if (buttonIndex == 3) {
             UIAlertView *av = [[[UIAlertView alloc] initWithTitle:@"Manual Import"
-                                                          message:@"Paste vless:// or subscription URL"
+                                                          message:@"Paste vless://, socks5://, or subscription URL"
                                                          delegate:self
                                                 cancelButtonTitle:@"Cancel"
                                                 otherButtonTitles:@"Import", nil] autorelease];
@@ -5787,7 +5900,7 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
             av.tag = VCAlertTagImportManual;
 
             UITextField *tf = [av textFieldAtIndex:0];
-            tf.placeholder = @"vless://... or https://...";
+            tf.placeholder = @"vless://..., socks5://..., or https://...";
             tf.clearButtonMode = UITextFieldViewModeWhileEditing;
             tf.keyboardType = UIKeyboardTypeURL;
             tf.autocapitalizationType = UITextAutocapitalizationTypeNone;
