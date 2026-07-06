@@ -76,20 +76,120 @@ static void log_msg(const char *fmt, ...) {
     fflush(stderr);
 }
 
-static int run_cmd(const char *cmd) {
-    log_msg("run: %s", cmd);
-    int rc = system(cmd);
-    if (rc == -1) {
-        log_msg("run: rc=-1 errno=%d", errno);
+static void log_argv_command(const char *prefix, char *const argv[]) {
+    char line[1024];
+    line[0] = '\0';
+    if (prefix && *prefix) {
+        strncat(line, prefix, sizeof(line) - strlen(line) - 1);
+        strncat(line, ": ", sizeof(line) - strlen(line) - 1);
+    }
+
+    for (int i = 0; argv && argv[i]; i++) {
+        if (i > 0) strncat(line, " ", sizeof(line) - strlen(line) - 1);
+        strncat(line, argv[i], sizeof(line) - strlen(line) - 1);
+    }
+
+    log_msg("%s", line);
+}
+
+static int wait_spawned(pid_t pid, const char *label) {
+    int status = 0;
+    pid_t rc = 0;
+    do {
+        rc = waitpid(pid, &status, 0);
+    } while (rc < 0 && errno == EINTR);
+
+    if (rc < 0) {
+        log_msg("%s: waitpid errno=%d", label ? label : "run", errno);
         return -1;
     }
-    if (WIFEXITED(rc)) {
-        int st = WEXITSTATUS(rc);
-        log_msg("run: rc=%d", st);
+    if (WIFEXITED(status)) {
+        int st = WEXITSTATUS(status);
+        log_msg("%s: rc=%d", label ? label : "run", st);
         return st;
     }
-    log_msg("run: abnormal exit");
+
+    log_msg("%s: abnormal exit", label ? label : "run");
     return -1;
+}
+
+static int run_argv(char *const argv[]) {
+    if (!argv || !argv[0]) return -1;
+
+    log_argv_command("run", argv);
+
+    posix_spawn_file_actions_t actions;
+    posix_spawn_file_actions_init(&actions);
+    posix_spawn_file_actions_addopen(&actions, STDOUT_FILENO, "/dev/null", O_WRONLY, 0);
+    posix_spawn_file_actions_addopen(&actions, STDERR_FILENO, "/dev/null", O_WRONLY, 0);
+
+    pid_t pid = 0;
+    int rc = posix_spawn(&pid, argv[0], &actions, NULL, argv, environ);
+    posix_spawn_file_actions_destroy(&actions);
+    if (rc != 0) {
+        log_msg("run: spawn errno=%d", rc);
+        return -1;
+    }
+
+    return wait_spawned(pid, "run");
+}
+
+static int run_argv_capture(char *const argv[], char *out, size_t out_cap) {
+    if (!argv || !argv[0] || !out || out_cap == 0) return -1;
+    out[0] = '\0';
+
+    log_argv_command("run", argv);
+
+    int pipefd[2];
+    if (pipe(pipefd) != 0) {
+        log_msg("run: pipe errno=%d", errno);
+        return -1;
+    }
+
+    posix_spawn_file_actions_t actions;
+    posix_spawn_file_actions_init(&actions);
+    posix_spawn_file_actions_addclose(&actions, pipefd[0]);
+    posix_spawn_file_actions_adddup2(&actions, pipefd[1], STDOUT_FILENO);
+    posix_spawn_file_actions_addclose(&actions, pipefd[1]);
+    posix_spawn_file_actions_addopen(&actions, STDERR_FILENO, "/dev/null", O_WRONLY, 0);
+
+    pid_t pid = 0;
+    int rc = posix_spawn(&pid, argv[0], &actions, NULL, argv, environ);
+    posix_spawn_file_actions_destroy(&actions);
+    close(pipefd[1]);
+
+    if (rc != 0) {
+        close(pipefd[0]);
+        log_msg("run: spawn errno=%d", rc);
+        return -1;
+    }
+
+    size_t used = 0;
+    for (;;) {
+        char buf[512];
+        ssize_t rd = read(pipefd[0], buf, sizeof(buf));
+        if (rd < 0) {
+            if (errno == EINTR) continue;
+            close(pipefd[0]);
+            (void)wait_spawned(pid, "run");
+            log_msg("run: read errno=%d", errno);
+            return -1;
+        }
+        if (rd == 0) break;
+
+        if (used + 1 < out_cap) {
+            size_t copy = (size_t)rd;
+            if (copy > out_cap - used - 1) {
+                copy = out_cap - used - 1;
+            }
+            memcpy(out + used, buf, copy);
+            used += copy;
+            out[used] = '\0';
+        }
+    }
+    close(pipefd[0]);
+
+    return wait_spawned(pid, "run");
 }
 
 static int can_exec(const char *path) {
@@ -97,26 +197,40 @@ static int can_exec(const char *path) {
 }
 
 static int find_cmd_path(const char *cmd, char *out, size_t out_cap) {
-    char shell_cmd[128];
-    snprintf(shell_cmd, sizeof(shell_cmd), "command -v %s 2>/dev/null", cmd);
+    if (!cmd || !*cmd || strchr(cmd, '/') || !out || out_cap == 0) return -1;
 
-    FILE *fp = popen(shell_cmd, "r");
-    if (!fp) return -1;
-
-    char line[PATH_MAX];
-    if (!fgets(line, sizeof(line), fp)) {
-        pclose(fp);
-        return -1;
+    const char *path = getenv("PATH");
+    if (!path || !*path) {
+        path = "/sbin:/usr/sbin:/bin:/usr/bin:/usr/local/sbin:/usr/local/bin";
     }
-    pclose(fp);
 
-    char *nl = strchr(line, '\n');
-    if (nl) *nl = '\0';
-    if (line[0] == '\0') return -1;
-    if (strlen(line) >= out_cap) return -1;
+    const char *p = path;
+    while (p && *p) {
+        const char *colon = strchr(p, ':');
+        size_t dir_len = colon ? (size_t)(colon - p) : strlen(p);
 
-    snprintf(out, out_cap, "%s", line);
-    return 0;
+        char candidate[PATH_MAX];
+        if (dir_len == 0) {
+            if (snprintf(candidate, sizeof(candidate), "./%s", cmd) < 0) return -1;
+        } else {
+            if (dir_len >= sizeof(candidate)) return -1;
+            char dir[PATH_MAX];
+            memcpy(dir, p, dir_len);
+            dir[dir_len] = '\0';
+            if (snprintf(candidate, sizeof(candidate), "%s/%s", dir, cmd) < 0) return -1;
+        }
+
+        if (can_exec(candidate)) {
+            if (strlen(candidate) >= out_cap) return -1;
+            snprintf(out, out_cap, "%s", candidate);
+            return 0;
+        }
+
+        if (!colon) break;
+        p = colon + 1;
+    }
+
+    return -1;
 }
 
 static int path_exists(const char *path) {
@@ -399,6 +513,34 @@ static const char *find_pfctl_bin(void) {
     return NULL;
 }
 
+static const char *find_route_bin(void) {
+    if (can_exec("/sbin/route")) return "/sbin/route";
+    if (can_exec("/usr/sbin/route")) return "/usr/sbin/route";
+    if (can_exec("/bin/route")) return "/bin/route";
+    if (can_exec("/usr/bin/route")) return "/usr/bin/route";
+
+    static char resolved[PATH_MAX];
+    if (find_cmd_path("route", resolved, sizeof(resolved)) == 0 && can_exec(resolved)) {
+        return resolved;
+    }
+
+    return NULL;
+}
+
+static const char *find_ifconfig_bin(void) {
+    if (can_exec("/sbin/ifconfig")) return "/sbin/ifconfig";
+    if (can_exec("/usr/sbin/ifconfig")) return "/usr/sbin/ifconfig";
+    if (can_exec("/bin/ifconfig")) return "/bin/ifconfig";
+    if (can_exec("/usr/bin/ifconfig")) return "/usr/bin/ifconfig";
+
+    static char resolved[PATH_MAX];
+    if (find_cmd_path("ifconfig", resolved, sizeof(resolved)) == 0 && can_exec(resolved)) {
+        return resolved;
+    }
+
+    return NULL;
+}
+
 static const char *find_redsocks_bin(void) {
     if (can_exec("/usr/bin/redsocks-vless-core")) return "/usr/bin/redsocks-vless-core";
     return NULL;
@@ -447,6 +589,16 @@ static int starts_with_ci(const char *s, const char *prefix) {
         prefix++;
     }
     return 1;
+}
+
+static int contains_ci(const char *haystack, const char *needle) {
+    if (!haystack || !needle) return 0;
+    if (!*needle) return 1;
+
+    for (const char *p = haystack; *p; p++) {
+        if (starts_with_ci(p, needle)) return 1;
+    }
+    return 0;
 }
 
 static int is_supported_config_uri(const char *uri) {
@@ -583,12 +735,24 @@ static int resolve_host_ipv4_all(const char *host, char *first_ip, size_t first_
 }
 
 static int read_default_interface(char *ifname, size_t ifname_cap) {
-    FILE *fp = popen("/sbin/route -n get default 2>/dev/null", "r");
-    if (!fp) return -1;
+    const char *route = find_route_bin();
+    if (!route) return -1;
 
-    char line[256];
+    char output[2048];
+    char *argv[] = {
+        (char *)route,
+        "-n",
+        "get",
+        "default",
+        NULL,
+    };
+    if (run_argv_capture(argv, output, sizeof(output)) != 0) {
+        return -1;
+    }
+
     int found = -1;
-    while (fgets(line, sizeof(line), fp)) {
+    char *save = NULL;
+    for (char *line = strtok_r(output, "\n", &save); line; line = strtok_r(NULL, "\n", &save)) {
         char *p = strstr(line, "interface:");
         if (!p) continue;
 
@@ -606,7 +770,6 @@ static int read_default_interface(char *ifname, size_t ifname_cap) {
         }
     }
 
-    pclose(fp);
     return found;
 }
 
@@ -658,18 +821,20 @@ static size_t collect_pf_interfaces(char ifnames[][32], size_t cap) {
     if (!ifnames || cap == 0) return 0;
 
     size_t count = 0;
-    FILE *fp = popen("/sbin/ifconfig -l 2>/dev/null", "r");
-    if (fp) {
-        char line[1024];
-        if (fgets(line, sizeof(line), fp)) {
+    const char *ifconfig = find_ifconfig_bin();
+    if (ifconfig) {
+        char output[4096];
+        char *argv[] = {
+            (char *)ifconfig,
+            "-l",
+            NULL,
+        };
+        if (run_argv_capture(argv, output, sizeof(output)) == 0) {
             char *save = NULL;
-            for (char *tok = strtok_r(line, " \t\r\n", &save); tok; tok = strtok_r(NULL, " \t\r\n", &save)) {
-                if (add_pf_interface(ifnames, &count, cap, tok) != 0) {
-                    break;
-                }
+            for (char *tok = strtok_r(output, " \t\r\n", &save); tok; tok = strtok_r(NULL, " \t\r\n", &save)) {
+                if (add_pf_interface(ifnames, &count, cap, tok) != 0) break;
             }
         }
-        pclose(fp);
     }
 
     char def_if[32];
@@ -916,10 +1081,17 @@ static void clear_ipfw_rules(void) {
     const char *ipfw = find_ipfw_bin();
     if (!ipfw) return;
 
-    char cmd[256];
     for (int n = 12030; n >= 12000; n--) {
-        snprintf(cmd, sizeof(cmd), "%s -q delete %d >/dev/null 2>&1", ipfw, n);
-        run_cmd(cmd);
+        char num[16];
+        snprintf(num, sizeof(num), "%d", n);
+        char *argv[] = {
+            (char *)ipfw,
+            "-q",
+            "delete",
+            num,
+            NULL,
+        };
+        run_argv(argv);
     }
 }
 
@@ -1194,9 +1366,18 @@ static int pf_is_enabled(void) {
     const char *pfctl = find_pfctl_bin();
     if (!pfctl) return 0;
 
-    char cmd[320];
-    snprintf(cmd, sizeof(cmd), "%s -s info 2>/dev/null | grep -qi 'Status: Enabled'", pfctl);
-    return run_cmd(cmd) == 0;
+    char output[4096];
+    char *argv[] = {
+        (char *)pfctl,
+        "-s",
+        "info",
+        NULL,
+    };
+    if (run_argv_capture(argv, output, sizeof(output)) != 0) {
+        return 0;
+    }
+
+    return contains_ci(output, "Status: Enabled");
 }
 
 static void ensure_pf_os_file(void) {
@@ -1218,9 +1399,14 @@ static void flush_pf_states(void) {
     const char *pfctl = find_pfctl_bin();
     if (!pfctl) return;
 
-    char cmd[320];
-    snprintf(cmd, sizeof(cmd), "%s -q -F states >/dev/null 2>&1", pfctl);
-    if (run_cmd(cmd) == 0) {
+    char *argv[] = {
+        (char *)pfctl,
+        "-q",
+        "-F",
+        "states",
+        NULL,
+    };
+    if (run_argv(argv) == 0) {
         log_msg("pf states flushed after rule load");
     }
 }
@@ -1257,18 +1443,27 @@ static int apply_pf_rules(const char *server_ips, int redir_port) {
 
     g.pf_enabled_before = was_enabled ? 1 : 0;
 
-    char cmd[512];
     int enabled_now = 0;
 
     if (was_enabled) {
         enabled_now = 1;
     } else {
-        snprintf(cmd, sizeof(cmd), "%s -q -e >/dev/null 2>&1", pfctl);
-        if (run_cmd(cmd) == 0 || pf_is_enabled()) {
+        char *enable_argv[] = {
+            (char *)pfctl,
+            "-q",
+            "-e",
+            NULL,
+        };
+        if (run_argv(enable_argv) == 0 || pf_is_enabled()) {
             enabled_now = 1;
         } else {
-            snprintf(cmd, sizeof(cmd), "%s -q -E >/dev/null 2>&1", pfctl);
-            if (run_cmd(cmd) == 0 || pf_is_enabled()) {
+            char *enable_old_argv[] = {
+                (char *)pfctl,
+                "-q",
+                "-E",
+                NULL,
+            };
+            if (run_argv(enable_old_argv) == 0 || pf_is_enabled()) {
                 enabled_now = 1;
             }
         }
@@ -1315,8 +1510,14 @@ static int apply_pf_rules(const char *server_ips, int redir_port) {
         }
 
         log_msg("pf trying mode=%s", pf_rule_mode_name(mode));
-        snprintf(cmd, sizeof(cmd), "%s -q -f /var/run/vlesscore-pf.conf >/dev/null 2>&1", pfctl);
-        if (run_cmd(cmd) == 0) {
+        char *load_argv[] = {
+            (char *)pfctl,
+            "-q",
+            "-f",
+            "/var/run/vlesscore-pf.conf",
+            NULL,
+        };
+        if (run_argv(load_argv) == 0) {
             log_msg("pf rules loaded mode=%s", pf_rule_mode_name(mode));
             flush_pf_states();
             return 0;
@@ -1330,27 +1531,63 @@ static void clear_pf_rules(void) {
     const char *pfctl = find_pfctl_bin();
     if (!pfctl) return;
 
-    char cmd[320];
-    snprintf(cmd, sizeof(cmd), "%s -q -F all >/dev/null 2>&1", pfctl);
-    run_cmd(cmd);
+    char *flush_argv[] = {
+        (char *)pfctl,
+        "-q",
+        "-F",
+        "all",
+        NULL,
+    };
+    run_argv(flush_argv);
 
     if (!g.pf_enabled_before) {
-        snprintf(cmd, sizeof(cmd), "%s -q -d >/dev/null 2>&1", pfctl);
-        run_cmd(cmd);
+        char *disable_argv[] = {
+            (char *)pfctl,
+            "-q",
+            "-d",
+            NULL,
+        };
+        run_argv(disable_argv);
     }
 
 }
 
+static int run_ipfw_add_rule(const char *ipfw, int rule_num, const char *rule) {
+    if (!ipfw || !rule || !*rule) return -1;
+
+    char rule_num_str[16];
+    snprintf(rule_num_str, sizeof(rule_num_str), "%d", rule_num);
+
+    char rule_buf[320];
+    if (snprintf(rule_buf, sizeof(rule_buf), "%s", rule) < 0 ||
+        strlen(rule) >= sizeof(rule_buf)) {
+        return -1;
+    }
+
+    char *argv[64];
+    int argc = 0;
+    argv[argc++] = (char *)ipfw;
+    argv[argc++] = "-q";
+    argv[argc++] = "add";
+    argv[argc++] = rule_num_str;
+
+    char *save = NULL;
+    for (char *tok = strtok_r(rule_buf, " \t\r\n", &save); tok; tok = strtok_r(NULL, " \t\r\n", &save)) {
+        if (argc >= (int)(sizeof(argv) / sizeof(argv[0])) - 1) return -1;
+        argv[argc++] = tok;
+    }
+    argv[argc] = NULL;
+
+    return run_argv(argv);
+}
+
 static int add_ipfw_rule_compat(const char *ipfw, int rule_num, const char *rule_with_out, const char *rule_plain) {
-    char cmd[640];
-    snprintf(cmd, sizeof(cmd), "%s -q add %d %s", ipfw, rule_num, rule_with_out);
-    if (run_cmd(cmd) == 0) {
+    if (run_ipfw_add_rule(ipfw, rule_num, rule_with_out) == 0) {
         return 0;
     }
 
     if (rule_plain && strcmp(rule_plain, rule_with_out) != 0) {
-        snprintf(cmd, sizeof(cmd), "%s -q add %d %s", ipfw, rule_num, rule_plain);
-        if (run_cmd(cmd) == 0) {
+        if (run_ipfw_add_rule(ipfw, rule_num, rule_plain) == 0) {
             return 0;
         }
     }
@@ -1362,9 +1599,13 @@ static void try_enable_ipfw_firewall(void) {
     const char *sysctl = find_sysctl_bin();
     if (!sysctl) return;
 
-    char cmd[256];
-    snprintf(cmd, sizeof(cmd), "%s -w net.inet.ip.fw.enable=1", sysctl);
-    run_cmd(cmd);
+    char *argv[] = {
+        (char *)sysctl,
+        "-w",
+        "net.inet.ip.fw.enable=1",
+        NULL,
+    };
+    run_argv(argv);
 }
 
 static int apply_ipfw_rules(const char *server_ip, int redir_port, int socks_port) {
