@@ -42,7 +42,14 @@ mkdir -p /var/mobile/Library/Preferences || true
 touch /var/mobile/Library/Preferences/com.vlesscore.vpnicon.state || true
 chown mobile:mobile /var/mobile/Library/Preferences/com.vlesscore.vpnicon.state >/dev/null 2>&1 || true
 launchctl unload /Library/LaunchDaemons/com.vlesscore.vpnctld.plist >/dev/null 2>&1 || true
+killall vpnctld >/dev/null 2>&1 || true
+rm -f /var/run/vpnctld.port >/dev/null 2>&1 || true
 launchctl load /Library/LaunchDaemons/com.vlesscore.vpnctld.plist >/dev/null 2>&1 || true
+sleep 1
+if [ ! -s /var/run/vpnctld.port ]; then
+  (/usr/bin/vpnctld >>/var/log/vpnctld.log 2>&1 </dev/null &)
+  sleep 1
+fi
 echo "Download this app from my GitHub repository:" || true
 echo "https://github.com/notfence/vless-core-app" || true
 echo "uicache is coming..." || true

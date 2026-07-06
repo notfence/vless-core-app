@@ -179,6 +179,33 @@ static int is_forbidden_path(const char *path) {
     return 0;
 }
 
+static int path_is_under_root(const char *path, const char *root) {
+    size_t n = strlen(root);
+    return strncmp(path, root, n) == 0 && (path[n] == '\0' || path[n] == '/');
+}
+
+static int resolve_allowed_import_path(const char *path, char *resolved, size_t resolved_cap) {
+    if (is_forbidden_path(path) || !resolved || resolved_cap == 0) {
+        return -1;
+    }
+
+    char real[PATH_MAX];
+    if (!realpath(path, real)) {
+        return -1;
+    }
+
+    if (!path_is_under_root(real, "/var/mobile") &&
+        !path_is_under_root(real, "/private/var/mobile")) {
+        return -1;
+    }
+
+    if (strlen(real) >= resolved_cap) {
+        return -1;
+    }
+    snprintf(resolved, resolved_cap, "%s", real);
+    return 0;
+}
+
 static void reply_error(int cfd, const char *reason) {
     char msg[512];
     snprintf(msg, sizeof(msg), "ERR %s\n", reason ? reason : "unknown error");
@@ -186,12 +213,13 @@ static void reply_error(int cfd, const char *reason) {
 }
 
 static void handle_listdir_command(int cfd, const char *path) {
-    if (is_forbidden_path(path)) {
-        reply_error(cfd, "invalid path");
+    char resolved_path[PATH_MAX];
+    if (resolve_allowed_import_path(path, resolved_path, sizeof(resolved_path)) != 0) {
+        reply_error(cfd, "path is outside allowed import directory");
         return;
     }
 
-    DIR *dir = opendir(path);
+    DIR *dir = opendir(resolved_path);
     if (!dir) {
         char reason[256];
         snprintf(reason, sizeof(reason), "cannot open directory (%s)", strerror(errno));
@@ -227,7 +255,7 @@ static void handle_listdir_command(int cfd, const char *path) {
         if (strchr(name, '\n') || strchr(name, '\r') || strchr(name, '\t')) continue;
 
         char full[PATH_MAX];
-        int path_len = snprintf(full, sizeof(full), "%s/%s", path, name);
+        int path_len = snprintf(full, sizeof(full), "%s/%s", resolved_path, name);
         if (path_len <= 0 || (size_t)path_len >= sizeof(full)) continue;
 
         struct stat st;
@@ -252,12 +280,13 @@ static void handle_listdir_command(int cfd, const char *path) {
 }
 
 static void handle_readfile_command(int cfd, const char *path) {
-    if (is_forbidden_path(path)) {
-        reply_error(cfd, "invalid path");
+    char resolved_path[PATH_MAX];
+    if (resolve_allowed_import_path(path, resolved_path, sizeof(resolved_path)) != 0) {
+        reply_error(cfd, "path is outside allowed import directory");
         return;
     }
 
-    int fd = open(path, O_RDONLY);
+    int fd = open(resolved_path, O_RDONLY);
     if (fd < 0) {
         char reason[256];
         snprintf(reason, sizeof(reason), "cannot open file (%s)", strerror(errno));
