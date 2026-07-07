@@ -2393,6 +2393,7 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
     UIButton *_refreshBtn;
     UIButton *_settingsBtn;
     UILabel *_statusLabel;
+    UILabel *_uptimeLabel;
     UILabel *_titleLabel;
 
     UITableView *_tableView;
@@ -2993,12 +2994,15 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
 
 - (void)refreshStatusText {
     NSString *base = _statusBaseText ? _statusBaseText : @"";
+    _statusLabel.text = base;
+}
+
+- (void)refreshUptimeText {
     if (_connected && _connectedSince > 0) {
         NSTimeInterval delta = [[NSDate date] timeIntervalSince1970] - _connectedSince;
-        NSString *uptime = [self formatDuration:delta];
-        _statusLabel.text = [NSString stringWithFormat:@"%@\nConnected: %@", base, uptime];
+        _uptimeLabel.text = [self formatDuration:delta];
     } else {
-        _statusLabel.text = base;
+        _uptimeLabel.text = @"00:00:00";
     }
 }
 
@@ -3008,6 +3012,7 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
     _uptimeTimer = nil;
 
     _connectedSince = [[NSDate date] timeIntervalSince1970];
+    [self refreshUptimeText];
     _uptimeTimer = [[NSTimer scheduledTimerWithTimeInterval:1.0
                                                      target:self
                                                    selector:@selector(uptimeTick:)
@@ -3020,11 +3025,12 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
     [_uptimeTimer release];
     _uptimeTimer = nil;
     _connectedSince = 0;
+    [self refreshUptimeText];
 }
 
 - (void)uptimeTick:(NSTimer *)timer {
     (void)timer;
-    [self refreshStatusText];
+    [self refreshUptimeText];
 }
 
 - (void)showStatus:(NSString *)text ok:(BOOL)ok {
@@ -5471,7 +5477,7 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
 
     CGFloat btnSize = 122.0f;
     _connectBtn = [[UIButton buttonWithType:UIButtonTypeCustom] retain];
-    _connectBtn.frame = CGRectMake((b.size.width - btnSize) * 0.5f, 74.0f, btnSize, btnSize);
+    _connectBtn.frame = CGRectMake((b.size.width - btnSize) * 0.5f, 60.0f, btnSize, btnSize);
     _connectBtn.titleLabel.font = [UIFont boldSystemFontOfSize:20.0f];
     _connectBtn.layer.cornerRadius = btnSize * 0.5f;
     _connectBtn.layer.borderWidth = 2.0f;
@@ -5482,7 +5488,16 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
     [self applyTouchFeedbackToButton:_connectBtn];
     [self.view addSubview:_connectBtn];
 
-    _statusLabel = [[UILabel alloc] initWithFrame:CGRectMake(16, 206, b.size.width - 32, 36)];
+    _uptimeLabel = [[UILabel alloc] initWithFrame:CGRectMake(16, 190, b.size.width - 32, 20)];
+    _uptimeLabel.font = [UIFont boldSystemFontOfSize:13.0f];
+    _uptimeLabel.text = @"00:00:00";
+    _uptimeLabel.textColor = [UIColor blackColor];
+    _uptimeLabel.textAlignment = NSTextAlignmentCenter;
+    _uptimeLabel.backgroundColor = [UIColor clearColor];
+    _uptimeLabel.autoresizingMask = UIViewAutoresizingFlexibleWidth;
+    [self.view addSubview:_uptimeLabel];
+
+    _statusLabel = [[UILabel alloc] initWithFrame:CGRectMake(16, 216, b.size.width - 32, 30)];
     _statusLabel.font = [UIFont systemFontOfSize:12.5f];
     _statusLabel.numberOfLines = 2;
     _statusLabel.text = @"Ready";
@@ -5490,7 +5505,7 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
     _statusLabel.autoresizingMask = UIViewAutoresizingFlexibleWidth;
     [self.view addSubview:_statusLabel];
 
-    CGFloat listY = 242.0f;
+    CGFloat listY = 246.0f;
     CGFloat listH = b.size.height - listY;
     if (listH < 120.0f) listH = 120.0f;
 
@@ -5573,6 +5588,7 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
     [_refreshBtn release];
     [_settingsBtn release];
     [_statusLabel release];
+    [_uptimeLabel release];
     [_titleLabel release];
 
     [_tableView release];
