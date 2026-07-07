@@ -1157,10 +1157,11 @@ static int write_pf_conf(const char *server_ips, char ifnames[][32], size_t if_c
             if (fprintf(fp,
                 "pass out quick on %s inet proto tcp from any to <vlesscore_bypass> flags S/SA keep state\n"
                 "pass out quick on %s route-to (lo0 127.0.0.1) inet proto tcp from any to ! <vlesscore_bypass> flags S/SA keep state\n"
+                "block return out quick on %s inet proto udp from any to any port 53\n"
                 "block return out quick on %s inet proto udp from any to ! <vlesscore_bypass> port 443\n"
                 "block return out quick on %s inet6 all\n"
                 "pass out on %s all keep state\n",
-                ifname, ifname, ifname, ifname, ifname) < 0) {
+                ifname, ifname, ifname, ifname, ifname, ifname) < 0) {
                 fclose(fp);
                 return -1;
             }
@@ -1200,10 +1201,11 @@ static int write_pf_conf(const char *server_ips, char ifnames[][32], size_t if_c
             if (fprintf(fp,
                 "pass out quick on %s inet proto tcp from any to <vlesscore_bypass> flags S/SA keep state\n"
                 "pass out quick on %s route-to (lo0) inet proto tcp from any to ! <vlesscore_bypass> flags S/SA keep state\n"
+                "block return out quick on %s inet proto udp from any to any port 53\n"
                 "block return out quick on %s inet proto udp from any to ! <vlesscore_bypass> port 443\n"
                 "block return out quick on %s inet6 all\n"
                 "pass out on %s all keep state\n",
-                ifname, ifname, ifname, ifname, ifname) < 0) {
+                ifname, ifname, ifname, ifname, ifname, ifname) < 0) {
                 fclose(fp);
                 return -1;
             }
@@ -1227,10 +1229,11 @@ static int write_pf_conf(const char *server_ips, char ifnames[][32], size_t if_c
             if (fprintf(fp,
                 "pass out quick on %s inet proto tcp from any to <vlesscore_bypass> flags S/SA keep state\n"
                 "pass out quick on %s divert-to 127.0.0.1 port %d inet proto tcp from any to ! <vlesscore_bypass> flags S/SA keep state\n"
+                "block return out quick on %s inet proto udp from any to any port 53\n"
                 "block return out quick on %s inet proto udp from any to ! <vlesscore_bypass> port 443\n"
                 "block return out quick on %s inet6 all\n"
                 "pass out on %s all keep state\n",
-                ifname, ifname, redir_port, ifname, ifname, ifname) < 0) {
+                ifname, ifname, redir_port, ifname, ifname, ifname, ifname) < 0) {
                 fclose(fp);
                 return -1;
             }
@@ -1254,10 +1257,11 @@ static int write_pf_conf(const char *server_ips, char ifnames[][32], size_t if_c
             if (fprintf(fp,
                 "pass out quick on %s inet proto tcp from any to <vlesscore_bypass> keep state\n"
                 "pass out quick on %s inet proto tcp from any to ! <vlesscore_bypass> divert-to 127.0.0.1 port %d keep state\n"
+                "block return out quick on %s inet proto udp from any to any port 53\n"
                 "block return out quick on %s inet proto udp from any to ! <vlesscore_bypass> port 443\n"
                 "block return out quick on %s inet6 all\n"
                 "pass out on %s all keep state\n",
-                ifname, ifname, redir_port, ifname, ifname, ifname) < 0) {
+                ifname, ifname, redir_port, ifname, ifname, ifname, ifname) < 0) {
                 fclose(fp);
                 return -1;
             }
@@ -1281,10 +1285,11 @@ static int write_pf_conf(const char *server_ips, char ifnames[][32], size_t if_c
             if (fprintf(fp,
                 "pass out quick on %s inet proto tcp from any to <vlesscore_bypass> flags S/SA keep state\n"
                 "pass out quick on %s inet proto tcp from any to ! <vlesscore_bypass> rdr-to 127.0.0.1 port %d flags S/SA keep state\n"
+                "block return out quick on %s inet proto udp from any to any port 53\n"
                 "block return out quick on %s inet proto udp from any to ! <vlesscore_bypass> port 443\n"
                 "block return out quick on %s inet6 all\n"
                 "pass out on %s all keep state\n",
-                ifname, ifname, redir_port, ifname, ifname, ifname) < 0) {
+                ifname, ifname, redir_port, ifname, ifname, ifname, ifname) < 0) {
                 fclose(fp);
                 return -1;
             }
@@ -1308,10 +1313,11 @@ static int write_pf_conf(const char *server_ips, char ifnames[][32], size_t if_c
             if (fprintf(fp,
                 "pass out quick on %s inet proto tcp from any to <vlesscore_bypass> keep state\n"
                 "pass out quick on %s inet proto tcp from any to ! <vlesscore_bypass> rdr-to 127.0.0.1 port %d keep state\n"
+                "block return out quick on %s inet proto udp from any to any port 53\n"
                 "block return out quick on %s inet proto udp from any to ! <vlesscore_bypass> port 443\n"
                 "block return out quick on %s inet6 all\n"
                 "pass out on %s all keep state\n",
-                ifname, ifname, redir_port, ifname, ifname, ifname) < 0) {
+                ifname, ifname, redir_port, ifname, ifname, ifname, ifname) < 0) {
                 fclose(fp);
                 return -1;
             }
@@ -1343,10 +1349,11 @@ static int write_pf_conf(const char *server_ips, char ifnames[][32], size_t if_c
         for (size_t i = 0; i < if_count; i++) {
             const char *ifname = ifnames[i];
             if (fprintf(fp,
+                "block return out quick on %s inet proto udp from any to any port 53\n"
                 "block return out quick on %s inet proto udp from any to ! <vlesscore_bypass> port 443\n"
                 "block return out quick on %s inet6 all\n"
                 "pass out on %s all keep state\n",
-                ifname, ifname, ifname) < 0) {
+                ifname, ifname, ifname, ifname) < 0) {
                 fclose(fp);
                 return -1;
             }
@@ -1648,6 +1655,10 @@ static int apply_ipfw_rules(const char *server_ip, int redir_port, int socks_por
     snprintf(rule_out, sizeof(rule_out), "allow tcp from any to 127.0.0.1 %d out", redir_port);
     snprintf(rule_plain, sizeof(rule_plain), "allow tcp from any to 127.0.0.1 %d", redir_port);
     if (add_ipfw_rule_compat(ipfw, 12006, rule_out, rule_plain) != 0) return -1;
+
+    snprintf(rule_out, sizeof(rule_out), "deny udp from any to any 53 out");
+    snprintf(rule_plain, sizeof(rule_plain), "deny udp from any to any 53");
+    if (add_ipfw_rule_compat(ipfw, 12007, rule_out, rule_plain) != 0) return -1;
 
     snprintf(rule_out, sizeof(rule_out), "fwd 127.0.0.1,%d tcp from any to any out", redir_port);
     snprintf(rule_plain, sizeof(rule_plain), "fwd 127.0.0.1,%d tcp from any to any", redir_port);
