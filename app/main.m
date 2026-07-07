@@ -719,6 +719,54 @@ static NSString *DetectCoreBinaryVersion(void) {
     return v;
 }
 
+static NSString *VersionTokenAfterPrefix(NSString *line, NSString *prefix) {
+    if (!line || !prefix) return @"unknown";
+
+    NSArray *parts = [line componentsSeparatedByCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
+    for (NSUInteger i = 0; i < [parts count]; i++) {
+        NSString *part = [parts objectAtIndex:i];
+        if ([part hasPrefix:prefix] && [part length] > [prefix length]) {
+            return [part substringFromIndex:[prefix length]];
+        }
+    }
+    return @"unknown";
+}
+
+static NSString *CurlVersionFromVersionLine(NSString *line) {
+    if (!line) return @"unknown";
+
+    NSArray *parts = [line componentsSeparatedByCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
+    NSMutableArray *tokens = [NSMutableArray array];
+    for (NSUInteger i = 0; i < [parts count]; i++) {
+        NSString *part = [parts objectAtIndex:i];
+        if ([part length] > 0) {
+            [tokens addObject:part];
+        }
+    }
+
+    if ([tokens count] >= 2 && [[tokens objectAtIndex:0] isEqualToString:@"curl"]) {
+        return [tokens objectAtIndex:1];
+    }
+    return VersionTokenAfterPrefix(line, @"libcurl/");
+}
+
+static NSDictionary *DetectCurlDependencyVersions(void) {
+    NSString *line = RunCommandFirstLine("/usr/bin/vless-core-curl --version 2>/dev/null");
+    if (!line || [line length] == 0) {
+        line = RunCommandFirstLine("vless-core-curl --version 2>/dev/null");
+    }
+
+    NSString *curlVersion = CurlVersionFromVersionLine(line);
+    NSString *opensslVersion = VersionTokenAfterPrefix(line, @"OpenSSL/");
+    NSString *zlibVersion = VersionTokenAfterPrefix(line, @"zlib/");
+
+    return [NSDictionary dictionaryWithObjectsAndKeys:
+            curlVersion, @"curl",
+            opensslVersion, @"openssl",
+            zlibVersion, @"zlib",
+            nil];
+}
+
 static NSString *TrimSimpleString(NSString *s) {
     if (!s) return @"";
     return [s stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
@@ -4259,6 +4307,7 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
     }
     NSString *coreBinary = @"vless-core-darwin-armv7";
     NSString *coreVersion = DetectCoreBinaryVersion();
+    NSDictionary *deps = DetectCurlDependencyVersions();
 
     NSString *msg =
         [NSString stringWithFormat:
@@ -4267,8 +4316,18 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
          @"Core binary: %@\n"
          @"Binary version: %@\n"
          @"\n"
+         @"vless-core-curl:\n"
+         @"curl: %@\n"
+         @"OpenSSL: %@\n"
+         @"zlib: %@\n"
+         @"\n"
          @"made by notfence",
-         ver, coreBinary, coreVersion];
+         ver,
+         coreBinary,
+         coreVersion,
+         [deps objectForKey:@"curl"],
+         [deps objectForKey:@"openssl"],
+         [deps objectForKey:@"zlib"]];
 
     UIAlertView *av = [[[UIAlertView alloc] initWithTitle:@"About vless-core"
                                                    message:msg
@@ -4952,10 +5011,11 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
 }
 
 - (NSArray *)fileBrowserEntriesAtPath:(NSString *)dirPath {
-    if (![self isDirectoryPath:dirPath]) return [NSArray array];
-
     NSFileManager *fm = [NSFileManager defaultManager];
-    NSArray *names = [fm contentsOfDirectoryAtPath:dirPath error:nil];
+    NSArray *names = nil;
+    if ([self isDirectoryPath:dirPath]) {
+        names = [fm contentsOfDirectoryAtPath:dirPath error:nil];
+    }
     if (![names isKindOfClass:[NSArray class]]) {
         if ([dirPath rangeOfString:@"\n"].location == NSNotFound &&
             [dirPath rangeOfString:@"\r"].location == NSNotFound &&
@@ -5025,7 +5085,7 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
                 return out;
             }
         }
-        names = [NSArray array];
+        return [NSArray array];
     }
     NSArray *sortedNames = [names sortedArrayUsingSelector:@selector(localizedCaseInsensitiveCompare:)];
 
@@ -5077,14 +5137,10 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
 - (void)presentImportFileBrowserAtPath:(NSString *)rawPath {
     NSString *path = [self safeTrim:rawPath];
     if ([path length] == 0) path = @"/var/mobile";
-    if (![self isDirectoryPath:path]) {
-        [self showStatus:@"Directory not found" ok:NO];
-        return;
-    }
 
     NSArray *items = [self fileBrowserEntriesAtPath:path];
     if ([items count] == 0) {
-        [self showStatus:@"Directory is empty" ok:NO];
+        [self showStatus:@"Directory not found or not allowed" ok:NO];
         return;
     }
 

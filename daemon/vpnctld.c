@@ -303,6 +303,22 @@ static int path_is_under_root(const char *path, const char *root) {
     return strncmp(path, root, n) == 0 && (path[n] == '\0' || path[n] == '/');
 }
 
+static int path_is_under_allowed_import_root(const char *path) {
+    static const char *roots[] = {
+        "/var/mobile",
+        "/private/var/mobile",
+        "/var/root",
+        "/private/var/root",
+    };
+
+    for (size_t i = 0; i < sizeof(roots) / sizeof(roots[0]); i++) {
+        if (path_is_under_root(path, roots[i])) {
+            return 1;
+        }
+    }
+    return 0;
+}
+
 static int resolve_allowed_import_path(const char *path, char *resolved, size_t resolved_cap) {
     if (is_forbidden_path(path) || !resolved || resolved_cap == 0) {
         return -1;
@@ -313,8 +329,7 @@ static int resolve_allowed_import_path(const char *path, char *resolved, size_t 
         return -1;
     }
 
-    if (!path_is_under_root(real, "/var/mobile") &&
-        !path_is_under_root(real, "/private/var/mobile")) {
+    if (!path_is_under_allowed_import_root(real)) {
         return -1;
     }
 
