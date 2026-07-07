@@ -8,6 +8,7 @@
 #include <signal.h>
 #include <spawn.h>
 #include <stdbool.h>
+#include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <stdarg.h>
@@ -35,8 +36,10 @@ typedef struct {
     int connected;
     int socks_port;
     int redir_port;
+    int dns_port;
     pid_t core_pid;
     pid_t redsocks_pid;
+    pid_t dns_pid;
     vpn_mode_t mode;
     int pf_enabled_before;
     char server_ip[64];
@@ -47,12 +50,14 @@ static vpn_state_t g;
 static const char *kVPNIconStatePath = "/var/mobile/Library/Preferences/com.vlesscore.vpnicon.state";
 static const char *kVPNIconDarwinNotify = "com.vlesscore.vpnicon.changed";
 static const char *kDaemonPortPath = "/var/run/vpnctld.port";
+static const char *kDNSCachePath = "/var/run/vlesscore-dns-cache.txt";
 static const int kDaemonPortDefault = 9093;
 static const int kDaemonPortMax = 9113;
 static volatile sig_atomic_t g_terminate = 0;
 static int g_listen_fd = -1;
 
 static void stop_pid(pid_t *p);
+static void truncate_log_file(const char *path);
 
 static void handle_term_signal(int sig) {
     (void)sig;
@@ -569,6 +574,33 @@ static int pick_free_port_range(int start, int end) {
     return -1;
 }
 
+static int bind_udp_loopback_range(int start, int end, int *port_out) {
+    if (port_out) *port_out = 0;
+
+    for (int p = start; p <= end; p++) {
+        int fd = socket(AF_INET, SOCK_DGRAM, 0);
+        if (fd < 0) return -1;
+
+        int one = 1;
+        (void)setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &one, sizeof(one));
+
+        struct sockaddr_in sa;
+        memset(&sa, 0, sizeof(sa));
+        sa.sin_family = AF_INET;
+        sa.sin_addr.s_addr = inet_addr("127.0.0.1");
+        sa.sin_port = htons((uint16_t)p);
+
+        if (bind(fd, (struct sockaddr *)&sa, sizeof(sa)) == 0) {
+            if (port_out) *port_out = p;
+            return fd;
+        }
+
+        close(fd);
+    }
+
+    return -1;
+}
+
 static int pick_port(int requested) {
     if (requested > 0) {
         return pick_free_port_range(requested, requested);
@@ -994,6 +1026,339 @@ static int spawn_redsocks(int socks_port, const char *const *redirectors, size_t
     return -6;
 }
 
+#define DNS_PROXY_UPSTREAM_IP "1.1.1.1"
+#define DNS_PROXY_UPSTREAM_PORT 53
+#define DNS_PROXY_TIMEOUT_MS 6000
+#define DNS_PROXY_MAX_PACKET 4096
+
+static void set_fd_timeout_ms(int fd, int timeout_ms) {
+    struct timeval tv;
+    memset(&tv, 0, sizeof(tv));
+    tv.tv_sec = timeout_ms / 1000;
+    tv.tv_usec = (timeout_ms % 1000) * 1000;
+    (void)setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
+    (void)setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv));
+}
+
+static int tcp_write_all_fd(int fd, const void *buf, size_t len) {
+    const unsigned char *p = (const unsigned char *)buf;
+    size_t off = 0;
+    while (off < len) {
+        ssize_t n = send(fd, p + off, len - off, 0);
+        if (n <= 0) return -1;
+        off += (size_t)n;
+    }
+    return 0;
+}
+
+static int tcp_read_exact_fd(int fd, void *buf, size_t len) {
+    unsigned char *p = (unsigned char *)buf;
+    size_t off = 0;
+    while (off < len) {
+        ssize_t n = recv(fd, p + off, len - off, 0);
+        if (n <= 0) return -1;
+        off += (size_t)n;
+    }
+    return 0;
+}
+
+static int read_socks5_addr_tail(int fd, unsigned char atyp) {
+    unsigned char tmp[260];
+    size_t len = 0;
+    if (atyp == 0x01) {
+        len = 4 + 2;
+    } else if (atyp == 0x04) {
+        len = 16 + 2;
+    } else if (atyp == 0x03) {
+        unsigned char dlen = 0;
+        if (tcp_read_exact_fd(fd, &dlen, 1) != 0) return -1;
+        len = (size_t)dlen + 2;
+    } else {
+        return -1;
+    }
+    if (len > sizeof(tmp)) return -1;
+    return tcp_read_exact_fd(fd, tmp, len);
+}
+
+static int dns_proxy_open_socks_tcp(int socks_port) {
+    int fd = socket(AF_INET, SOCK_STREAM, 0);
+    if (fd < 0) return -1;
+    set_fd_timeout_ms(fd, DNS_PROXY_TIMEOUT_MS);
+
+    struct sockaddr_in sa;
+    memset(&sa, 0, sizeof(sa));
+    sa.sin_family = AF_INET;
+    sa.sin_addr.s_addr = inet_addr("127.0.0.1");
+    sa.sin_port = htons((uint16_t)socks_port);
+
+    if (connect(fd, (struct sockaddr *)&sa, sizeof(sa)) != 0) {
+        close(fd);
+        return -1;
+    }
+
+    unsigned char hello[] = {0x05, 0x01, 0x00};
+    unsigned char method[2];
+    if (tcp_write_all_fd(fd, hello, sizeof(hello)) != 0 ||
+        tcp_read_exact_fd(fd, method, sizeof(method)) != 0 ||
+        method[0] != 0x05 || method[1] != 0x00) {
+        close(fd);
+        return -1;
+    }
+
+    struct in_addr dns_ip;
+    if (inet_pton(AF_INET, DNS_PROXY_UPSTREAM_IP, &dns_ip) != 1) {
+        close(fd);
+        return -1;
+    }
+
+    unsigned char req[10];
+    req[0] = 0x05;
+    req[1] = 0x01;
+    req[2] = 0x00;
+    req[3] = 0x01;
+    memcpy(req + 4, &dns_ip, 4);
+    req[8] = (unsigned char)((DNS_PROXY_UPSTREAM_PORT >> 8) & 0xff);
+    req[9] = (unsigned char)(DNS_PROXY_UPSTREAM_PORT & 0xff);
+
+    unsigned char resp[4];
+    if (tcp_write_all_fd(fd, req, sizeof(req)) != 0 ||
+        tcp_read_exact_fd(fd, resp, sizeof(resp)) != 0 ||
+        resp[0] != 0x05 ||
+        resp[1] != 0x00 ||
+        read_socks5_addr_tail(fd, resp[3]) != 0) {
+        close(fd);
+        return -1;
+    }
+
+    return fd;
+}
+
+static int dns_proxy_query_tcp(int socks_port, const unsigned char *query, size_t query_len, unsigned char *reply, size_t reply_cap, size_t *reply_len) {
+    if (reply_len) *reply_len = 0;
+    if (!query || query_len == 0 || query_len > 0xffff || !reply || reply_cap < 2) return -1;
+
+    int fd = dns_proxy_open_socks_tcp(socks_port);
+    if (fd < 0) return -1;
+
+    unsigned char lenbuf[2];
+    lenbuf[0] = (unsigned char)((query_len >> 8) & 0xff);
+    lenbuf[1] = (unsigned char)(query_len & 0xff);
+
+    if (tcp_write_all_fd(fd, lenbuf, sizeof(lenbuf)) != 0 ||
+        tcp_write_all_fd(fd, query, query_len) != 0 ||
+        tcp_read_exact_fd(fd, lenbuf, sizeof(lenbuf)) != 0) {
+        close(fd);
+        return -1;
+    }
+
+    size_t n = ((size_t)lenbuf[0] << 8) | (size_t)lenbuf[1];
+    if (n == 0 || n > reply_cap) {
+        close(fd);
+        return -1;
+    }
+    if (tcp_read_exact_fd(fd, reply, n) != 0) {
+        close(fd);
+        return -1;
+    }
+
+    close(fd);
+    if (reply_len) *reply_len = n;
+    return 0;
+}
+
+static int dns_read_u16(const unsigned char *buf, size_t len, size_t pos, uint16_t *out) {
+    if (!buf || !out || pos + 2 > len) return -1;
+    *out = (uint16_t)(((uint16_t)buf[pos] << 8) | (uint16_t)buf[pos + 1]);
+    return 0;
+}
+
+static int dns_read_u32(const unsigned char *buf, size_t len, size_t pos, uint32_t *out) {
+    if (!buf || !out || pos + 4 > len) return -1;
+    *out = ((uint32_t)buf[pos] << 24) | ((uint32_t)buf[pos + 1] << 16) | ((uint32_t)buf[pos + 2] << 8) | (uint32_t)buf[pos + 3];
+    return 0;
+}
+
+static int dns_skip_name(const unsigned char *msg, size_t len, size_t *pos) {
+    if (!msg || !pos || *pos >= len) return -1;
+
+    while (*pos < len) {
+        unsigned char c = msg[*pos];
+        if (c == 0) {
+            (*pos)++;
+            return 0;
+        }
+        if ((c & 0xc0) == 0xc0) {
+            if (*pos + 2 > len) return -1;
+            *pos += 2;
+            return 0;
+        }
+        if ((c & 0xc0) != 0) return -1;
+        *pos += (size_t)c + 1;
+    }
+
+    return -1;
+}
+
+static int dns_query_name(const unsigned char *query, size_t len, char *out, size_t out_cap) {
+    if (!query || len < 13 || !out || out_cap == 0) return -1;
+
+    size_t pos = 12;
+    size_t off = 0;
+    out[0] = '\0';
+
+    while (pos < len) {
+        unsigned char lab_len = query[pos++];
+        if (lab_len == 0) {
+            if (off == 0) return -1;
+            out[off] = '\0';
+            return 0;
+        }
+        if ((lab_len & 0xc0) != 0 || lab_len > 63 || pos + lab_len > len) return -1;
+        if (off != 0) {
+            if (off + 1 >= out_cap) return -1;
+            out[off++] = '.';
+        }
+        if (off + lab_len >= out_cap) return -1;
+        for (unsigned int i = 0; i < lab_len; i++) {
+            unsigned char ch = query[pos + i];
+            if (ch <= 0x20 || ch >= 0x7f || ch == '\t') return -1;
+            out[off++] = (char)ch;
+        }
+        pos += lab_len;
+    }
+
+    return -1;
+}
+
+static void dns_cache_append_mapping(const char *ip, const char *name) {
+    if (!ip || !*ip || !name || !*name) return;
+
+    int fd = open(kDNSCachePath, O_WRONLY | O_CREAT | O_APPEND, 0644);
+    if (fd < 0) return;
+
+    char line[512];
+    int n = snprintf(line, sizeof(line), "%s\t%s\n", ip, name);
+    if (n > 0 && (size_t)n < sizeof(line)) {
+        (void)write(fd, line, (size_t)n);
+    }
+    close(fd);
+}
+
+static void dns_cache_store_a_answers(const unsigned char *query, size_t query_len, const unsigned char *reply, size_t reply_len) {
+    char name[256];
+    if (dns_query_name(query, query_len, name, sizeof(name)) != 0) return;
+    if (!reply || reply_len < 12) return;
+
+    uint16_t qdcount = 0;
+    uint16_t ancount = 0;
+    if (dns_read_u16(reply, reply_len, 4, &qdcount) != 0 || dns_read_u16(reply, reply_len, 6, &ancount) != 0) return;
+
+    size_t pos = 12;
+    for (uint16_t i = 0; i < qdcount; i++) {
+        if (dns_skip_name(reply, reply_len, &pos) != 0 || pos + 4 > reply_len) return;
+        pos += 4;
+    }
+
+    for (uint16_t i = 0; i < ancount; i++) {
+        if (dns_skip_name(reply, reply_len, &pos) != 0 || pos + 10 > reply_len) return;
+
+        uint16_t type = 0;
+        uint16_t klass = 0;
+        uint16_t rdlen = 0;
+        uint32_t ttl = 0;
+        if (dns_read_u16(reply, reply_len, pos, &type) != 0 ||
+            dns_read_u16(reply, reply_len, pos + 2, &klass) != 0 ||
+            dns_read_u32(reply, reply_len, pos + 4, &ttl) != 0 ||
+            dns_read_u16(reply, reply_len, pos + 8, &rdlen) != 0) {
+            return;
+        }
+        (void)ttl;
+        pos += 10;
+        if (pos + rdlen > reply_len) return;
+
+        if (type == 1 && klass == 1 && rdlen == 4) {
+            char ip[64];
+            if (inet_ntop(AF_INET, reply + pos, ip, (socklen_t)sizeof(ip)) != NULL) {
+                dns_cache_append_mapping(ip, name);
+            }
+        }
+        pos += rdlen;
+    }
+}
+
+static void dns_proxy_loop(int udp_fd, int socks_port) {
+    unsigned char query[DNS_PROXY_MAX_PACKET];
+    unsigned char reply[DNS_PROXY_MAX_PACKET];
+
+    log_msg("dns proxy loop started socks=%d upstream=%s:%d", socks_port, DNS_PROXY_UPSTREAM_IP, DNS_PROXY_UPSTREAM_PORT);
+
+    while (!g_terminate) {
+        struct sockaddr_storage peer;
+        socklen_t peer_len = sizeof(peer);
+        ssize_t n = recvfrom(udp_fd, query, sizeof(query), 0, (struct sockaddr *)&peer, &peer_len);
+        if (n < 0) {
+            if (errno == EINTR) continue;
+            continue;
+        }
+        if (n < 12) {
+            continue;
+        }
+
+        size_t reply_len = 0;
+        if (dns_proxy_query_tcp(socks_port, query, (size_t)n, reply, sizeof(reply), &reply_len) != 0) {
+            log_msg("dns proxy query failed bytes=%ld", (long)n);
+            continue;
+        }
+
+        dns_cache_store_a_answers(query, (size_t)n, reply, reply_len);
+        (void)sendto(udp_fd, reply, reply_len, 0, (struct sockaddr *)&peer, peer_len);
+    }
+
+    close(udp_fd);
+    log_msg("dns proxy loop stopped");
+}
+
+static int spawn_dns_proxy(int socks_port, int *dns_port_out, pid_t *pid_out) {
+    if (dns_port_out) *dns_port_out = 0;
+    if (pid_out) *pid_out = 0;
+
+    int dns_port = 0;
+    int udp_fd = bind_udp_loopback_range(12530, 12630, &dns_port);
+    if (udp_fd < 0 || dns_port <= 0) {
+        if (udp_fd >= 0) close(udp_fd);
+        return -1;
+    }
+
+    truncate_log_file(kDNSCachePath);
+
+    pid_t pid = fork();
+    if (pid < 0) {
+        close(udp_fd);
+        return -2;
+    }
+
+    if (pid == 0) {
+        if (g_listen_fd >= 0) {
+            close(g_listen_fd);
+            g_listen_fd = -1;
+        }
+        dns_proxy_loop(udp_fd, socks_port);
+        _exit(0);
+    }
+
+    close(udp_fd);
+    usleep(100000);
+    if (!pid_alive(pid)) {
+        stop_pid(&pid);
+        return -3;
+    }
+
+    log_msg("dns proxy started pid=%d port=%d", (int)pid, dns_port);
+    if (dns_port_out) *dns_port_out = dns_port;
+    if (pid_out) *pid_out = pid;
+    return 0;
+}
+
 static void truncate_log_file(const char *path) {
     int fd = open(path, O_WRONLY | O_CREAT | O_TRUNC, 0644);
     if (fd >= 0) {
@@ -1118,7 +1483,7 @@ static const char *pf_rule_mode_name(pf_rule_mode_t mode) {
     }
 }
 
-static int write_pf_conf(const char *server_ips, char ifnames[][32], size_t if_count, int redir_port, pf_rule_mode_t mode) {
+static int write_pf_conf(const char *server_ips, char ifnames[][32], size_t if_count, int redir_port, int dns_port, pf_rule_mode_t mode) {
     FILE *fp = fopen("/var/run/vlesscore-pf.conf", "w");
     if (!fp) return -1;
 
@@ -1151,13 +1516,19 @@ static int write_pf_conf(const char *server_ips, char ifnames[][32], size_t if_c
             fclose(fp);
             return -1;
         }
+        if (fprintf(fp,
+            "rdr pass on lo0 inet proto udp from any to any port 53 -> 127.0.0.1 port %d\n",
+            dns_port) < 0) {
+            fclose(fp);
+            return -1;
+        }
 
         for (size_t i = 0; i < if_count; i++) {
             const char *ifname = ifnames[i];
             if (fprintf(fp,
                 "pass out quick on %s inet proto tcp from any to <vlesscore_bypass> flags S/SA keep state\n"
                 "pass out quick on %s route-to (lo0 127.0.0.1) inet proto tcp from any to ! <vlesscore_bypass> flags S/SA keep state\n"
-                "block return out quick on %s inet proto udp from any to any port 53\n"
+                "pass out quick on %s route-to (lo0 127.0.0.1) inet proto udp from any to any port 53 keep state\n"
                 "block return out quick on %s inet proto udp from any to ! <vlesscore_bypass> port 443\n"
                 "block return out quick on %s inet6 all\n"
                 "pass out on %s all keep state\n",
@@ -1195,13 +1566,19 @@ static int write_pf_conf(const char *server_ips, char ifnames[][32], size_t if_c
             fclose(fp);
             return -1;
         }
+        if (fprintf(fp,
+            "rdr pass on lo0 inet proto udp from any to any port 53 -> 127.0.0.1 port %d\n",
+            dns_port) < 0) {
+            fclose(fp);
+            return -1;
+        }
 
         for (size_t i = 0; i < if_count; i++) {
             const char *ifname = ifnames[i];
             if (fprintf(fp,
                 "pass out quick on %s inet proto tcp from any to <vlesscore_bypass> flags S/SA keep state\n"
                 "pass out quick on %s route-to (lo0) inet proto tcp from any to ! <vlesscore_bypass> flags S/SA keep state\n"
-                "block return out quick on %s inet proto udp from any to any port 53\n"
+                "pass out quick on %s route-to (lo0) inet proto udp from any to any port 53 keep state\n"
                 "block return out quick on %s inet proto udp from any to ! <vlesscore_bypass> port 443\n"
                 "block return out quick on %s inet6 all\n"
                 "pass out on %s all keep state\n",
@@ -1229,11 +1606,11 @@ static int write_pf_conf(const char *server_ips, char ifnames[][32], size_t if_c
             if (fprintf(fp,
                 "pass out quick on %s inet proto tcp from any to <vlesscore_bypass> flags S/SA keep state\n"
                 "pass out quick on %s divert-to 127.0.0.1 port %d inet proto tcp from any to ! <vlesscore_bypass> flags S/SA keep state\n"
-                "block return out quick on %s inet proto udp from any to any port 53\n"
+                "pass out quick on %s divert-to 127.0.0.1 port %d inet proto udp from any to any port 53 keep state\n"
                 "block return out quick on %s inet proto udp from any to ! <vlesscore_bypass> port 443\n"
                 "block return out quick on %s inet6 all\n"
                 "pass out on %s all keep state\n",
-                ifname, ifname, redir_port, ifname, ifname, ifname, ifname) < 0) {
+                ifname, ifname, redir_port, ifname, dns_port, ifname, ifname, ifname) < 0) {
                 fclose(fp);
                 return -1;
             }
@@ -1257,11 +1634,11 @@ static int write_pf_conf(const char *server_ips, char ifnames[][32], size_t if_c
             if (fprintf(fp,
                 "pass out quick on %s inet proto tcp from any to <vlesscore_bypass> keep state\n"
                 "pass out quick on %s inet proto tcp from any to ! <vlesscore_bypass> divert-to 127.0.0.1 port %d keep state\n"
-                "block return out quick on %s inet proto udp from any to any port 53\n"
+                "pass out quick on %s inet proto udp from any to any port 53 divert-to 127.0.0.1 port %d keep state\n"
                 "block return out quick on %s inet proto udp from any to ! <vlesscore_bypass> port 443\n"
                 "block return out quick on %s inet6 all\n"
                 "pass out on %s all keep state\n",
-                ifname, ifname, redir_port, ifname, ifname, ifname, ifname) < 0) {
+                ifname, ifname, redir_port, ifname, dns_port, ifname, ifname, ifname) < 0) {
                 fclose(fp);
                 return -1;
             }
@@ -1285,11 +1662,11 @@ static int write_pf_conf(const char *server_ips, char ifnames[][32], size_t if_c
             if (fprintf(fp,
                 "pass out quick on %s inet proto tcp from any to <vlesscore_bypass> flags S/SA keep state\n"
                 "pass out quick on %s inet proto tcp from any to ! <vlesscore_bypass> rdr-to 127.0.0.1 port %d flags S/SA keep state\n"
-                "block return out quick on %s inet proto udp from any to any port 53\n"
+                "pass out quick on %s inet proto udp from any to any port 53 rdr-to 127.0.0.1 port %d keep state\n"
                 "block return out quick on %s inet proto udp from any to ! <vlesscore_bypass> port 443\n"
                 "block return out quick on %s inet6 all\n"
                 "pass out on %s all keep state\n",
-                ifname, ifname, redir_port, ifname, ifname, ifname, ifname) < 0) {
+                ifname, ifname, redir_port, ifname, dns_port, ifname, ifname, ifname) < 0) {
                 fclose(fp);
                 return -1;
             }
@@ -1313,11 +1690,11 @@ static int write_pf_conf(const char *server_ips, char ifnames[][32], size_t if_c
             if (fprintf(fp,
                 "pass out quick on %s inet proto tcp from any to <vlesscore_bypass> keep state\n"
                 "pass out quick on %s inet proto tcp from any to ! <vlesscore_bypass> rdr-to 127.0.0.1 port %d keep state\n"
-                "block return out quick on %s inet proto udp from any to any port 53\n"
+                "pass out quick on %s inet proto udp from any to any port 53 rdr-to 127.0.0.1 port %d keep state\n"
                 "block return out quick on %s inet proto udp from any to ! <vlesscore_bypass> port 443\n"
                 "block return out quick on %s inet6 all\n"
                 "pass out on %s all keep state\n",
-                ifname, ifname, redir_port, ifname, ifname, ifname, ifname) < 0) {
+                ifname, ifname, redir_port, ifname, dns_port, ifname, ifname, ifname) < 0) {
                 fclose(fp);
                 return -1;
             }
@@ -1344,16 +1721,21 @@ static int write_pf_conf(const char *server_ips, char ifnames[][32], size_t if_c
                 fclose(fp);
                 return -1;
             }
+            if (fprintf(fp,
+                "rdr pass on %s inet proto udp from any to any port 53 -> 127.0.0.1 port %d\n",
+                ifname, dns_port) < 0) {
+                fclose(fp);
+                return -1;
+            }
         }
 
         for (size_t i = 0; i < if_count; i++) {
             const char *ifname = ifnames[i];
             if (fprintf(fp,
-                "block return out quick on %s inet proto udp from any to any port 53\n"
                 "block return out quick on %s inet proto udp from any to ! <vlesscore_bypass> port 443\n"
                 "block return out quick on %s inet6 all\n"
                 "pass out on %s all keep state\n",
-                ifname, ifname, ifname, ifname) < 0) {
+                ifname, ifname, ifname) < 0) {
                 fclose(fp);
                 return -1;
             }
@@ -1418,7 +1800,7 @@ static void flush_pf_states(void) {
     }
 }
 
-static int apply_pf_rules(const char *server_ips, int redir_port) {
+static int apply_pf_rules(const char *server_ips, int redir_port, int dns_port) {
     const char *pfctl = find_pfctl_bin();
     if (!pfctl) {
         log_msg("pfctl binary not found");
@@ -1512,7 +1894,7 @@ static int apply_pf_rules(const char *server_ips, int redir_port) {
     for (size_t i = 0; i < mode_count; i++) {
         pf_rule_mode_t mode = modes[i];
 
-        if (write_pf_conf(server_ips, ifnames, if_count, redir_port, mode) != 0) {
+        if (write_pf_conf(server_ips, ifnames, if_count, redir_port, dns_port, mode) != 0) {
             continue;
         }
 
@@ -1615,7 +1997,7 @@ static void try_enable_ipfw_firewall(void) {
     run_argv(argv);
 }
 
-static int apply_ipfw_rules(const char *server_ip, int redir_port, int socks_port) {
+static int apply_ipfw_rules(const char *server_ip, int redir_port, int dns_port, int socks_port) {
     const char *ipfw = find_ipfw_bin();
     if (!ipfw) {
         log_msg("ipfw binary not found");
@@ -1656,8 +2038,8 @@ static int apply_ipfw_rules(const char *server_ip, int redir_port, int socks_por
     snprintf(rule_plain, sizeof(rule_plain), "allow tcp from any to 127.0.0.1 %d", redir_port);
     if (add_ipfw_rule_compat(ipfw, 12006, rule_out, rule_plain) != 0) return -1;
 
-    snprintf(rule_out, sizeof(rule_out), "deny udp from any to any 53 out");
-    snprintf(rule_plain, sizeof(rule_plain), "deny udp from any to any 53");
+    snprintf(rule_out, sizeof(rule_out), "fwd 127.0.0.1,%d udp from any to any 53 out", dns_port);
+    snprintf(rule_plain, sizeof(rule_plain), "fwd 127.0.0.1,%d udp from any to any 53", dns_port);
     if (add_ipfw_rule_compat(ipfw, 12007, rule_out, rule_plain) != 0) return -1;
 
     snprintf(rule_out, sizeof(rule_out), "fwd 127.0.0.1,%d tcp from any to any out", redir_port);
@@ -1677,9 +2059,11 @@ static void disconnect_all(void) {
     }
 
     stop_pid(&g.redsocks_pid);
+    stop_pid(&g.dns_pid);
     stop_pid(&g.core_pid);
 
     unlink("/var/run/vlesscore-redsocks.conf");
+    unlink(kDNSCachePath);
 
     memset(&g, 0, sizeof(g));
     update_vpn_icon_state(0);
@@ -1706,8 +2090,16 @@ static int try_connect_ipfw(int socks_port) {
 
     usleep(300000);
 
-    if (apply_ipfw_rules(g.server_ip, redir_port, socks_port) != 0) {
+    int dns_port = 0;
+    if (spawn_dns_proxy(socks_port, &dns_port, &g.dns_pid) != 0) {
         clear_ipfw_rules();
+        stop_pid(&g.redsocks_pid);
+        return -22;
+    }
+
+    if (apply_ipfw_rules(g.server_ip, redir_port, dns_port, socks_port) != 0) {
+        clear_ipfw_rules();
+        stop_pid(&g.dns_pid);
         stop_pid(&g.redsocks_pid);
         return -20;
     }
@@ -1716,6 +2108,7 @@ static int try_connect_ipfw(int socks_port) {
     g.connected = 1;
     g.socks_port = socks_port;
     g.redir_port = redir_port;
+    g.dns_port = dns_port;
     return 0;
 }
 
@@ -1735,10 +2128,18 @@ static int try_connect_pf(int socks_port) {
 
     usleep(300000);
 
+    int dns_port = 0;
+    if (spawn_dns_proxy(socks_port, &dns_port, &g.dns_pid) != 0) {
+        clear_pf_rules();
+        stop_pid(&g.redsocks_pid);
+        return -45;
+    }
+
     const char *pf_server_ips = (g.server_ips[0] != '\0') ? g.server_ips : g.server_ip;
-    int pf_rc = apply_pf_rules(pf_server_ips, redir_port);
+    int pf_rc = apply_pf_rules(pf_server_ips, redir_port, dns_port);
     if (pf_rc != 0) {
         clear_pf_rules();
+        stop_pid(&g.dns_pid);
         stop_pid(&g.redsocks_pid);
         return -40 + pf_rc;
     }
@@ -1747,6 +2148,7 @@ static int try_connect_pf(int socks_port) {
     g.connected = 1;
     g.socks_port = socks_port;
     g.redir_port = redir_port;
+    g.dns_port = dns_port;
     return 0;
 }
 
@@ -1829,21 +2231,22 @@ static void handle_client(int cfd) {
 
     if (strncmp(buf, "STATUS", 6) == 0) {
         if (g.connected) {
-            snprintf(reply, sizeof(reply), "OK connected mode=%s socks=%d redir=%d\\n", mode_name(g.mode), g.socks_port, g.redir_port);
+            snprintf(reply, sizeof(reply), "OK connected mode=%s socks=%d redir=%d dns=%d\n", mode_name(g.mode), g.socks_port, g.redir_port,
+                     g.dns_port);
         } else {
-            snprintf(reply, sizeof(reply), "OK disconnected\\n");
+            snprintf(reply, sizeof(reply), "OK disconnected\n");
         }
     } else if (strncmp(buf, "DISCONNECT", 10) == 0) {
         disconnect_all();
-        snprintf(reply, sizeof(reply), "OK disconnected\\n");
+        snprintf(reply, sizeof(reply), "OK disconnected\n");
     } else if (strncmp(buf, "CLEAR_LOGS", 10) == 0) {
         clear_logs();
-        snprintf(reply, sizeof(reply), "OK logs cleared\\n");
+        snprintf(reply, sizeof(reply), "OK logs cleared\n");
     } else if (strncmp(buf, "CONNECT\t", 8) == 0) {
         char *p = buf + 8;
         char *tab = strchr(p, '\t');
         if (!tab) {
-            snprintf(reply, sizeof(reply), "ERR malformed CONNECT\\n");
+            snprintf(reply, sizeof(reply), "ERR malformed CONNECT\n");
         } else {
             *tab = '\0';
             int port = atoi(p);
@@ -1853,14 +2256,14 @@ static void handle_client(int cfd) {
             if (nl) *nl = '\0';
 
             if (!is_supported_config_uri(uri)) {
-                snprintf(reply, sizeof(reply), "ERR uri must start with vless:// or socks5://\\n");
+                snprintf(reply, sizeof(reply), "ERR uri must start with vless:// or socks5://\n");
             } else {
                 connect_all(uri, port, reply, sizeof(reply));
-                strncat(reply, "\\n", sizeof(reply) - strlen(reply) - 1);
+                strncat(reply, "\n", sizeof(reply) - strlen(reply) - 1);
             }
         }
     } else {
-        snprintf(reply, sizeof(reply), "ERR unknown command\\n");
+        snprintf(reply, sizeof(reply), "ERR unknown command\n");
     }
 
     write(cfd, reply, strlen(reply));
