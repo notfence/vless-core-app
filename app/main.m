@@ -782,6 +782,21 @@ static NSString *ReadTextFileBestEffort(NSString *path) {
     return txt;
 }
 
+static NSString *NormalizeOpenSSLPatchStatus(NSString *status) {
+    NSString *trimmed = TrimSimpleString(status);
+    if ([trimmed isEqualToString:@"patched"]) return @"patched";
+    if ([trimmed isEqualToString:@"unpatched"]) return @"unpatched";
+    return @"unpatched";
+}
+
+static NSString *DetectOpenSSLPatchStatus(void) {
+    NSString *status = ReadTextFileBestEffort(@"/usr/share/vless-core/openssl-patch-status");
+    if (!status || [status length] == 0) {
+        status = RunCommandFirstLine("/usr/bin/vless-core-darwin-armv7 --openssl-patch-status 2>/dev/null");
+    }
+    return NormalizeOpenSSLPatchStatus(status);
+}
+
 static NSString *SubscriptionHWID(void) {
     NSUserDefaults *ud = [NSUserDefaults standardUserDefaults];
     NSString *hwid = [ud objectForKey:kDefaultsSubHWIDKey];
@@ -954,6 +969,8 @@ static NSData *FetchURLViaVlessCoreCurl(NSString *urlString, BOOL allowInsecureF
         argv[argc++] = (char *)"25";
         argv[argc++] = (char *)"--proto";
         argv[argc++] = (char *)"=https,http";
+        argv[argc++] = (char *)"--curves";
+        argv[argc++] = (char *)"X25519:P-256:P-384";
         argv[argc++] = (char *)"-D";
         argv[argc++] = hdr_tmpl;
 
@@ -4314,6 +4331,7 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
     NSString *coreBinary = @"vless-core-darwin-armv7";
     NSString *coreVersion = DetectCoreBinaryVersion();
     NSDictionary *deps = DetectCurlDependencyVersions();
+    NSString *opensslPatchStatus = DetectOpenSSLPatchStatus();
 
     NSString *msg =
         [NSString stringWithFormat:
@@ -4324,7 +4342,7 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
          @"\n"
          @"vless-core-curl:\n"
          @"curl: %@\n"
-         @"OpenSSL: %@\n"
+         @"OpenSSL: %@ (%@)\n"
          @"zlib: %@\n"
          @"\n"
          @"made by notfence",
@@ -4333,6 +4351,7 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
          coreVersion,
          [deps objectForKey:@"curl"],
          [deps objectForKey:@"openssl"],
+         opensslPatchStatus,
          [deps objectForKey:@"zlib"]];
 
     UIAlertView *av = [[[UIAlertView alloc] initWithTitle:@"About vless-core"

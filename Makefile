@@ -42,6 +42,7 @@ TWEAK_LDFLAGS := -dynamiclib -install_name /Library/MobileSubstrate/DynamicLibra
 
 VLESS_CORE_BIN ?= $(abspath ../vless-core-cli/vless-core-darwin-armv7)
 VLESS_CORE_CURL_BIN ?= $(abspath ../vless-core-cli/third_party/curl-ios6-armv7/bin/curl)
+OPENSSL_PATCH_STATUS_FILE ?= $(abspath ../vless-core-cli/third_party/openssl-ios6-armv7/VLESS_OPENSSL_PATCH_STATUS)
 REDSOCKS_BIN ?= $(ROOT)/third_party/redsocks-vless-core
 CA_BUNDLE ?= $(abspath ../vless-core-cli/third_party/cacert.pem)
 
@@ -61,6 +62,16 @@ check-package-inputs:
 	@test -f "$(VLESS_CORE_CURL_BIN)" || (echo "Missing curl binary: $(VLESS_CORE_CURL_BIN)"; echo "Build it in ../vless-core-cli (make curl-ios6) or override VLESS_CORE_CURL_BIN=/path/to/curl"; exit 1)
 	@test -f "$(REDSOCKS_BIN)" || (echo "Missing redsocks binary: $(REDSOCKS_BIN)"; exit 1)
 	@test -f "$(CA_BUNDLE)" || (echo "Missing CA bundle: $(CA_BUNDLE)"; echo "Provide CA_BUNDLE=/path/to/cacert.pem"; exit 1)
+	@if [ -f "$(OPENSSL_PATCH_STATUS_FILE)" ] && [ "$(OPENSSL_PATCH_STATUS_FILE)" -nt "$(VLESS_CORE_BIN)" ]; then \
+		echo "Stale core binary: $(VLESS_CORE_BIN) is older than $(OPENSSL_PATCH_STATUS_FILE)"; \
+		echo "Rebuild it in ../vless-core-cli after changing OpenSSL: make ios"; \
+		exit 1; \
+	fi
+	@if [ -f "$(OPENSSL_PATCH_STATUS_FILE)" ] && [ "$(OPENSSL_PATCH_STATUS_FILE)" -nt "$(VLESS_CORE_CURL_BIN)" ]; then \
+		echo "Stale curl binary: $(VLESS_CORE_CURL_BIN) is older than $(OPENSSL_PATCH_STATUS_FILE)"; \
+		echo "Rebuild it in ../vless-core-cli after changing OpenSSL: make curl-ios6"; \
+		exit 1; \
+	fi
 
 $(APP_BIN): check-ios-toolchain $(APP_SRC)
 	mkdir -p $(BUILD_DIR)
@@ -108,6 +119,11 @@ package-root: check-package-inputs $(APP_BIN) $(DAEMON_BIN) $(BOOTSTRAP_BIN) $(V
 	cp $(REDSOCKS_BIN) $(PKG_ROOT)/usr/bin/redsocks-vless-core
 	mkdir -p $(PKG_ROOT)/usr/share/vless-core
 	cp $(CA_BUNDLE) $(PKG_ROOT)/usr/share/vless-core/cacert.pem
+	if [ -f "$(OPENSSL_PATCH_STATUS_FILE)" ]; then \
+		cp "$(OPENSSL_PATCH_STATUS_FILE)" $(PKG_ROOT)/usr/share/vless-core/openssl-patch-status; \
+	else \
+		printf '%s\n' unpatched > $(PKG_ROOT)/usr/share/vless-core/openssl-patch-status; \
+	fi
 	find $(PKG_ROOT) -type d -exec chmod 755 {} \;
 	find $(PKG_ROOT) -type f -exec chmod 644 {} \;
 	chmod 755 $(PKG_ROOT)/Applications/vless-core.app/vless-core

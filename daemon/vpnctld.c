@@ -53,6 +53,7 @@ static const char *kDaemonPortPath = "/var/run/vpnctld.port";
 static const char *kDNSCachePath = "/var/run/vlesscore-dns-cache.txt";
 static const int kDaemonPortDefault = 9093;
 static const int kDaemonPortMax = 9113;
+static const int kConnectResolveTimeoutMs = 8000;
 static volatile sig_atomic_t g_terminate = 0;
 static int g_listen_fd = -1;
 
@@ -732,6 +733,12 @@ static int ip_list_append(char *list, size_t list_cap, const char *ip) {
     return 0;
 }
 
+static long long now_ms(void) {
+    struct timeval tv;
+    gettimeofday(&tv, NULL);
+    return ((long long)tv.tv_sec * 1000LL) + ((long long)tv.tv_usec / 1000LL);
+}
+
 static int resolve_host_ipv4_all(const char *host, char *first_ip, size_t first_ip_cap, char *ip_list, size_t ip_list_cap) {
     struct addrinfo hints;
     memset(&hints, 0, sizeof(hints));
@@ -778,6 +785,116 @@ static int resolve_host_ipv4_all(const char *host, char *first_ip, size_t first_
         if (strlen(first_ip) >= ip_list_cap) return -1;
         snprintf(ip_list, ip_list_cap, "%s", first_ip);
     }
+    return 0;
+}
+
+typedef struct {
+    int rc;
+    char first_ip[64];
+    char ip_list[512];
+} resolve_result_t;
+
+static void reap_child_briefly(pid_t pid) {
+    int status = 0;
+    for (int i = 0; i < 20; i++) {
+        pid_t wr = waitpid(pid, &status, WNOHANG);
+        if (wr == pid) return;
+        if (wr < 0 && errno != EINTR) return;
+        usleep(50000);
+    }
+}
+
+static int read_resolve_result_timeout(int fd, resolve_result_t *out, int timeout_ms) {
+    unsigned char *p = (unsigned char *)out;
+    size_t got = 0;
+    long long deadline = now_ms() + timeout_ms;
+
+    while (got < sizeof(*out)) {
+        long long remaining = deadline - now_ms();
+        if (remaining <= 0) return -2;
+
+        fd_set rfds;
+        FD_ZERO(&rfds);
+        FD_SET(fd, &rfds);
+
+        struct timeval tv;
+        memset(&tv, 0, sizeof(tv));
+        tv.tv_sec = (time_t)(remaining / 1000);
+        tv.tv_usec = (suseconds_t)((remaining % 1000) * 1000);
+
+        int sr = select(fd + 1, &rfds, NULL, NULL, &tv);
+        if (sr < 0) {
+            if (errno == EINTR) continue;
+            return -1;
+        }
+        if (sr == 0) return -2;
+
+        ssize_t n = read(fd, p + got, sizeof(*out) - got);
+        if (n < 0) {
+            if (errno == EINTR) continue;
+            return -1;
+        }
+        if (n == 0) return -1;
+        got += (size_t)n;
+    }
+
+    return 0;
+}
+
+static int resolve_host_ipv4_all_bounded(const char *host, char *first_ip, size_t first_ip_cap, char *ip_list, size_t ip_list_cap,
+                                         int timeout_ms) {
+    struct in_addr literal_addr;
+    if (inet_pton(AF_INET, host, &literal_addr) == 1) {
+        if (strlen(host) >= first_ip_cap || strlen(host) >= ip_list_cap) return -1;
+        snprintf(first_ip, first_ip_cap, "%s", host);
+        snprintf(ip_list, ip_list_cap, "%s", host);
+        return 0;
+    }
+
+    int pipefd[2];
+    if (pipe(pipefd) != 0) {
+        log_msg("resolver pipe failed errno=%d", errno);
+        return -1;
+    }
+
+    pid_t pid = fork();
+    if (pid < 0) {
+        log_msg("resolver fork failed errno=%d", errno);
+        close(pipefd[0]);
+        close(pipefd[1]);
+        return -1;
+    }
+
+    if (pid == 0) {
+        close(pipefd[0]);
+
+        resolve_result_t result;
+        memset(&result, 0, sizeof(result));
+        result.rc = resolve_host_ipv4_all(host, result.first_ip, sizeof(result.first_ip), result.ip_list, sizeof(result.ip_list));
+        (void)write(pipefd[1], &result, sizeof(result));
+        close(pipefd[1]);
+        _exit(0);
+    }
+
+    close(pipefd[1]);
+
+    resolve_result_t result;
+    memset(&result, 0, sizeof(result));
+    int rc = read_resolve_result_timeout(pipefd[0], &result, timeout_ms);
+    close(pipefd[0]);
+
+    if (rc == -2) {
+        kill(pid, SIGKILL);
+        reap_child_briefly(pid);
+        return -2;
+    }
+
+    reap_child_briefly(pid);
+    if (rc != 0 || result.rc != 0) return -1;
+    if (strlen(result.first_ip) >= first_ip_cap || strlen(result.ip_list) >= ip_list_cap) return -1;
+
+    snprintf(first_ip, first_ip_cap, "%s", result.first_ip);
+    snprintf(ip_list, ip_list_cap, "%s", result.ip_list);
     return 0;
 }
 
@@ -2185,12 +2302,20 @@ static int connect_all(const char *uri, int requested_port, char *msg, size_t ms
         return -1;
     }
 
-    if (resolve_host_ipv4_all(host, g.server_ip, sizeof(g.server_ip), g.server_ips, sizeof(g.server_ips)) != 0) {
+    long long resolve_start_ms = now_ms();
+    int resolve_rc = resolve_host_ipv4_all_bounded(host, g.server_ip, sizeof(g.server_ip), g.server_ips, sizeof(g.server_ips),
+                                                   kConnectResolveTimeoutMs);
+    if (resolve_rc == -2) {
+        snprintf(msg, msg_cap, "ERR server DNS timeout after %dms", kConnectResolveTimeoutMs);
+        log_msg("resolve server host %s timed out after %dms", host, kConnectResolveTimeoutMs);
+        return -1;
+    }
+    if (resolve_rc != 0) {
         snprintf(msg, msg_cap, "ERR failed to resolve server host");
         return -1;
     }
 
-    log_msg("resolved server host %s -> %s", host, g.server_ips);
+    log_msg("resolved server host %s -> %s in %lldms", host, g.server_ips, now_ms() - resolve_start_ms);
 
     if (spawn_core(uri, port, &g.core_pid) != 0) {
         snprintf(msg, msg_cap, "ERR failed to start vless-core binary");
