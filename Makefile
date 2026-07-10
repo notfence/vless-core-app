@@ -102,6 +102,11 @@ package-root: check-package-inputs $(APP_BIN) $(DAEMON_BIN) $(BOOTSTRAP_BIN) $(V
 	cp -a packaging/Library $(PKG_ROOT)/
 	cp -a packaging/usr $(PKG_ROOT)/
 	cp app/Info.plist $(PKG_ROOT)/Applications/vless-core.app/Info.plist
+	BUILD_DATE="$$(date -u '+%Y-%m-%d %H:%M:%S UTC')"; \
+	GIT_COMMIT="$$(git -C "$(ROOT)" rev-parse --short=7 --verify HEAD 2>/dev/null)"; \
+	[ -n "$$GIT_COMMIT" ] || GIT_COMMIT=unknown; \
+	sed -i "/<key>VCBuildDate<\/key>/{n;s#<string>.*</string>#<string>$$BUILD_DATE</string>#;}" $(PKG_ROOT)/Applications/vless-core.app/Info.plist; \
+	sed -i "/<key>VCGitCommit<\/key>/{n;s#<string>.*</string>#<string>$$GIT_COMMIT</string>#;}" $(PKG_ROOT)/Applications/vless-core.app/Info.plist
 	cp app/icons/Icon.png $(PKG_ROOT)/Applications/vless-core.app/Icon.png
 	cp app/icons/Icon@2x.png $(PKG_ROOT)/Applications/vless-core.app/Icon@2x.png
 	cp app/icons/icon-refresh.png $(PKG_ROOT)/Applications/vless-core.app/icon-refresh.png

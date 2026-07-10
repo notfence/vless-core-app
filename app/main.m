@@ -797,6 +797,69 @@ static NSString *DetectOpenSSLPatchStatus(void) {
     return NormalizeOpenSSLPatchStatus(status);
 }
 
+static NSString *DetectRedsocksVersion(void) {
+    NSString *v = RunCommandFirstLine("/usr/bin/redsocks-vless-core -v 2>/dev/null");
+    if (!v || [v length] == 0) {
+        v = RunCommandFirstLine("redsocks-vless-core -v 2>/dev/null");
+    }
+    if (!v || [v length] == 0) {
+        v = @"bundled helper";
+    }
+    return v;
+}
+
+static NSString *AppDisplayName(void) {
+    NSDictionary *info = [[NSBundle mainBundle] infoDictionary];
+    NSString *name = [info objectForKey:@"CFBundleDisplayName"];
+    if (![name isKindOfClass:[NSString class]] || [name length] == 0) {
+        name = [info objectForKey:@"CFBundleName"];
+    }
+    if (![name isKindOfClass:[NSString class]] || [name length] == 0) {
+        name = @"vless-core";
+    }
+    return name;
+}
+
+static NSString *AppShortVersion(void) {
+    NSString *ver = [[[NSBundle mainBundle] infoDictionary] objectForKey:@"CFBundleShortVersionString"];
+    if (![ver isKindOfClass:[NSString class]] || [ver length] == 0) {
+        ver = @"0.0.0";
+    }
+    return ver;
+}
+
+static NSString *AppBuildVersion(void) {
+    NSString *build = [[[NSBundle mainBundle] infoDictionary] objectForKey:@"CFBundleVersion"];
+    if (![build isKindOfClass:[NSString class]] || [build length] == 0) {
+        build = @"0";
+    }
+    return build;
+}
+
+static NSString *AppVersionSummary(void) {
+    return [NSString stringWithFormat:@"Version %@ (%@)", AppShortVersion(), AppBuildVersion()];
+}
+
+static NSString *AppInfoString(NSString *key, NSString *fallback) {
+    NSString *value = [[[NSBundle mainBundle] infoDictionary] objectForKey:key];
+    if (![value isKindOfClass:[NSString class]] || [value length] == 0) {
+        return fallback;
+    }
+    return value;
+}
+
+static NSString *AppDebBuildDate(void) {
+    return AppInfoString(@"VCBuildDate", @"unknown");
+}
+
+static NSString *AppGitShortCommit(void) {
+    return AppInfoString(@"VCGitCommit", @"unknown");
+}
+
+static NSString *AppBuildMetadataSummary(void) {
+    return [NSString stringWithFormat:@"Built at: %@\nGitSHA: %@", AppDebBuildDate(), AppGitShortCommit()];
+}
+
 static NSString *SubscriptionHWID(void) {
     NSUserDefaults *ud = [NSUserDefaults standardUserDefaults];
     NSString *hwid = [ud objectForKey:kDefaultsSubHWIDKey];
@@ -1579,7 +1642,6 @@ static UIImage *MakeIconImage(VCIconType type, CGFloat size, BOOL active) {
 @protocol SettingsVCDelegate <NSObject>
 - (void)settingsVC:(SettingsVC *)vc didChangeAutoUpdate:(BOOL)enabled;
 - (void)settingsVC:(SettingsVC *)vc didChangeStealthMode:(BOOL)enabled;
-- (void)settingsVCDidRequestAbout:(SettingsVC *)vc;
 @end
 
 @interface SettingsVC : UIViewController <UITableViewDataSource, UITableViewDelegate> {
@@ -1646,6 +1708,362 @@ static UIImage *MakeIconImage(VCIconType type, CGFloat size, BOOL active) {
 
 @end
 
+@interface AboutVC : UIViewController <UITableViewDataSource, UITableViewDelegate> {
+    UITableView *_tableView;
+    NSArray *_sections;
+    CGFloat _headerWidth;
+}
+@end
+
+@implementation AboutVC
+
+- (void)dealloc {
+    [_tableView release];
+    [_sections release];
+    [super dealloc];
+}
+
+- (NSDictionary *)rowWithTitle:(NSString *)title detail:(NSString *)detail {
+    return [NSDictionary dictionaryWithObjectsAndKeys:
+            title ? title : @"", @"title",
+            detail ? detail : @"", @"detail",
+            nil];
+}
+
+- (NSDictionary *)sectionWithTitle:(NSString *)title rows:(NSArray *)rows {
+    return [NSDictionary dictionaryWithObjectsAndKeys:
+            title ? title : @"", @"title",
+            rows ? rows : [NSArray array], @"rows",
+            nil];
+}
+
+- (void)buildSections {
+    NSString *coreVersion = DetectCoreBinaryVersion();
+    NSDictionary *deps = DetectCurlDependencyVersions();
+    NSString *opensslPatchStatus = DetectOpenSSLPatchStatus();
+    NSString *redsocksVersion = DetectRedsocksVersion();
+
+    NSArray *components = [NSArray arrayWithObjects:
+                           [self rowWithTitle:@"vless-core-cli" detail:coreVersion],
+                           [self rowWithTitle:@"vless-core-curl"
+                                       detail:[NSString stringWithFormat:@"curl %@, OpenSSL %@ (%@), zlib %@",
+                                               [deps objectForKey:@"curl"],
+                                               [deps objectForKey:@"openssl"],
+                                               opensslPatchStatus,
+                                               [deps objectForKey:@"zlib"]]],
+                           [self rowWithTitle:@"redsocks-vless-core" detail:redsocksVersion],
+                           nil];
+
+    NSArray *newSections = [[NSArray alloc] initWithObjects:
+                            [self sectionWithTitle:@"Bundled components" rows:components],
+                            nil];
+    [_sections release];
+    _sections = newSections;
+}
+
+- (UIView *)tableHeaderForWidth:(CGFloat)width {
+    CGFloat headerHeight = 212.0f;
+    UIView *header = [[[UIView alloc] initWithFrame:CGRectMake(0, 0, width, headerHeight)] autorelease];
+    header.backgroundColor = [UIColor clearColor];
+    header.autoresizingMask = UIViewAutoresizingFlexibleWidth;
+
+    UIImage *icon = LoadBundledIconScaled(@"Icon", 82.0f);
+    UIImageView *iconView = [[[UIImageView alloc] initWithImage:icon] autorelease];
+    iconView.frame = CGRectMake((width - 82.0f) / 2.0f, 22.0f, 82.0f, 82.0f);
+    iconView.autoresizingMask = UIViewAutoresizingFlexibleLeftMargin | UIViewAutoresizingFlexibleRightMargin;
+    iconView.layer.cornerRadius = 14.0f;
+    iconView.layer.masksToBounds = YES;
+    [header addSubview:iconView];
+
+    UILabel *nameLabel = [[[UILabel alloc] initWithFrame:CGRectMake(16.0f, 112.0f, width - 32.0f, 28.0f)] autorelease];
+    nameLabel.autoresizingMask = UIViewAutoresizingFlexibleWidth;
+    nameLabel.backgroundColor = [UIColor clearColor];
+    nameLabel.textAlignment = NSTextAlignmentCenter;
+    nameLabel.textColor = [UIColor colorWithWhite:0.08f alpha:1.0f];
+    nameLabel.font = [UIFont boldSystemFontOfSize:22.0f];
+    nameLabel.text = AppDisplayName();
+    [header addSubview:nameLabel];
+
+    UILabel *versionLabel = [[[UILabel alloc] initWithFrame:CGRectMake(16.0f, 140.0f, width - 32.0f, 22.0f)] autorelease];
+    versionLabel.autoresizingMask = UIViewAutoresizingFlexibleWidth;
+    versionLabel.backgroundColor = [UIColor clearColor];
+    versionLabel.textAlignment = NSTextAlignmentCenter;
+    versionLabel.textColor = [UIColor colorWithWhite:0.42f alpha:1.0f];
+    versionLabel.font = [UIFont systemFontOfSize:14.0f];
+    versionLabel.text = AppVersionSummary();
+    [header addSubview:versionLabel];
+
+    UILabel *buildLabel = [[[UILabel alloc] initWithFrame:CGRectMake(16.0f, 162.0f, width - 32.0f, 44.0f)] autorelease];
+    buildLabel.autoresizingMask = UIViewAutoresizingFlexibleWidth;
+    buildLabel.backgroundColor = [UIColor clearColor];
+    buildLabel.textAlignment = NSTextAlignmentCenter;
+    buildLabel.textColor = [UIColor colorWithWhite:0.42f alpha:1.0f];
+    buildLabel.font = [UIFont systemFontOfSize:14.0f];
+    buildLabel.numberOfLines = 2;
+    buildLabel.text = AppBuildMetadataSummary();
+    [header addSubview:buildLabel];
+
+    return header;
+}
+
+- (UIView *)tableFooterForWidth:(CGFloat)width {
+    UIView *footer = [[[UIView alloc] initWithFrame:CGRectMake(0, 0, width, 48.0f)] autorelease];
+    footer.backgroundColor = [UIColor clearColor];
+    footer.autoresizingMask = UIViewAutoresizingFlexibleWidth;
+
+    UILabel *label = [[[UILabel alloc] initWithFrame:CGRectMake(16.0f, 8.0f, width - 32.0f, 24.0f)] autorelease];
+    label.autoresizingMask = UIViewAutoresizingFlexibleWidth;
+    label.backgroundColor = [UIColor clearColor];
+    label.textAlignment = NSTextAlignmentCenter;
+    label.textColor = [UIColor colorWithWhite:0.42f alpha:1.0f];
+    label.font = [UIFont boldSystemFontOfSize:14.0f];
+    label.text = @"made by notfence";
+    [footer addSubview:label];
+
+    return footer;
+}
+
+- (void)updateTableHeaderAndFooterForWidth:(CGFloat)width {
+    if (width <= 0.0f) {
+        return;
+    }
+
+    _headerWidth = width;
+    _tableView.tableHeaderView = [self tableHeaderForWidth:width];
+    _tableView.tableFooterView = [self tableFooterForWidth:width];
+}
+
+- (void)viewDidLoad {
+    [super viewDidLoad];
+    self.title = @"About";
+    self.view.backgroundColor = [UIColor colorWithWhite:0.97f alpha:1.0f];
+    [self buildSections];
+
+    _tableView = [[UITableView alloc] initWithFrame:self.view.bounds style:UITableViewStyleGrouped];
+    _tableView.dataSource = self;
+    _tableView.delegate = self;
+    _tableView.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
+    [self.view addSubview:_tableView];
+    [self updateTableHeaderAndFooterForWidth:_tableView.bounds.size.width];
+}
+
+- (void)viewDidLayoutSubviews {
+    [super viewDidLayoutSubviews];
+
+    CGFloat width = _tableView.bounds.size.width;
+    if (fabs(_headerWidth - width) > 0.5f) {
+        [self updateTableHeaderAndFooterForWidth:width];
+    }
+}
+
+- (NSInteger)numberOfSectionsInTableView:(UITableView *)tableView {
+    (void)tableView;
+    return [_sections count];
+}
+
+- (NSInteger)tableView:(UITableView *)tableView numberOfRowsInSection:(NSInteger)section {
+    (void)tableView;
+    NSDictionary *sectionInfo = [_sections objectAtIndex:section];
+    return [[sectionInfo objectForKey:@"rows"] count];
+}
+
+- (NSString *)tableView:(UITableView *)tableView titleForHeaderInSection:(NSInteger)section {
+    (void)tableView;
+    return [[_sections objectAtIndex:section] objectForKey:@"title"];
+}
+
+- (NSDictionary *)rowForIndexPath:(NSIndexPath *)indexPath {
+    NSDictionary *sectionInfo = [_sections objectAtIndex:indexPath.section];
+    return [[sectionInfo objectForKey:@"rows"] objectAtIndex:indexPath.row];
+}
+
+- (CGFloat)tableView:(UITableView *)tableView heightForRowAtIndexPath:(NSIndexPath *)indexPath {
+    NSDictionary *row = [self rowForIndexPath:indexPath];
+    NSString *detail = [row objectForKey:@"detail"];
+    CGFloat width = tableView.bounds.size.width - 52.0f;
+    CGSize detailSize = [detail sizeWithFont:[UIFont systemFontOfSize:13.0f]
+                           constrainedToSize:CGSizeMake(width, 200.0f)
+                               lineBreakMode:NSLineBreakByWordWrapping];
+    CGFloat height = 28.0f + detailSize.height + 16.0f;
+    return (height < 58.0f) ? 58.0f : height;
+}
+
+- (UITableViewCell *)tableView:(UITableView *)tableView cellForRowAtIndexPath:(NSIndexPath *)indexPath {
+    static NSString *kAboutCellId = @"AboutCell";
+    UITableViewCell *cell = [tableView dequeueReusableCellWithIdentifier:kAboutCellId];
+    if (!cell) {
+        cell = [[[UITableViewCell alloc] initWithStyle:UITableViewCellStyleSubtitle reuseIdentifier:kAboutCellId] autorelease];
+        cell.selectionStyle = UITableViewCellSelectionStyleNone;
+        cell.textLabel.font = [UIFont boldSystemFontOfSize:15.0f];
+        cell.detailTextLabel.font = [UIFont systemFontOfSize:13.0f];
+        cell.detailTextLabel.textColor = [UIColor colorWithWhite:0.36f alpha:1.0f];
+        cell.detailTextLabel.numberOfLines = 0;
+        cell.detailTextLabel.lineBreakMode = NSLineBreakByWordWrapping;
+    }
+
+    NSDictionary *row = [self rowForIndexPath:indexPath];
+    cell.textLabel.text = [row objectForKey:@"title"];
+    cell.detailTextLabel.text = [row objectForKey:@"detail"];
+    return cell;
+}
+
+- (BOOL)shouldAutorotateToInterfaceOrientation:(UIInterfaceOrientation)interfaceOrientation {
+    if (IsPadDevice()) {
+        return UIInterfaceOrientationIsPortrait(interfaceOrientation) || UIInterfaceOrientationIsLandscape(interfaceOrientation);
+    }
+    return interfaceOrientation == UIInterfaceOrientationPortrait;
+}
+
+- (BOOL)shouldAutorotate {
+    return IsPadDevice();
+}
+
+- (NSUInteger)supportedInterfaceOrientations {
+    if (IsPadDevice()) {
+        return UIInterfaceOrientationMaskAllButUpsideDown;
+    }
+    return UIInterfaceOrientationMaskPortrait;
+}
+
+@end
+
+@interface CreditsVC : UIViewController <UITableViewDataSource, UITableViewDelegate> {
+    UITableView *_tableView;
+    NSArray *_sections;
+}
+@end
+
+@implementation CreditsVC
+
+- (void)dealloc {
+    [_tableView release];
+    [_sections release];
+    [super dealloc];
+}
+
+- (NSDictionary *)rowWithTitle:(NSString *)title detail:(NSString *)detail {
+    return [NSDictionary dictionaryWithObjectsAndKeys:
+            title ? title : @"", @"title",
+            detail ? detail : @"", @"detail",
+            nil];
+}
+
+- (NSDictionary *)sectionWithTitle:(NSString *)title rows:(NSArray *)rows {
+    return [NSDictionary dictionaryWithObjectsAndKeys:
+            title ? title : @"", @"title",
+            rows ? rows : [NSArray array], @"rows",
+            nil];
+}
+
+- (void)buildSections {
+    NSDictionary *deps = DetectCurlDependencyVersions();
+    NSString *opensslPatchStatus = DetectOpenSSLPatchStatus();
+
+    NSArray *libraries = [NSArray arrayWithObjects:
+                          [self rowWithTitle:@"curl" detail:[NSString stringWithFormat:@"HTTP client library, version %@", [deps objectForKey:@"curl"]]],
+                          [self rowWithTitle:@"OpenSSL" detail:[NSString stringWithFormat:@"TLS library, version %@, %@", [deps objectForKey:@"openssl"], opensslPatchStatus]],
+                          [self rowWithTitle:@"zlib" detail:[NSString stringWithFormat:@"Compression library, version %@", [deps objectForKey:@"zlib"]]],
+                          [self rowWithTitle:@"libevent" detail:@"Event loop library used by redsocks."],
+                          [self rowWithTitle:@"quirc" detail:@"QR code recognition library by Daniel Beer, ISC License."],
+                          [self rowWithTitle:@"CA certificates" detail:@"Mozilla CA bundle packaged as cacert.pem."],
+                          nil];
+
+    NSArray *thanks = [NSArray arrayWithObject:
+                       [self rowWithTitle:@"Special thanks to:" detail:@"@kirillshpitalev for testing and debugging\n"
+                                                                       @"@rafal_official for testing and debugging"]];
+
+    NSArray *newSections = [[NSArray alloc] initWithObjects:
+                            [self sectionWithTitle:@"Dependencies" rows:libraries],
+                            [self sectionWithTitle:@"Special thanks" rows:thanks],
+                            nil];
+    [_sections release];
+    _sections = newSections;
+}
+
+- (void)viewDidLoad {
+    [super viewDidLoad];
+    self.title = @"Credits";
+    self.view.backgroundColor = [UIColor colorWithWhite:0.97f alpha:1.0f];
+    [self buildSections];
+
+    _tableView = [[UITableView alloc] initWithFrame:self.view.bounds style:UITableViewStyleGrouped];
+    _tableView.dataSource = self;
+    _tableView.delegate = self;
+    _tableView.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
+    [self.view addSubview:_tableView];
+}
+
+- (NSInteger)numberOfSectionsInTableView:(UITableView *)tableView {
+    (void)tableView;
+    return [_sections count];
+}
+
+- (NSInteger)tableView:(UITableView *)tableView numberOfRowsInSection:(NSInteger)section {
+    (void)tableView;
+    NSDictionary *sectionInfo = [_sections objectAtIndex:section];
+    return [[sectionInfo objectForKey:@"rows"] count];
+}
+
+- (NSString *)tableView:(UITableView *)tableView titleForHeaderInSection:(NSInteger)section {
+    (void)tableView;
+    return [[_sections objectAtIndex:section] objectForKey:@"title"];
+}
+
+- (NSDictionary *)rowForIndexPath:(NSIndexPath *)indexPath {
+    NSDictionary *sectionInfo = [_sections objectAtIndex:indexPath.section];
+    return [[sectionInfo objectForKey:@"rows"] objectAtIndex:indexPath.row];
+}
+
+- (CGFloat)tableView:(UITableView *)tableView heightForRowAtIndexPath:(NSIndexPath *)indexPath {
+    NSDictionary *row = [self rowForIndexPath:indexPath];
+    NSString *detail = [row objectForKey:@"detail"];
+    CGFloat width = tableView.bounds.size.width - 52.0f;
+    CGSize detailSize = [detail sizeWithFont:[UIFont systemFontOfSize:13.0f]
+                           constrainedToSize:CGSizeMake(width, 200.0f)
+                               lineBreakMode:NSLineBreakByWordWrapping];
+    CGFloat height = 28.0f + detailSize.height + 16.0f;
+    return (height < 58.0f) ? 58.0f : height;
+}
+
+- (UITableViewCell *)tableView:(UITableView *)tableView cellForRowAtIndexPath:(NSIndexPath *)indexPath {
+    static NSString *kCreditsCellId = @"CreditsCell";
+    UITableViewCell *cell = [tableView dequeueReusableCellWithIdentifier:kCreditsCellId];
+    if (!cell) {
+        cell = [[[UITableViewCell alloc] initWithStyle:UITableViewCellStyleSubtitle reuseIdentifier:kCreditsCellId] autorelease];
+        cell.selectionStyle = UITableViewCellSelectionStyleNone;
+        cell.textLabel.font = [UIFont boldSystemFontOfSize:15.0f];
+        cell.detailTextLabel.font = [UIFont systemFontOfSize:13.0f];
+        cell.detailTextLabel.textColor = [UIColor colorWithWhite:0.36f alpha:1.0f];
+        cell.detailTextLabel.numberOfLines = 0;
+        cell.detailTextLabel.lineBreakMode = NSLineBreakByWordWrapping;
+    }
+
+    NSDictionary *row = [self rowForIndexPath:indexPath];
+    cell.textLabel.text = [row objectForKey:@"title"];
+    cell.detailTextLabel.text = [row objectForKey:@"detail"];
+    return cell;
+}
+
+- (BOOL)shouldAutorotateToInterfaceOrientation:(UIInterfaceOrientation)interfaceOrientation {
+    if (IsPadDevice()) {
+        return UIInterfaceOrientationIsPortrait(interfaceOrientation) || UIInterfaceOrientationIsLandscape(interfaceOrientation);
+    }
+    return interfaceOrientation == UIInterfaceOrientationPortrait;
+}
+
+- (BOOL)shouldAutorotate {
+    return IsPadDevice();
+}
+
+- (NSUInteger)supportedInterfaceOrientations {
+    if (IsPadDevice()) {
+        return UIInterfaceOrientationMaskAllButUpsideDown;
+    }
+    return UIInterfaceOrientationMaskPortrait;
+}
+
+@end
+
 @implementation SettingsVC
 @synthesize autoUpdate = _autoUpdate;
 @synthesize stealthMode = _stealthMode;
@@ -1702,7 +2120,7 @@ static UIImage *MakeIconImage(VCIconType type, CGFloat size, BOOL active) {
 
 - (NSInteger)tableView:(UITableView *)tableView numberOfRowsInSection:(NSInteger)section {
     (void)tableView;
-    return (section == 0) ? 2 : 3;
+    return (section == 0) ? 2 : 4;
 }
 
 - (NSString *)tableView:(UITableView *)tableView titleForHeaderInSection:(NSInteger)section {
@@ -1781,9 +2199,12 @@ static UIImage *MakeIconImage(VCIconType type, CGFloat size, BOOL active) {
         return @"About vless-core";
     }
     if (indexPath.section == 1 && indexPath.row == 1) {
-        return @"FAQ";
+        return @"Credits";
     }
     if (indexPath.section == 1 && indexPath.row == 2) {
+        return @"FAQ";
+    }
+    if (indexPath.section == 1 && indexPath.row == 3) {
         return @"Project on GitHub";
     }
     return @"";
@@ -1800,9 +2221,12 @@ static UIImage *MakeIconImage(VCIconType type, CGFloat size, BOOL active) {
         return @"Version and core binary info";
     }
     if (indexPath.section == 1 && indexPath.row == 1) {
-        return @"Common questions and quick answers";
+        return @"Dependencies and special thanks";
     }
     if (indexPath.section == 1 && indexPath.row == 2) {
+        return @"Common questions and quick answers";
+    }
+    if (indexPath.section == 1 && indexPath.row == 3) {
         return @"github.com/notfence/vless-core-app";
     }
     return @"";
@@ -1854,6 +2278,20 @@ static UIImage *MakeIconImage(VCIconType type, CGFloat size, BOOL active) {
     }
 
     if (indexPath.row == 1) {
+        static NSString *kCreditsCellId = @"SettingsCreditsCell";
+        UITableViewCell *cell = [tableView dequeueReusableCellWithIdentifier:kCreditsCellId];
+        if (!cell) {
+            cell = [[[UITableViewCell alloc] initWithStyle:UITableViewCellStyleSubtitle reuseIdentifier:kCreditsCellId] autorelease];
+        }
+        cell.selectionStyle = UITableViewCellSelectionStyleBlue;
+        cell.accessoryType = UITableViewCellAccessoryDisclosureIndicator;
+        [self applySettingsMarqueesToCell:cell
+                                    title:@"Credits"
+                                   detail:@"Dependencies and special thanks"];
+        return cell;
+    }
+
+    if (indexPath.row == 2) {
         static NSString *kFAQCellId = @"SettingsFAQCell";
         UITableViewCell *cell = [tableView dequeueReusableCellWithIdentifier:kFAQCellId];
         if (!cell) {
@@ -1890,10 +2328,12 @@ static UIImage *MakeIconImage(VCIconType type, CGFloat size, BOOL active) {
 - (void)tableView:(UITableView *)tableView didSelectRowAtIndexPath:(NSIndexPath *)indexPath {
     if (indexPath.section == 1) {
         if (indexPath.row == 0) {
-            if ([_delegate respondsToSelector:@selector(settingsVCDidRequestAbout:)]) {
-                [_delegate settingsVCDidRequestAbout:self];
-            }
+            AboutVC *about = [[[AboutVC alloc] init] autorelease];
+            [self.navigationController pushViewController:about animated:YES];
         } else if (indexPath.row == 1) {
+            CreditsVC *credits = [[[CreditsVC alloc] init] autorelease];
+            [self.navigationController pushViewController:credits animated:YES];
+        } else if (indexPath.row == 2) {
             FAQVC *faq = [[[FAQVC alloc] init] autorelease];
             [self.navigationController pushViewController:faq animated:YES];
         } else {
@@ -2441,6 +2881,8 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
     BOOL _launchAutoUpdateInProgress;
     BOOL _queuedMainMarqueeRelayout;
 }
+- (NSString *)shortUpdateFailureTextForSubscription:(NSDictionary *)sub errorText:(NSString *)errorText;
+- (void)showSubscriptionUpdateFailures:(NSArray *)failureTexts;
 @end
 
 @implementation MainVC
@@ -4118,8 +4560,9 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
     NSString *errorText = nil;
     NSDictionary *updated = [self updatedSubscriptionDictionaryFromSource:sub errorText:&errorText];
     if (![updated isKindOfClass:[NSDictionary class]]) {
-        if (showStatus && [errorText length] > 0) {
-            [self showStatus:errorText ok:NO];
+        if (showStatus) {
+            [self showStatus:([errorText length] > 0 ? errorText : @"Subscription update failed") ok:NO];
+            [self showSubscriptionUpdateFailures:[NSArray arrayWithObject:[self shortUpdateFailureTextForSubscription:sub errorText:errorText]]];
         }
         return NO;
     }
@@ -4229,6 +4672,7 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
         NSAutoreleasePool *pool = [[NSAutoreleasePool alloc] init];
 
         NSMutableArray *updatedSubs = [[NSMutableArray alloc] initWithArray:snapshot];
+        NSMutableArray *failureTexts = [[NSMutableArray alloc] init];
         NSUInteger okCount = 0;
         for (NSNumber *idxObj in refreshIndices) {
             NSInteger i = [idxObj integerValue];
@@ -4242,6 +4686,8 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
             if (updated) {
                 [updatedSubs replaceObjectAtIndex:i withObject:updated];
                 okCount++;
+            } else {
+                [failureTexts addObject:[self shortUpdateFailureTextForSubscription:sub errorText:errorText]];
             }
         }
 
@@ -4255,6 +4701,7 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
                     [_pendingImportDoneStatus release];
                     _pendingImportDoneStatus = nil;
                 }
+                [failureTexts release];
                 [updatedSubs release];
                 [refreshIndices release];
                 [snapshot release];
@@ -4274,12 +4721,17 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
                 [_pendingImportDoneStatus release];
                 _pendingImportDoneStatus = nil;
             } else {
-                [self showStatus:[NSString stringWithFormat:@"Subscriptions updated: %lu/%lu",
-                                  (unsigned long)okCount,
-                                  (unsigned long)[refreshIndices count]]
-                             ok:ok];
+	                [self showStatus:[NSString stringWithFormat:@"Subscriptions updated: %lu/%lu",
+	                                  (unsigned long)okCount,
+	                                  (unsigned long)[refreshIndices count]]
+	                         ok:ok];
             }
 
+            if ([failureTexts count] > 0) {
+                [self showSubscriptionUpdateFailures:failureTexts];
+            }
+
+            [failureTexts release];
             [updatedSubs release];
             [refreshIndices release];
             [snapshot release];
@@ -4305,9 +4757,25 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
     }
 
     NSUInteger okCount = 0;
+    NSMutableArray *failureTexts = [NSMutableArray array];
     for (NSInteger i = 0; i < (NSInteger)[_subscriptions count]; i++) {
-        if ([self refreshSubscriptionAtIndex:i showStatus:NO]) {
+        NSDictionary *sub = [_subscriptions objectAtIndex:i];
+        NSString *errorText = nil;
+        NSDictionary *updated = [self updatedSubscriptionDictionaryFromSource:sub errorText:&errorText];
+        if ([updated isKindOfClass:[NSDictionary class]]) {
+            NSArray *uris = [updated objectForKey:@"items"];
+            [_subscriptions replaceObjectAtIndex:i withObject:updated];
+            if (_selectedSubIndex == i) {
+                if (![uris isKindOfClass:[NSArray class]] || (NSInteger)[uris count] <= 0) {
+                    _selectedSubItemIndex = -1;
+                } else if (_selectedSubItemIndex < 0 || _selectedSubItemIndex >= (NSInteger)[uris count]) {
+                    _selectedSubItemIndex = 0;
+                }
+            }
+            [self saveData];
             okCount++;
+        } else {
+            [failureTexts addObject:[self shortUpdateFailureTextForSubscription:sub errorText:errorText]];
         }
     }
 
@@ -4320,46 +4788,10 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
                           (unsigned long)okCount,
                           (unsigned long)[_subscriptions count]]
                      ok:ok];
+        if ([failureTexts count] > 0) {
+            [self showSubscriptionUpdateFailures:failureTexts];
+        }
     }
-}
-
-- (void)showAbout {
-    NSString *ver = [[[NSBundle mainBundle] infoDictionary] objectForKey:@"CFBundleShortVersionString"];
-    if (![ver isKindOfClass:[NSString class]] || [ver length] == 0) {
-        ver = @"0.0.0";
-    }
-    NSString *coreBinary = @"vless-core-darwin-armv7";
-    NSString *coreVersion = DetectCoreBinaryVersion();
-    NSDictionary *deps = DetectCurlDependencyVersions();
-    NSString *opensslPatchStatus = DetectOpenSSLPatchStatus();
-
-    NSString *msg =
-        [NSString stringWithFormat:
-         @"vless-core app %@\n"
-         @"\n"
-         @"Core binary: %@\n"
-         @"Binary version: %@\n"
-         @"\n"
-         @"vless-core-curl:\n"
-         @"curl: %@\n"
-         @"OpenSSL: %@ (%@)\n"
-         @"zlib: %@\n"
-         @"\n"
-         @"made by notfence",
-         ver,
-         coreBinary,
-         coreVersion,
-         [deps objectForKey:@"curl"],
-         [deps objectForKey:@"openssl"],
-         opensslPatchStatus,
-         [deps objectForKey:@"zlib"]];
-
-    UIAlertView *av = [[[UIAlertView alloc] initWithTitle:@"About vless-core"
-                                                   message:msg
-                                                  delegate:nil
-                                         cancelButtonTitle:@"OK"
-                                         otherButtonTitles:nil] autorelease];
-    [av show];
 }
 
 - (void)settingsVC:(SettingsVC *)vc didChangeAutoUpdate:(BOOL)enabled {
@@ -4379,11 +4811,6 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
     [self showStatus:_stealthModeEnabled ? @"Stealth mode: ON"
                                    : @"Stealth mode: OFF"
                  ok:YES];
-}
-
-- (void)settingsVCDidRequestAbout:(SettingsVC *)vc {
-    (void)vc;
-    [self showAbout];
 }
 
 - (UIView *)accessoryChevronExpanded:(BOOL)expanded {
@@ -4553,7 +4980,7 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
             (count == 1 ? @"" : @"s")];
 }
 
-- (NSString *)shortImportFailureTextForURL:(NSString *)urlString errorText:(NSString *)errorText {
+- (NSString *)shortSubscriptionFailureTextForURL:(NSString *)urlString errorText:(NSString *)errorText defaultReason:(NSString *)defaultReason {
     NSString *host = [self hostFromURLString:urlString];
     if (![host isKindOfClass:[NSString class]] || [host length] == 0) {
         host = @"subscription";
@@ -4565,7 +4992,9 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
         reason = [reason substringFromIndex:[prefix length]];
     }
     if ([reason length] == 0) {
-        reason = @"import failed";
+        reason = ([defaultReason isKindOfClass:[NSString class]] && [defaultReason length] > 0)
+                     ? defaultReason
+                     : @"failed";
     }
     if ([reason length] > 120) {
         reason = [[reason substringToIndex:120] stringByAppendingString:@"..."];
@@ -4574,7 +5003,16 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
     return [NSString stringWithFormat:@"%@: %@", host, reason];
 }
 
-- (void)showSubscriptionImportFailures:(NSArray *)failureTexts {
+- (NSString *)shortImportFailureTextForURL:(NSString *)urlString errorText:(NSString *)errorText {
+    return [self shortSubscriptionFailureTextForURL:urlString errorText:errorText defaultReason:@"import failed"];
+}
+
+- (NSString *)shortUpdateFailureTextForSubscription:(NSDictionary *)sub errorText:(NSString *)errorText {
+    NSString *urlString = [sub objectForKey:@"url"];
+    return [self shortSubscriptionFailureTextForURL:urlString errorText:errorText defaultReason:@"update failed"];
+}
+
+- (void)showSubscriptionFailureAlertWithTitle:(NSString *)title failureTexts:(NSArray *)failureTexts {
     if (![failureTexts isKindOfClass:[NSArray class]] || [failureTexts count] == 0) return;
 
     NSMutableString *message = [NSMutableString string];
@@ -4589,12 +5027,21 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
         [message appendFormat:@"\n- ... and %lu more", (unsigned long)([failureTexts count] - limit)];
     }
 
-    UIAlertView *av = [[[UIAlertView alloc] initWithTitle:@"Some subscriptions were not imported"
+    UIAlertView *av = [[[UIAlertView alloc] initWithTitle:title
                                                   message:message
                                                  delegate:nil
                                         cancelButtonTitle:@"OK"
                                         otherButtonTitles:nil] autorelease];
     [av show];
+}
+
+- (void)showSubscriptionImportFailures:(NSArray *)failureTexts {
+    [self showSubscriptionFailureAlertWithTitle:@"Some subscriptions were not imported" failureTexts:failureTexts];
+}
+
+- (void)showSubscriptionUpdateFailures:(NSArray *)failureTexts {
+    NSString *title = ([failureTexts count] == 1) ? @"Subscription was not updated" : @"Some subscriptions were not updated";
+    [self showSubscriptionFailureAlertWithTitle:title failureTexts:failureTexts];
 }
 
 - (void)startBackgroundSubscriptionImportForURLs:(NSArray *)urlStrings
