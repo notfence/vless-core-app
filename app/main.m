@@ -1687,7 +1687,7 @@ static UIImage *MakeIconImage(VCIconType type, CGFloat size, BOOL active) {
     _textView.text =
         @"Q: Why can't I connect?\n"
         @"A: Most failures come from an unsupported configuration tuple, wrong server parameters, or a server that is offline. "
-        @"This app currently allows [vless/tcp/reality] or [vless/tcp/tls] with flow=xtls-rprx-vision and fp=chrome/firefox/edge/random/randomized/qq, [vless/xhttp/tls], [vless/xhttp/reality], [vless/ws/tls], [vless/ws/none], or [socks5]. "
+        @"This app currently allows [vless/tcp/reality] or [vless/tcp/tls] with omitted flow or flow=xtls-rprx-vision and fp=chrome/firefox/edge/random/randomized/qq, [vless/xhttp/tls], [vless/xhttp/reality], [vless/ws/tls], [vless/ws/none], or [socks5]. "
         @"Recheck the link, server details, and network reachability.\n\n"
         @"Q: How can I delete my config/subscription?\n"
         @"A: Just swipe on it from right to the left.\n\n"
@@ -1695,10 +1695,10 @@ static UIImage *MakeIconImage(VCIconType type, CGFloat size, BOOL active) {
         @"A: The app accepts direct vless:// or socks5:// links, or http(s) subscription URLs that return valid config entries. "
         @"If your provider blocks requests, redirects heavily, or returns an empty list, import will fail.\n\n"
         @"Q: Which protocols are supported?\n"
-        @"A: VLESS and SOCKS5 links are supported. For now, supported sets are vless tcp+reality+xtls-rprx-vision, vless tcp+tls+xtls-rprx-vision, vless xhttp+tls, vless xhttp+reality, vless ws+tls, vless ws+none, and [socks5]. "
+        @"A: VLESS and SOCKS5 links are supported. For now, supported sets are vless tcp+reality with omitted flow or xtls-rprx-vision, vless tcp+tls with omitted flow or xtls-rprx-vision, vless xhttp+tls, vless xhttp+reality, vless ws+tls, vless ws+none, and [socks5]. "
         @"Other tuples are blocked on purpose to prevent broken connections.\n\n"
         @"Q: Why are some protocol tuples marked in red?\n"
-        @"A: Red means the tuple or a required option such as flow/fp is not supported by the app right now. "
+        @"A: Red means the tuple or an option such as flow/fp is not supported by the app right now. "
         @"This warning is shown to help you avoid failed connection attempts.\n\n"
         @"Q: Up to which iOS version is the app supported?\n"
         @"A: This package targets legacy 32-bit iOS devices (minimum iOS 6.0). "
@@ -3619,10 +3619,7 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
                   ([security isEqualToString:@"reality"] || [security isEqualToString:@"tls"]);
     if (vision) {
         NSString *flow = [self realityFlowFromURI:uri];
-        if (![flow isEqualToString:@"xtls-rprx-vision"]) {
-            if ([flow length] == 0) {
-                return @"flow must be xtls-rprx-vision";
-            }
+        if ([flow length] > 0 && ![flow isEqualToString:@"xtls-rprx-vision"]) {
             return [NSString stringWithFormat:@"unsupported flow=%@", flow];
         }
 
