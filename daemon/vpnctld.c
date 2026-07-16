@@ -5,6 +5,7 @@
 #include <netdb.h>
 #include <net/if.h>
 #include <netinet/in.h>
+#include <pthread.h>
 #include <signal.h>
 #include <spawn.h>
 #include <stdbool.h>
@@ -1130,6 +1131,9 @@ static int spawn_redsocks(int socks_port, const char *const *redirectors, size_t
 #define DNS_PROXY_UPSTREAM_PORT 53
 #define DNS_PROXY_TIMEOUT_MS 6000
 #define DNS_PROXY_MAX_PACKET 4096
+#define DNS_PROXY_WORKER_COUNT 8
+#define DNS_PROXY_IDLE_POLL_MS 250
+#define DNS_PROXY_REUSE_IDLE_MS 3000
 
 static void set_fd_timeout_ms(int fd, int timeout_ms) {
     struct timeval tv;
@@ -1233,37 +1237,48 @@ static int dns_proxy_open_socks_tcp(int socks_port) {
     return fd;
 }
 
-static int dns_proxy_query_tcp(int socks_port, const unsigned char *query, size_t query_len, unsigned char *reply, size_t reply_cap, size_t *reply_len) {
+static int dns_proxy_query_tcp(int socks_port, int *upstream_fd, const unsigned char *query, size_t query_len, unsigned char *reply,
+                               size_t reply_cap, size_t *reply_len, int *error_out) {
     if (reply_len) *reply_len = 0;
-    if (!query || query_len == 0 || query_len > 0xffff || !reply || reply_cap < 2) return -1;
-
-    int fd = dns_proxy_open_socks_tcp(socks_port);
-    if (fd < 0) return -1;
-
-    unsigned char lenbuf[2];
-    lenbuf[0] = (unsigned char)((query_len >> 8) & 0xff);
-    lenbuf[1] = (unsigned char)(query_len & 0xff);
-
-    if (tcp_write_all_fd(fd, lenbuf, sizeof(lenbuf)) != 0 ||
-        tcp_write_all_fd(fd, query, query_len) != 0 ||
-        tcp_read_exact_fd(fd, lenbuf, sizeof(lenbuf)) != 0) {
-        close(fd);
+    if (error_out) *error_out = 0;
+    if (!upstream_fd || !query || query_len < 2 || query_len > 0xffff || !reply || reply_cap < 2) {
+        if (error_out) *error_out = EINVAL;
         return -1;
     }
 
-    size_t n = ((size_t)lenbuf[0] << 8) | (size_t)lenbuf[1];
-    if (n == 0 || n > reply_cap) {
+    for (int attempt = 0; attempt < 2; attempt++) {
+        if (*upstream_fd < 0) {
+            *upstream_fd = dns_proxy_open_socks_tcp(socks_port);
+            if (*upstream_fd < 0) {
+                if (error_out) *error_out = errno;
+                continue;
+            }
+        }
+
+        int fd = *upstream_fd;
+        unsigned char lenbuf[2];
+        lenbuf[0] = (unsigned char)((query_len >> 8) & 0xff);
+        lenbuf[1] = (unsigned char)(query_len & 0xff);
+
+        if (tcp_write_all_fd(fd, lenbuf, sizeof(lenbuf)) == 0 &&
+            tcp_write_all_fd(fd, query, query_len) == 0 &&
+            tcp_read_exact_fd(fd, lenbuf, sizeof(lenbuf)) == 0) {
+            size_t n = ((size_t)lenbuf[0] << 8) | (size_t)lenbuf[1];
+            if (n >= 2 && n <= reply_cap && tcp_read_exact_fd(fd, reply, n) == 0 && reply[0] == query[0] && reply[1] == query[1]) {
+                if (reply_len) *reply_len = n;
+                return 0;
+            }
+            if (n < 2 || n > reply_cap || (n >= 2 && (reply[0] != query[0] || reply[1] != query[1]))) {
+                errno = EPROTO;
+            }
+        }
+
+        if (error_out) *error_out = errno;
         close(fd);
-        return -1;
-    }
-    if (tcp_read_exact_fd(fd, reply, n) != 0) {
-        close(fd);
-        return -1;
+        *upstream_fd = -1;
     }
 
-    close(fd);
-    if (reply_len) *reply_len = n;
-    return 0;
+    return -1;
 }
 
 static int dns_read_u16(const unsigned char *buf, size_t len, size_t pos, uint16_t *out) {
@@ -1386,18 +1401,32 @@ static void dns_cache_store_a_answers(const unsigned char *query, size_t query_l
     }
 }
 
-static void dns_proxy_loop(int udp_fd, int socks_port) {
+typedef struct {
+    int udp_fd;
+    int socks_port;
+    int index;
+} dns_proxy_worker_t;
+
+static void *dns_proxy_worker_loop(void *opaque) {
+    dns_proxy_worker_t *worker = (dns_proxy_worker_t *)opaque;
     unsigned char query[DNS_PROXY_MAX_PACKET];
     unsigned char reply[DNS_PROXY_MAX_PACKET];
-
-    log_msg("dns proxy loop started socks=%d upstream=%s:%d", socks_port, DNS_PROXY_UPSTREAM_IP, DNS_PROXY_UPSTREAM_PORT);
+    int upstream_fd = -1;
+    long long upstream_last_used_ms = 0;
 
     while (!g_terminate) {
+        if (upstream_fd >= 0 && now_ms() - upstream_last_used_ms >= DNS_PROXY_REUSE_IDLE_MS) {
+            close(upstream_fd);
+            upstream_fd = -1;
+        }
+
         struct sockaddr_storage peer;
         socklen_t peer_len = sizeof(peer);
-        ssize_t n = recvfrom(udp_fd, query, sizeof(query), 0, (struct sockaddr *)&peer, &peer_len);
+        ssize_t n = recvfrom(worker->udp_fd, query, sizeof(query), 0, (struct sockaddr *)&peer, &peer_len);
         if (n < 0) {
             if (errno == EINTR) continue;
+            if (errno == EAGAIN || errno == EWOULDBLOCK) continue;
+            log_msg("dns proxy worker=%d recv failed errno=%d", worker->index, errno);
             continue;
         }
         if (n < 12) {
@@ -1405,13 +1434,57 @@ static void dns_proxy_loop(int udp_fd, int socks_port) {
         }
 
         size_t reply_len = 0;
-        if (dns_proxy_query_tcp(socks_port, query, (size_t)n, reply, sizeof(reply), &reply_len) != 0) {
-            log_msg("dns proxy query failed bytes=%ld", (long)n);
+        int error_no = 0;
+        if (dns_proxy_query_tcp(worker->socks_port, &upstream_fd, query, (size_t)n, reply, sizeof(reply), &reply_len, &error_no) != 0) {
+            log_msg("dns proxy query failed worker=%d bytes=%ld errno=%d", worker->index, (long)n, error_no);
             continue;
         }
+        upstream_last_used_ms = now_ms();
 
         dns_cache_store_a_answers(query, (size_t)n, reply, reply_len);
-        (void)sendto(udp_fd, reply, reply_len, 0, (struct sockaddr *)&peer, peer_len);
+        if (sendto(worker->udp_fd, reply, reply_len, 0, (struct sockaddr *)&peer, peer_len) < 0) {
+            log_msg("dns proxy worker=%d reply failed errno=%d", worker->index, errno);
+        }
+    }
+
+    if (upstream_fd >= 0) close(upstream_fd);
+    return NULL;
+}
+
+static void dns_proxy_loop(int udp_fd, int socks_port) {
+    pthread_t workers[DNS_PROXY_WORKER_COUNT];
+    dns_proxy_worker_t worker_args[DNS_PROXY_WORKER_COUNT];
+    struct timeval idle_poll;
+    int worker_count = 0;
+
+    idle_poll.tv_sec = DNS_PROXY_IDLE_POLL_MS / 1000;
+    idle_poll.tv_usec = (DNS_PROXY_IDLE_POLL_MS % 1000) * 1000;
+    (void)setsockopt(udp_fd, SOL_SOCKET, SO_RCVTIMEO, &idle_poll, sizeof(idle_poll));
+
+    for (int i = 0; i < DNS_PROXY_WORKER_COUNT; i++) {
+        worker_args[i].udp_fd = udp_fd;
+        worker_args[i].socks_port = socks_port;
+        worker_args[i].index = i;
+        int thread_rc = pthread_create(&workers[i], NULL, dns_proxy_worker_loop, &worker_args[i]);
+        if (thread_rc != 0) {
+            log_msg("dns proxy worker=%d start failed error=%d", i, thread_rc);
+            break;
+        }
+        worker_count++;
+    }
+
+    log_msg("dns proxy loop started socks=%d upstream=%s:%d workers=%d", socks_port, DNS_PROXY_UPSTREAM_IP, DNS_PROXY_UPSTREAM_PORT,
+            worker_count);
+
+    if (worker_count == 0) {
+        worker_args[0].udp_fd = udp_fd;
+        worker_args[0].socks_port = socks_port;
+        worker_args[0].index = 0;
+        (void)dns_proxy_worker_loop(&worker_args[0]);
+    } else {
+        for (int i = 0; i < worker_count; i++) {
+            (void)pthread_join(workers[i], NULL);
+        }
     }
 
     close(udp_fd);
