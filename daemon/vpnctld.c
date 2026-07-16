@@ -28,8 +28,7 @@ extern int notify_post(const char *name);
 
 typedef enum {
     MODE_NONE = 0,
-    MODE_IPFW = 2,
-    MODE_PF = 3,
+    MODE_PF = 1,
 } vpn_mode_t;
 
 typedef struct {
@@ -484,40 +483,9 @@ static void handle_readfile_command(int cfd, const char *path) {
 
 static const char *mode_name(vpn_mode_t mode) {
     switch (mode) {
-        case MODE_IPFW: return "ipfw+redsocks";
         case MODE_PF: return "pf+redsocks";
         default: return "none";
     }
-}
-
-static const char *find_ipfw_bin(void) {
-    if (can_exec("/sbin/ipfw")) return "/sbin/ipfw";
-    if (can_exec("/usr/sbin/ipfw")) return "/usr/sbin/ipfw";
-    if (can_exec("/bin/ipfw")) return "/bin/ipfw";
-    if (can_exec("/usr/bin/ipfw")) return "/usr/bin/ipfw";
-    if (can_exec("/usr/local/sbin/ipfw")) return "/usr/local/sbin/ipfw";
-    if (can_exec("/usr/local/bin/ipfw")) return "/usr/local/bin/ipfw";
-
-    static char resolved[PATH_MAX];
-    if (find_cmd_path("ipfw", resolved, sizeof(resolved)) == 0 && can_exec(resolved)) {
-        return resolved;
-    }
-
-    return NULL;
-}
-
-static const char *find_sysctl_bin(void) {
-    if (can_exec("/usr/sbin/sysctl")) return "/usr/sbin/sysctl";
-    if (can_exec("/sbin/sysctl")) return "/sbin/sysctl";
-    if (can_exec("/usr/bin/sysctl")) return "/usr/bin/sysctl";
-    if (can_exec("/bin/sysctl")) return "/bin/sysctl";
-
-    static char resolved[PATH_MAX];
-    if (find_cmd_path("sysctl", resolved, sizeof(resolved)) == 0 && can_exec(resolved)) {
-        return resolved;
-    }
-
-    return NULL;
 }
 
 static const char *find_pfctl_bin(void) {
@@ -1574,24 +1542,6 @@ static void stop_pid(pid_t *p) {
     *p = 0;
 }
 
-static void clear_ipfw_rules(void) {
-    const char *ipfw = find_ipfw_bin();
-    if (!ipfw) return;
-
-    for (int n = 12030; n >= 12000; n--) {
-        char num[16];
-        snprintf(num, sizeof(num), "%d", n);
-        char *argv[] = {
-            (char *)ipfw,
-            "-q",
-            "delete",
-            num,
-            NULL,
-        };
-        run_argv(argv);
-    }
-}
-
 typedef enum {
     PF_RULE_ROUTE_TO_LO0 = 0,
     PF_RULE_ROUTE_TO_LO0_NOGW = 1,
@@ -2073,119 +2023,7 @@ static void clear_pf_rules(void) {
 
 }
 
-static int run_ipfw_add_rule(const char *ipfw, int rule_num, const char *rule) {
-    if (!ipfw || !rule || !*rule) return -1;
-
-    char rule_num_str[16];
-    snprintf(rule_num_str, sizeof(rule_num_str), "%d", rule_num);
-
-    char rule_buf[320];
-    if (snprintf(rule_buf, sizeof(rule_buf), "%s", rule) < 0 ||
-        strlen(rule) >= sizeof(rule_buf)) {
-        return -1;
-    }
-
-    char *argv[64];
-    int argc = 0;
-    argv[argc++] = (char *)ipfw;
-    argv[argc++] = "-q";
-    argv[argc++] = "add";
-    argv[argc++] = rule_num_str;
-
-    char *save = NULL;
-    for (char *tok = strtok_r(rule_buf, " \t\r\n", &save); tok; tok = strtok_r(NULL, " \t\r\n", &save)) {
-        if (argc >= (int)(sizeof(argv) / sizeof(argv[0])) - 1) return -1;
-        argv[argc++] = tok;
-    }
-    argv[argc] = NULL;
-
-    return run_argv(argv);
-}
-
-static int add_ipfw_rule_compat(const char *ipfw, int rule_num, const char *rule_with_out, const char *rule_plain) {
-    if (run_ipfw_add_rule(ipfw, rule_num, rule_with_out) == 0) {
-        return 0;
-    }
-
-    if (rule_plain && strcmp(rule_plain, rule_with_out) != 0) {
-        if (run_ipfw_add_rule(ipfw, rule_num, rule_plain) == 0) {
-            return 0;
-        }
-    }
-
-    return -1;
-}
-
-static void try_enable_ipfw_firewall(void) {
-    const char *sysctl = find_sysctl_bin();
-    if (!sysctl) return;
-
-    char *argv[] = {
-        (char *)sysctl,
-        "-w",
-        "net.inet.ip.fw.enable=1",
-        NULL,
-    };
-    run_argv(argv);
-}
-
-static int apply_ipfw_rules(const char *server_ip, int redir_port, int dns_port, int socks_port) {
-    const char *ipfw = find_ipfw_bin();
-    if (!ipfw) {
-        log_msg("ipfw binary not found");
-        return -1;
-    }
-
-    try_enable_ipfw_firewall();
-    clear_ipfw_rules();
-
-    char rule_out[320];
-    char rule_plain[320];
-
-    snprintf(rule_out, sizeof(rule_out), "allow tcp from any to 127.0.0.1 out");
-    snprintf(rule_plain, sizeof(rule_plain), "allow tcp from any to 127.0.0.1");
-    if (add_ipfw_rule_compat(ipfw, 12000, rule_out, rule_plain) != 0) return -1;
-
-    snprintf(rule_out, sizeof(rule_out), "allow tcp from any to %s out", server_ip);
-    snprintf(rule_plain, sizeof(rule_plain), "allow tcp from any to %s", server_ip);
-    if (add_ipfw_rule_compat(ipfw, 12001, rule_out, rule_plain) != 0) return -1;
-
-    snprintf(rule_out, sizeof(rule_out), "allow tcp from any to 10.0.0.0/8 out");
-    snprintf(rule_plain, sizeof(rule_plain), "allow tcp from any to 10.0.0.0/8");
-    if (add_ipfw_rule_compat(ipfw, 12002, rule_out, rule_plain) != 0) return -1;
-
-    snprintf(rule_out, sizeof(rule_out), "allow tcp from any to 172.16.0.0/12 out");
-    snprintf(rule_plain, sizeof(rule_plain), "allow tcp from any to 172.16.0.0/12");
-    if (add_ipfw_rule_compat(ipfw, 12003, rule_out, rule_plain) != 0) return -1;
-
-    snprintf(rule_out, sizeof(rule_out), "allow tcp from any to 192.168.0.0/16 out");
-    snprintf(rule_plain, sizeof(rule_plain), "allow tcp from any to 192.168.0.0/16");
-    if (add_ipfw_rule_compat(ipfw, 12004, rule_out, rule_plain) != 0) return -1;
-
-    snprintf(rule_out, sizeof(rule_out), "allow tcp from any to 127.0.0.1 %d out", socks_port);
-    snprintf(rule_plain, sizeof(rule_plain), "allow tcp from any to 127.0.0.1 %d", socks_port);
-    if (add_ipfw_rule_compat(ipfw, 12005, rule_out, rule_plain) != 0) return -1;
-
-    snprintf(rule_out, sizeof(rule_out), "allow tcp from any to 127.0.0.1 %d out", redir_port);
-    snprintf(rule_plain, sizeof(rule_plain), "allow tcp from any to 127.0.0.1 %d", redir_port);
-    if (add_ipfw_rule_compat(ipfw, 12006, rule_out, rule_plain) != 0) return -1;
-
-    snprintf(rule_out, sizeof(rule_out), "fwd 127.0.0.1,%d udp from any to any 53 out", dns_port);
-    snprintf(rule_plain, sizeof(rule_plain), "fwd 127.0.0.1,%d udp from any to any 53", dns_port);
-    if (add_ipfw_rule_compat(ipfw, 12007, rule_out, rule_plain) != 0) return -1;
-
-    snprintf(rule_out, sizeof(rule_out), "fwd 127.0.0.1,%d tcp from any to any out", redir_port);
-    snprintf(rule_plain, sizeof(rule_plain), "fwd 127.0.0.1,%d tcp from any to any", redir_port);
-    if (add_ipfw_rule_compat(ipfw, 12020, rule_out, rule_plain) != 0) return -1;
-
-    return 0;
-}
-
 static void disconnect_all(void) {
-    if (g.mode == MODE_IPFW) {
-        clear_ipfw_rules();
-    }
-
     if (g.mode == MODE_PF) {
         clear_pf_rules();
     }
@@ -2199,49 +2037,6 @@ static void disconnect_all(void) {
 
     memset(&g, 0, sizeof(g));
     update_vpn_icon_state(0);
-}
-
-static int try_connect_ipfw(int socks_port) {
-    if (!find_ipfw_bin()) {
-        log_msg("ipfw backend skipped: binary not found");
-        return -21;
-    }
-
-    int redir_port = 0;
-    const char *ipfw_redirectors[] = {"generic"};
-    int rc = spawn_redsocks(
-        socks_port,
-        ipfw_redirectors,
-        sizeof(ipfw_redirectors) / sizeof(ipfw_redirectors[0]),
-        &redir_port,
-        &g.redsocks_pid
-    );
-    if (rc != 0) {
-        return -10 + rc;
-    }
-
-    usleep(300000);
-
-    int dns_port = 0;
-    if (spawn_dns_proxy(socks_port, &dns_port, &g.dns_pid) != 0) {
-        clear_ipfw_rules();
-        stop_pid(&g.redsocks_pid);
-        return -22;
-    }
-
-    if (apply_ipfw_rules(g.server_ip, redir_port, dns_port, socks_port) != 0) {
-        clear_ipfw_rules();
-        stop_pid(&g.dns_pid);
-        stop_pid(&g.redsocks_pid);
-        return -20;
-    }
-
-    g.mode = MODE_IPFW;
-    g.connected = 1;
-    g.socks_port = socks_port;
-    g.redir_port = redir_port;
-    g.dns_port = dns_port;
-    return 0;
 }
 
 static int try_connect_pf(int socks_port) {
@@ -2325,13 +2120,6 @@ static int connect_all(const char *uri, int requested_port, char *msg, size_t ms
 
     usleep(500000);
 
-    int ipfw_rc = try_connect_ipfw(port);
-    if (ipfw_rc == 0) {
-        update_vpn_icon_state(1);
-        snprintf(msg, msg_cap, "OK connected mode=%s socks=%d redir=%d", mode_name(g.mode), g.socks_port, g.redir_port);
-        return 0;
-    }
-
     int pf_rc = try_connect_pf(port);
     if (pf_rc == 0) {
         update_vpn_icon_state(1);
@@ -2340,7 +2128,7 @@ static int connect_all(const char *uri, int requested_port, char *msg, size_t ms
     }
 
     disconnect_all();
-    snprintf(msg, msg_cap, "ERR no usable full-device backend: ipfw_rc=%d pf_rc=%d (see /var/log/vpnctld.log)", ipfw_rc, pf_rc);
+    snprintf(msg, msg_cap, "ERR pf backend unavailable: pf_rc=%d (see /var/log/vpnctld.log)", pf_rc);
     return -1;
 }
 

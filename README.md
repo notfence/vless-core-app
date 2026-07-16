@@ -137,9 +137,6 @@ Package uses `gzip` compression for old iOS 6 `dpkg` compatibility.
   - `/var/log/vpnctld.log`
   - `/var/log/vless-core.log`
 
-## Full-device backend selection
+## Full-device backend
 
-The daemon chooses the first usable backend in order:
-
-1. `ipfw + redsocks`
-2. `pf + redsocks`
+The daemon uses `pf + redsocks`.
