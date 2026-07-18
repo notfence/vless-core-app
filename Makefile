@@ -24,21 +24,17 @@ APP_NAME := vless-core
 APP_BIN := $(BUILD_DIR)/$(APP_NAME)
 DAEMON_BIN := $(BUILD_DIR)/vpnctld
 BOOTSTRAP_BIN := $(BUILD_DIR)/vpnctld-bootstrap
-VPNICON_TWEAK_BIN := $(BUILD_DIR)/vlesscorevpnicon.dylib
 PKG_ROOT := $(BUILD_DIR)/pkgroot
 DEB_OUT := $(BUILD_DIR)/com.vlesscore.app_iphoneos-arm.deb
 
 APP_SRC := app/main.m third_party/quirc/quirc.c third_party/quirc/decode.c third_party/quirc/identify.c third_party/quirc/version_db.c
-DAEMON_SRC := daemon/vpnctld.c
+DAEMON_SRC := daemon/vpnctld.c daemon/vpnicon_statusbar.c
 BOOTSTRAP_SRC := daemon/vpnctld_bootstrap.c
-VPNICON_TWEAK_SRC := tweak/vlesscore_vpnicon.m
 
 APP_CFLAGS := -fno-objc-arc -Wall -Wextra -O2 -arch armv7 -miphoneos-version-min=6.0 -isysroot $(IOS_SDK) -Ithird_party/quirc
 APP_LDFLAGS := -framework UIKit -framework Foundation -framework CoreGraphics -framework QuartzCore -framework AVFoundation -framework CoreMedia -framework CoreVideo
 
 DAEMON_CFLAGS := -Wall -Wextra -O2 -std=c11 -arch armv7 -miphoneos-version-min=6.0 -isysroot $(IOS_SDK)
-TWEAK_CFLAGS := -fno-objc-arc -Wall -Wextra -O2 -arch armv7 -miphoneos-version-min=6.0 -isysroot $(IOS_SDK)
-TWEAK_LDFLAGS := -dynamiclib -install_name /Library/MobileSubstrate/DynamicLibraries/vlesscorevpnicon.dylib -framework Foundation -framework UIKit -framework CoreFoundation
 
 VLESS_CORE_BIN ?= $(abspath ../vless-core-cli/vless-core-darwin-armv7)
 VLESS_CORE_CURL_BIN ?= $(abspath ../vless-core-cli/third_party/curl-ios6-armv7/bin/curl)
@@ -85,15 +81,11 @@ $(BOOTSTRAP_BIN): check-ios-toolchain $(BOOTSTRAP_SRC)
 	mkdir -p $(BUILD_DIR)
 	PATH="$(IOS_BIN):$$PATH" $(IOS_RUNTIME_ENV) $(IOS_CC) $(DAEMON_CFLAGS) $(BOOTSTRAP_SRC) -o $@
 
-$(VPNICON_TWEAK_BIN): check-ios-toolchain $(VPNICON_TWEAK_SRC)
-	mkdir -p $(BUILD_DIR)
-	PATH="$(IOS_BIN):$$PATH" $(IOS_RUNTIME_ENV) $(IOS_CC) $(TWEAK_CFLAGS) $(VPNICON_TWEAK_SRC) -o $@ $(TWEAK_LDFLAGS)
-
 app: $(APP_BIN)
 
 daemon: $(DAEMON_BIN)
 
-package-root: check-package-inputs $(APP_BIN) $(DAEMON_BIN) $(BOOTSTRAP_BIN) $(VPNICON_TWEAK_BIN)
+package-root: check-package-inputs $(APP_BIN) $(DAEMON_BIN) $(BOOTSTRAP_BIN)
 	mkdir -p $(PKG_ROOT)
 	mkdir -p packaging/Applications/vless-core.app packaging/usr/bin
 	rm -rf $(PKG_ROOT)/*
@@ -118,7 +110,6 @@ package-root: check-package-inputs $(APP_BIN) $(DAEMON_BIN) $(BOOTSTRAP_BIN) $(V
 	cp $(APP_BIN) $(PKG_ROOT)/Applications/vless-core.app/vless-core
 	cp $(DAEMON_BIN) $(PKG_ROOT)/usr/bin/vpnctld
 	cp $(BOOTSTRAP_BIN) $(PKG_ROOT)/usr/bin/vpnctld-bootstrap
-	cp $(VPNICON_TWEAK_BIN) $(PKG_ROOT)/Library/MobileSubstrate/DynamicLibraries/vlesscorevpnicon.dylib
 	cp $(VLESS_CORE_BIN) $(PKG_ROOT)/usr/bin/vless-core-darwin-armv7
 	cp $(VLESS_CORE_CURL_BIN) $(PKG_ROOT)/usr/bin/vless-core-curl
 	cp $(REDSOCKS_BIN) $(PKG_ROOT)/usr/bin/redsocks-vless-core
@@ -137,7 +128,6 @@ package-root: check-package-inputs $(APP_BIN) $(DAEMON_BIN) $(BOOTSTRAP_BIN) $(V
 	chmod 755 $(PKG_ROOT)/usr/bin/vless-core-darwin-armv7
 	chmod 755 $(PKG_ROOT)/usr/bin/vless-core-curl
 	chmod 755 $(PKG_ROOT)/usr/bin/redsocks-vless-core
-	chmod 755 $(PKG_ROOT)/Library/MobileSubstrate/DynamicLibraries/vlesscorevpnicon.dylib
 	for script in preinst postinst prerm postrm; do \
 		[ -f "$(PKG_ROOT)/DEBIAN/$$script" ] && chmod 755 "$(PKG_ROOT)/DEBIAN/$$script" || true; \
 	done
@@ -147,7 +137,6 @@ package-root: check-package-inputs $(APP_BIN) $(DAEMON_BIN) $(BOOTSTRAP_BIN) $(V
 	$(LDID) -S $(PKG_ROOT)/usr/bin/vless-core-darwin-armv7
 	$(LDID) -S $(PKG_ROOT)/usr/bin/vless-core-curl
 	$(LDID) -S $(PKG_ROOT)/usr/bin/redsocks-vless-core
-	$(LDID) -S $(PKG_ROOT)/Library/MobileSubstrate/DynamicLibraries/vlesscorevpnicon.dylib
 	chmod 4755 $(PKG_ROOT)/usr/bin/vpnctld-bootstrap
 
 tarball: package-root

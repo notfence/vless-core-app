@@ -31,7 +31,8 @@ see [Issues](https://github.com/notfence/vless-core-app/issues) page for current
 1. Download `.deb` from [latest release](https://github.com/notfence/vless-core-app/releases/latest).
 2. Put the `.deb` file on your device (for example: `/var/mobile/`).
 3. In iFile, find the `.deb`, tap it, and press `Install`.
-4. Device should respring.
+4. Wait for `uicache` to finish. Respring is not required anymore.
+5. As soon as you see “`Installation done! You can now exit the installer.`” you can exit the installer and start using app.
 
 Also you can use terminal app to install it:
 ```bash

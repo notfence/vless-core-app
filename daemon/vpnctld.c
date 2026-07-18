@@ -24,8 +24,9 @@
 #include <sys/wait.h>
 #include <unistd.h>
 
+#include "vpnicon_statusbar.h"
+
 extern char **environ;
-extern int notify_post(const char *name);
 
 typedef enum {
     MODE_NONE = 0,
@@ -47,8 +48,6 @@ typedef struct {
 } vpn_state_t;
 
 static vpn_state_t g;
-static const char *kVPNIconStatePath = "/var/mobile/Library/Preferences/com.vlesscore.vpnicon.state";
-static const char *kVPNIconDarwinNotify = "com.vlesscore.vpnicon.changed";
 static const char *kDaemonPortPath = "/var/run/vpnctld.port";
 static const char *kDNSCachePath = "/var/run/vlesscore-dns-cache.txt";
 static const int kDaemonPortDefault = 9093;
@@ -56,6 +55,7 @@ static const int kDaemonPortMax = 9113;
 static const int kConnectResolveTimeoutMs = 8000;
 static volatile sig_atomic_t g_terminate = 0;
 static int g_listen_fd = -1;
+static int g_vpn_icon_publisher_logged = 0;
 
 static void stop_pid(pid_t *p);
 static void truncate_log_file(const char *path);
@@ -1545,16 +1545,15 @@ static void clear_logs(void) {
 }
 
 static void update_vpn_icon_state(int enabled) {
-    int fd = open(kVPNIconStatePath, O_WRONLY | O_CREAT | O_TRUNC, 0644);
-    if (fd >= 0) {
-        const char *v = enabled ? "1\n" : "0\n";
-        (void)write(fd, v, strlen(v));
-        close(fd);
-    }
-
-    int rc = notify_post(kVPNIconDarwinNotify);
-    if (rc != 0) {
-        log_msg("notify_post(%s) rc=%d", kVPNIconDarwinNotify, rc);
+    int publisher_rc = vpnicon_statusbar_set_enabled(enabled);
+    if (publisher_rc == VPNICON_STATUSBAR_OK) {
+        int item_type = vpnicon_statusbar_item_type();
+        if (item_type >= 0 && !g_vpn_icon_publisher_logged) {
+            log_msg("VPN status bar publisher ready item=%d", item_type);
+            g_vpn_icon_publisher_logged = 1;
+        }
+    } else if (publisher_rc == VPNICON_STATUSBAR_ERROR) {
+        log_msg("VPN status bar publisher unavailable: %s", vpnicon_statusbar_last_error());
     }
 }
 

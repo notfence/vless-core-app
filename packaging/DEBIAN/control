@@ -7,4 +7,4 @@ Maintainer: notfence
 Author: notfence
 Section: Networking
 Priority: optional
-Depends: firmware (>= 6.0), mobilesubstrate
+Depends: firmware (>= 6.0)
