@@ -10,18 +10,20 @@ case "$fw_major" in
   ''|*[!0-9]*) fw_major=0 ;;
 esac
 
+refresh_uicache() {
+  if id mobile >/dev/null 2>&1; then
+    su mobile -c "uicache" >/dev/null 2>&1 && return 0
+  fi
+  uicache >/dev/null 2>&1
+}
+
 case "$1" in
   remove|purge)
+    echo "Running uicache for package removal..."
+    refresh_uicache || true
     if [ "$fw_major" -lt 7 ]; then
       if [ -z "${CYDIA:-}" ]; then
-        ( sleep 2; killall SpringBoard >/dev/null 2>&1 || true ) &
-      fi
-    elif [ -z "${CYDIA:-}" ]; then
-      echo "Running uicache for package removal..."
-      uicache -p /Applications/vless-core.app >/dev/null 2>&1 || uicache >/dev/null 2>&1 || true
-      if id mobile >/dev/null 2>&1; then
-        su mobile -c "uicache -p /Applications/vless-core.app" >/dev/null 2>&1 || \
-        su mobile -c "uicache" >/dev/null 2>&1 || true
+        killall -9 SpringBoard backboardd >/dev/null 2>&1 || true
       fi
     fi
     ;;

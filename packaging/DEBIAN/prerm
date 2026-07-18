@@ -1,5 +1,11 @@
 #!/bin/sh
 set -e
+
+if killall -0 vless-core >/dev/null 2>&1; then
+  killall -9 vless-core >/dev/null 2>&1 || true
+  sleep 1
+fi
+
 launchctl unload /Library/LaunchDaemons/com.vlesscore.vpnctld.plist >/dev/null 2>&1 || true
 if [ "$1" = "remove" ] || [ "$1" = "purge" ]; then
   rm -f /var/mobile/Library/Preferences/com.vlesscore.vpnicon.state >/dev/null 2>&1 || true
