@@ -29,11 +29,67 @@ static NSString *const kDefaultsConfigsKey = @"vlesscore.configs";
 static NSString *const kDefaultsSubsKey = @"vlesscore.subscriptions";
 static NSString *const kDefaultsAutoUpdateSubsKey = @"vlesscore.auto_update_subs";
 static NSString *const kDefaultsStealthModeKey = @"vlesscore.stealth_mode";
+static NSString *const kDefaultsDarkThemeKey = @"vlesscore.dark_theme";
 static NSString *const kDefaultsSubHWIDKey = @"vlesscore.subscription_hwid";
 static NSString *const kSubscriptionAllowInsecureFetchKey = @"allow_insecure_fetch";
 static const char *kDaemonPortPath = "/var/run/vpnctld.port";
 static const int kDaemonDefaultPort = 9093;
 static const int kDaemonPortMax = 9113;
+
+static BOOL VCAppearanceIsDark(void) {
+    return [[NSUserDefaults standardUserDefaults] boolForKey:kDefaultsDarkThemeKey];
+}
+
+static void VCAppearanceSetDark(BOOL dark) {
+    NSUserDefaults *ud = [NSUserDefaults standardUserDefaults];
+    [ud setBool:dark forKey:kDefaultsDarkThemeKey];
+    [ud synchronize];
+}
+
+static UIColor *VCBackgroundColor(void) {
+    return VCAppearanceIsDark() ? [UIColor colorWithWhite:0.065f alpha:1.0f]
+                                : [UIColor colorWithWhite:0.97f alpha:1.0f];
+}
+
+static UIColor *VCCellBackgroundColor(void) {
+    return VCAppearanceIsDark() ? [UIColor colorWithWhite:0.13f alpha:1.0f]
+                                : [UIColor whiteColor];
+}
+
+static UIColor *VCPrimaryTextColor(void) {
+    return VCAppearanceIsDark() ? [UIColor colorWithWhite:0.92f alpha:1.0f]
+                                : [UIColor colorWithWhite:0.08f alpha:1.0f];
+}
+
+static UIColor *VCSecondaryTextColor(void) {
+    return VCAppearanceIsDark() ? [UIColor colorWithWhite:0.67f alpha:1.0f]
+                                : [UIColor colorWithWhite:0.42f alpha:1.0f];
+}
+
+static UIColor *VCSeparatorColor(void) {
+    return VCAppearanceIsDark() ? [UIColor colorWithWhite:0.24f alpha:1.0f]
+                                : [UIColor colorWithWhite:0.78f alpha:1.0f];
+}
+
+static UIColor *VCSelectedCellColor(void) {
+    return VCAppearanceIsDark() ? [UIColor colorWithRed:0.12f green:0.24f blue:0.38f alpha:1.0f]
+                                : [UIColor colorWithRed:0.82f green:0.89f blue:0.98f alpha:1.0f];
+}
+
+static UIColor *VCAccentColor(void) {
+    return VCAppearanceIsDark() ? [UIColor colorWithRed:0.28f green:0.62f blue:1.0f alpha:1.0f]
+                                : [UIColor colorWithRed:0.10f green:0.44f blue:0.86f alpha:1.0f];
+}
+
+static UIColor *VCSuccessColor(void) {
+    return VCAppearanceIsDark() ? [UIColor colorWithRed:0.32f green:0.82f blue:0.42f alpha:1.0f]
+                                : [UIColor colorWithRed:0.10f green:0.50f blue:0.15f alpha:1.0f];
+}
+
+static UIColor *VCErrorColor(void) {
+    return VCAppearanceIsDark() ? [UIColor colorWithRed:1.0f green:0.38f blue:0.38f alpha:1.0f]
+                                : [UIColor colorWithRed:0.78f green:0.12f blue:0.12f alpha:1.0f];
+}
 
 static BOOL IsPadDevice(void) {
     if (UI_USER_INTERFACE_IDIOM() == UIUserInterfaceIdiomPad) {
@@ -1294,13 +1350,142 @@ static UIImage *SolidImageWithColor(UIColor *color) {
     return img;
 }
 
+static UIImage *TintImageWithColor(UIImage *image, UIColor *color) {
+    if (!image || !color) return image;
+
+    CGSize size = image.size;
+    UIGraphicsBeginImageContextWithOptions(size, NO, image.scale);
+    CGRect rect = CGRectMake(0.0f, 0.0f, size.width, size.height);
+    [color setFill];
+    UIRectFill(rect);
+    [image drawInRect:rect blendMode:kCGBlendModeDestinationIn alpha:1.0f];
+    UIImage *tinted = UIGraphicsGetImageFromCurrentImageContext();
+    UIGraphicsEndImageContext();
+    return tinted;
+}
+
+static UIImage *LoadBundledIconTinted(NSString *baseName, CGFloat size, UIColor *color) {
+    UIImage *image = LoadBundledIconScaled(baseName, size);
+    return image ? TintImageWithColor(image, color) : nil;
+}
+
+static void VCAppearanceApplyHeaderView(UIView *view);
+
+static void VCAppearanceApplyTable(UITableView *tableView) {
+    if (!tableView) return;
+
+    tableView.backgroundColor = VCBackgroundColor();
+    tableView.separatorColor = VCSeparatorColor();
+    tableView.indicatorStyle = VCAppearanceIsDark() ? UIScrollViewIndicatorStyleWhite
+                                                     : UIScrollViewIndicatorStyleDefault;
+    UIView *background = [[[UIView alloc] initWithFrame:tableView.bounds] autorelease];
+    background.backgroundColor = VCBackgroundColor();
+    tableView.backgroundView = background;
+}
+
+static void VCAppearanceApplyCell(UITableViewCell *cell) {
+    if (!cell) return;
+
+    cell.backgroundColor = VCCellBackgroundColor();
+    cell.contentView.backgroundColor = [UIColor clearColor];
+    cell.textLabel.backgroundColor = [UIColor clearColor];
+    cell.detailTextLabel.backgroundColor = [UIColor clearColor];
+    cell.textLabel.textColor = VCPrimaryTextColor();
+    cell.detailTextLabel.textColor = VCSecondaryTextColor();
+    cell.textLabel.highlightedTextColor = VCPrimaryTextColor();
+    cell.detailTextLabel.highlightedTextColor = VCSecondaryTextColor();
+
+    UIView *selected = [[[UIView alloc] initWithFrame:cell.bounds] autorelease];
+    selected.backgroundColor = VCSelectedCellColor();
+    cell.selectedBackgroundView = selected;
+}
+
+static void VCAppearanceApplyHeaderView(UIView *view) {
+    if (!view) return;
+    if ([view isKindOfClass:[UILabel class]]) {
+        UILabel *label = (UILabel *)view;
+        label.textColor = VCSecondaryTextColor();
+        if (VCAppearanceIsDark()) {
+            label.shadowColor = [UIColor clearColor];
+            label.shadowOffset = CGSizeZero;
+        } else {
+            label.shadowColor = [UIColor colorWithWhite:1.0f alpha:0.85f];
+            label.shadowOffset = CGSizeMake(0.0f, 1.0f);
+        }
+    }
+    for (UIView *subview in view.subviews) {
+        VCAppearanceApplyHeaderView(subview);
+    }
+}
+
+static void VCAppearanceRefreshVisibleTableHeaders(UITableView *tableView) {
+    if (!tableView) return;
+
+    [tableView setNeedsLayout];
+    [tableView layoutIfNeeded];
+    NSInteger sections = [tableView numberOfSections];
+    for (NSInteger section = 0; section < sections; section++) {
+        UIView *header = [tableView headerViewForSection:section];
+        if (header) {
+            VCAppearanceApplyHeaderView(header);
+            [header setNeedsDisplay];
+        }
+    }
+}
+
+static void VCAppearanceScheduleVisibleTableHeadersRefresh(UITableView *tableView) {
+    if (!tableView) return;
+    dispatch_async(dispatch_get_main_queue(), ^{
+        VCAppearanceRefreshVisibleTableHeaders(tableView);
+    });
+}
+
+static void VCAppearanceApplyNavigationBar(UINavigationBar *navigationBar) {
+    if (!navigationBar) return;
+
+    BOOL dark = VCAppearanceIsDark();
+    BOOL modernTintBehavior = ([[[UIDevice currentDevice] systemVersion] integerValue] >= 7);
+    navigationBar.barStyle = dark ? UIBarStyleBlack : UIBarStyleDefault;
+    navigationBar.tintColor = dark
+        ? (modernTintBehavior ? VCAccentColor() : [UIColor colorWithWhite:0.18f alpha:1.0f])
+        : nil;
+    if (dark) {
+        NSDictionary *titleAttributes = [NSDictionary dictionaryWithObjectsAndKeys:
+            VCPrimaryTextColor(), UITextAttributeTextColor,
+            [UIColor clearColor], UITextAttributeTextShadowColor,
+            [NSValue valueWithUIOffset:UIOffsetZero], UITextAttributeTextShadowOffset,
+            nil];
+        [navigationBar setTitleTextAttributes:titleAttributes];
+    } else {
+        [navigationBar setTitleTextAttributes:nil];
+    }
+
+    UINavigationItem *topItem = navigationBar.topItem;
+    NSString *title = [topItem.title copy];
+    if (title) {
+        topItem.title = nil;
+        topItem.title = title;
+        [title release];
+    }
+    [navigationBar setNeedsLayout];
+    [navigationBar layoutIfNeeded];
+}
+
+static void VCAppearanceApplyStatusBar(void) {
+    BOOL modernStatusBar = ([[[UIDevice currentDevice] systemVersion] integerValue] >= 7);
+    UIStatusBarStyle style = UIStatusBarStyleDefault;
+    if (VCAppearanceIsDark()) {
+        style = modernStatusBar ? UIStatusBarStyleBlackTranslucent : UIStatusBarStyleBlackOpaque;
+    }
+    [[UIApplication sharedApplication] setStatusBarStyle:style animated:YES];
+}
+
 static UIImage *MakeIconImage(VCIconType type, CGFloat size, BOOL active) {
     CGSize iconSize = CGSizeMake(size, size);
     UIGraphicsBeginImageContextWithOptions(iconSize, NO, 0.0f);
 
     CGContextRef ctx = UIGraphicsGetCurrentContext();
-    UIColor *clr = active ? [UIColor colorWithRed:0.10f green:0.44f blue:0.86f alpha:1.0f]
-                          : [UIColor colorWithWhite:0.25f alpha:1.0f];
+    UIColor *clr = active ? VCAccentColor() : VCPrimaryTextColor();
     CGContextSetStrokeColorWithColor(ctx, clr.CGColor);
     CGContextSetFillColorWithColor(ctx, clr.CGColor);
     CGContextSetLineWidth(ctx, 2.0f);
@@ -1408,7 +1593,7 @@ static UIImage *MakeIconImage(VCIconType type, CGFloat size, BOOL active) {
                                                         clockwise:YES];
         [dot fill];
     } else if (type == VCIconTypeCheck) {
-        UIColor *ok = [UIColor colorWithRed:0.10f green:0.50f blue:0.15f alpha:1.0f];
+        UIColor *ok = VCSuccessColor();
         CGContextSetStrokeColorWithColor(ctx, ok.CGColor);
         CGContextMoveToPoint(ctx, size * 0.20f, size * 0.54f);
         CGContextAddLineToPoint(ctx, size * 0.42f, size * 0.74f);
@@ -1642,6 +1827,7 @@ static UIImage *MakeIconImage(VCIconType type, CGFloat size, BOOL active) {
 @protocol SettingsVCDelegate <NSObject>
 - (void)settingsVC:(SettingsVC *)vc didChangeAutoUpdate:(BOOL)enabled;
 - (void)settingsVC:(SettingsVC *)vc didChangeStealthMode:(BOOL)enabled;
+- (void)settingsVC:(SettingsVC *)vc didChangeDarkTheme:(BOOL)enabled;
 @end
 
 @interface SettingsVC : UIViewController <UITableViewDataSource, UITableViewDelegate> {
@@ -1650,10 +1836,12 @@ static UIImage *MakeIconImage(VCIconType type, CGFloat size, BOOL active) {
     UISwitch *_stealthSwitch;
     BOOL _autoUpdate;
     BOOL _stealthMode;
+    BOOL _darkTheme;
     id<SettingsVCDelegate> _delegate;
 }
 @property (nonatomic, assign) BOOL autoUpdate;
 @property (nonatomic, assign) BOOL stealthMode;
+@property (nonatomic, assign) BOOL darkTheme;
 @property (nonatomic, assign) id<SettingsVCDelegate> delegate;
 @end
 
@@ -1675,13 +1863,15 @@ static UIImage *MakeIconImage(VCIconType type, CGFloat size, BOOL active) {
 - (void)viewDidLoad {
     [super viewDidLoad];
     self.title = @"FAQ";
-    self.view.backgroundColor = [UIColor colorWithWhite:0.97f alpha:1.0f];
+    self.view.backgroundColor = VCBackgroundColor();
 
     _textView = [[UITextView alloc] initWithFrame:self.view.bounds];
     _textView.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
     _textView.editable = NO;
     _textView.backgroundColor = [UIColor clearColor];
-    _textView.textColor = [UIColor colorWithWhite:0.12f alpha:1.0f];
+    _textView.textColor = VCPrimaryTextColor();
+    _textView.indicatorStyle = VCAppearanceIsDark() ? UIScrollViewIndicatorStyleWhite
+                                                     : UIScrollViewIndicatorStyleDefault;
     _textView.font = [UIFont systemFontOfSize:15.0f];
     _textView.alwaysBounceVertical = YES;
     _textView.text =
@@ -1779,7 +1969,7 @@ static UIImage *MakeIconImage(VCIconType type, CGFloat size, BOOL active) {
     nameLabel.autoresizingMask = UIViewAutoresizingFlexibleWidth;
     nameLabel.backgroundColor = [UIColor clearColor];
     nameLabel.textAlignment = NSTextAlignmentCenter;
-    nameLabel.textColor = [UIColor colorWithWhite:0.08f alpha:1.0f];
+    nameLabel.textColor = VCPrimaryTextColor();
     nameLabel.font = [UIFont boldSystemFontOfSize:22.0f];
     nameLabel.text = AppDisplayName();
     [header addSubview:nameLabel];
@@ -1788,7 +1978,7 @@ static UIImage *MakeIconImage(VCIconType type, CGFloat size, BOOL active) {
     versionLabel.autoresizingMask = UIViewAutoresizingFlexibleWidth;
     versionLabel.backgroundColor = [UIColor clearColor];
     versionLabel.textAlignment = NSTextAlignmentCenter;
-    versionLabel.textColor = [UIColor colorWithWhite:0.42f alpha:1.0f];
+    versionLabel.textColor = VCSecondaryTextColor();
     versionLabel.font = [UIFont systemFontOfSize:14.0f];
     versionLabel.text = AppVersionSummary();
     [header addSubview:versionLabel];
@@ -1797,7 +1987,7 @@ static UIImage *MakeIconImage(VCIconType type, CGFloat size, BOOL active) {
     buildLabel.autoresizingMask = UIViewAutoresizingFlexibleWidth;
     buildLabel.backgroundColor = [UIColor clearColor];
     buildLabel.textAlignment = NSTextAlignmentCenter;
-    buildLabel.textColor = [UIColor colorWithWhite:0.42f alpha:1.0f];
+    buildLabel.textColor = VCSecondaryTextColor();
     buildLabel.font = [UIFont systemFontOfSize:14.0f];
     buildLabel.numberOfLines = 2;
     buildLabel.text = AppBuildMetadataSummary();
@@ -1815,7 +2005,7 @@ static UIImage *MakeIconImage(VCIconType type, CGFloat size, BOOL active) {
     label.autoresizingMask = UIViewAutoresizingFlexibleWidth;
     label.backgroundColor = [UIColor clearColor];
     label.textAlignment = NSTextAlignmentCenter;
-    label.textColor = [UIColor colorWithWhite:0.42f alpha:1.0f];
+    label.textColor = VCSecondaryTextColor();
     label.font = [UIFont boldSystemFontOfSize:14.0f];
     label.text = @"made by notfence";
     [footer addSubview:label];
@@ -1836,13 +2026,14 @@ static UIImage *MakeIconImage(VCIconType type, CGFloat size, BOOL active) {
 - (void)viewDidLoad {
     [super viewDidLoad];
     self.title = @"About";
-    self.view.backgroundColor = [UIColor colorWithWhite:0.97f alpha:1.0f];
+    self.view.backgroundColor = VCBackgroundColor();
     [self buildSections];
 
     _tableView = [[UITableView alloc] initWithFrame:self.view.bounds style:UITableViewStyleGrouped];
     _tableView.dataSource = self;
     _tableView.delegate = self;
     _tableView.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
+    VCAppearanceApplyTable(_tableView);
     [self.view addSubview:_tableView];
     [self updateTableHeaderAndFooterForWidth:_tableView.bounds.size.width];
 }
@@ -1896,7 +2087,6 @@ static UIImage *MakeIconImage(VCIconType type, CGFloat size, BOOL active) {
         cell.selectionStyle = UITableViewCellSelectionStyleNone;
         cell.textLabel.font = [UIFont boldSystemFontOfSize:15.0f];
         cell.detailTextLabel.font = [UIFont systemFontOfSize:13.0f];
-        cell.detailTextLabel.textColor = [UIColor colorWithWhite:0.36f alpha:1.0f];
         cell.detailTextLabel.numberOfLines = 0;
         cell.detailTextLabel.lineBreakMode = NSLineBreakByWordWrapping;
     }
@@ -1904,7 +2094,21 @@ static UIImage *MakeIconImage(VCIconType type, CGFloat size, BOOL active) {
     NSDictionary *row = [self rowForIndexPath:indexPath];
     cell.textLabel.text = [row objectForKey:@"title"];
     cell.detailTextLabel.text = [row objectForKey:@"detail"];
+    VCAppearanceApplyCell(cell);
     return cell;
+}
+
+- (void)tableView:(UITableView *)tableView willDisplayCell:(UITableViewCell *)cell forRowAtIndexPath:(NSIndexPath *)indexPath {
+    (void)tableView;
+    (void)indexPath;
+    VCAppearanceApplyCell(cell);
+}
+
+- (void)tableView:(UITableView *)tableView willDisplayHeaderView:(UIView *)view forSection:(NSInteger)section {
+    (void)tableView;
+    (void)section;
+    VCAppearanceApplyHeaderView(view);
+    VCAppearanceScheduleVisibleTableHeadersRefresh(tableView);
 }
 
 - (BOOL)shouldAutorotateToInterfaceOrientation:(UIInterfaceOrientation)interfaceOrientation {
@@ -1983,13 +2187,14 @@ static UIImage *MakeIconImage(VCIconType type, CGFloat size, BOOL active) {
 - (void)viewDidLoad {
     [super viewDidLoad];
     self.title = @"Credits";
-    self.view.backgroundColor = [UIColor colorWithWhite:0.97f alpha:1.0f];
+    self.view.backgroundColor = VCBackgroundColor();
     [self buildSections];
 
     _tableView = [[UITableView alloc] initWithFrame:self.view.bounds style:UITableViewStyleGrouped];
     _tableView.dataSource = self;
     _tableView.delegate = self;
     _tableView.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
+    VCAppearanceApplyTable(_tableView);
     [self.view addSubview:_tableView];
 }
 
@@ -2033,7 +2238,6 @@ static UIImage *MakeIconImage(VCIconType type, CGFloat size, BOOL active) {
         cell.selectionStyle = UITableViewCellSelectionStyleNone;
         cell.textLabel.font = [UIFont boldSystemFontOfSize:15.0f];
         cell.detailTextLabel.font = [UIFont systemFontOfSize:13.0f];
-        cell.detailTextLabel.textColor = [UIColor colorWithWhite:0.36f alpha:1.0f];
         cell.detailTextLabel.numberOfLines = 0;
         cell.detailTextLabel.lineBreakMode = NSLineBreakByWordWrapping;
     }
@@ -2041,7 +2245,21 @@ static UIImage *MakeIconImage(VCIconType type, CGFloat size, BOOL active) {
     NSDictionary *row = [self rowForIndexPath:indexPath];
     cell.textLabel.text = [row objectForKey:@"title"];
     cell.detailTextLabel.text = [row objectForKey:@"detail"];
+    VCAppearanceApplyCell(cell);
     return cell;
+}
+
+- (void)tableView:(UITableView *)tableView willDisplayCell:(UITableViewCell *)cell forRowAtIndexPath:(NSIndexPath *)indexPath {
+    (void)tableView;
+    (void)indexPath;
+    VCAppearanceApplyCell(cell);
+}
+
+- (void)tableView:(UITableView *)tableView willDisplayHeaderView:(UIView *)view forSection:(NSInteger)section {
+    (void)tableView;
+    (void)section;
+    VCAppearanceApplyHeaderView(view);
+    VCAppearanceScheduleVisibleTableHeadersRefresh(tableView);
 }
 
 - (BOOL)shouldAutorotateToInterfaceOrientation:(UIInterfaceOrientation)interfaceOrientation {
@@ -2067,6 +2285,7 @@ static UIImage *MakeIconImage(VCIconType type, CGFloat size, BOOL active) {
 @implementation SettingsVC
 @synthesize autoUpdate = _autoUpdate;
 @synthesize stealthMode = _stealthMode;
+@synthesize darkTheme = _darkTheme;
 @synthesize delegate = _delegate;
 
 - (void)closePressed {
@@ -2087,9 +2306,20 @@ static UIImage *MakeIconImage(VCIconType type, CGFloat size, BOOL active) {
     }
 }
 
+- (void)applyTheme {
+    self.view.backgroundColor = VCBackgroundColor();
+    VCAppearanceApplyNavigationBar(self.navigationController.navigationBar);
+    VCAppearanceApplyStatusBar();
+    VCAppearanceApplyTable(_tableView);
+    _autoUpdateSwitch.onTintColor = VCAccentColor();
+    _stealthSwitch.onTintColor = VCAccentColor();
+    [_tableView reloadData];
+    VCAppearanceRefreshVisibleTableHeaders(_tableView);
+}
+
 - (void)viewDidLoad {
     [super viewDidLoad];
-    self.view.backgroundColor = [UIColor colorWithWhite:0.97f alpha:1.0f];
+    self.view.backgroundColor = VCBackgroundColor();
     self.title = @"Settings";
 
     UIBarButtonItem *close = [[[UIBarButtonItem alloc] initWithTitle:@"Back"
@@ -2111,21 +2341,26 @@ static UIImage *MakeIconImage(VCIconType type, CGFloat size, BOOL active) {
     _stealthSwitch = [[UISwitch alloc] initWithFrame:CGRectZero];
     [_stealthSwitch setOn:_stealthMode animated:NO];
     [_stealthSwitch addTarget:self action:@selector(stealthSwitchChanged:) forControlEvents:UIControlEventValueChanged];
+
+    [self applyTheme];
 }
 
 - (NSInteger)numberOfSectionsInTableView:(UITableView *)tableView {
     (void)tableView;
-    return 2;
+    return 3;
 }
 
 - (NSInteger)tableView:(UITableView *)tableView numberOfRowsInSection:(NSInteger)section {
     (void)tableView;
-    return (section == 0) ? 2 : 4;
+    if (section == 0 || section == 1) return 2;
+    return 4;
 }
 
 - (NSString *)tableView:(UITableView *)tableView titleForHeaderInSection:(NSInteger)section {
     (void)tableView;
-    return (section == 0) ? @"Subscriptions" : @"About";
+    if (section == 0) return @"Subscriptions";
+    if (section == 1) return @"Appearance";
+    return @"About";
 }
 
 - (VCMarqueeLabel *)settingsMarqueeForCell:(UITableViewCell *)cell
@@ -2149,9 +2384,10 @@ static UIImage *MakeIconImage(VCIconType type, CGFloat size, BOOL active) {
     if (!cell) return;
     NSString *titleText = ([title isKindOfClass:[NSString class]] ? title : @"");
     NSString *detailText = ([detail isKindOfClass:[NSString class]] ? detail : @"");
-    UIColor *titleColor = [UIColor blackColor];
-    UIColor *detailColor = [UIColor grayColor];
+    UIColor *titleColor = VCPrimaryTextColor();
+    UIColor *detailColor = VCSecondaryTextColor();
 
+    VCAppearanceApplyCell(cell);
     cell.textLabel.textColor = titleColor;
     cell.detailTextLabel.textColor = detailColor;
     cell.textLabel.text = titleText;
@@ -2196,15 +2432,21 @@ static UIImage *MakeIconImage(VCIconType type, CGFloat size, BOOL active) {
         return @"Stealth mode";
     }
     if (indexPath.section == 1 && indexPath.row == 0) {
-        return @"About vless-core";
+        return @"Light";
     }
     if (indexPath.section == 1 && indexPath.row == 1) {
+        return @"Dark";
+    }
+    if (indexPath.section == 2 && indexPath.row == 0) {
+        return @"About vless-core";
+    }
+    if (indexPath.section == 2 && indexPath.row == 1) {
         return @"Credits";
     }
-    if (indexPath.section == 1 && indexPath.row == 2) {
+    if (indexPath.section == 2 && indexPath.row == 2) {
         return @"FAQ";
     }
-    if (indexPath.section == 1 && indexPath.row == 3) {
+    if (indexPath.section == 2 && indexPath.row == 3) {
         return @"Project on GitHub";
     }
     return @"";
@@ -2218,15 +2460,21 @@ static UIImage *MakeIconImage(VCIconType type, CGFloat size, BOOL active) {
         return @"Hide links in configs and subscriptions";
     }
     if (indexPath.section == 1 && indexPath.row == 0) {
-        return @"Version and core binary info";
+        return @"Use the light color scheme";
     }
     if (indexPath.section == 1 && indexPath.row == 1) {
+        return @"Use the dark color scheme";
+    }
+    if (indexPath.section == 2 && indexPath.row == 0) {
+        return @"Version and core binary info";
+    }
+    if (indexPath.section == 2 && indexPath.row == 1) {
         return @"Dependencies and special thanks";
     }
-    if (indexPath.section == 1 && indexPath.row == 2) {
+    if (indexPath.section == 2 && indexPath.row == 2) {
         return @"Common questions and quick answers";
     }
-    if (indexPath.section == 1 && indexPath.row == 3) {
+    if (indexPath.section == 2 && indexPath.row == 3) {
         return @"github.com/notfence/vless-core-app";
     }
     return @"";
@@ -2263,7 +2511,24 @@ static UIImage *MakeIconImage(VCIconType type, CGFloat size, BOOL active) {
         return cell;
     }
 
-    if (indexPath.row == 0) {
+    if (indexPath.section == 1) {
+        static NSString *kThemeCellId = @"SettingsThemeCell";
+        UITableViewCell *cell = [tableView dequeueReusableCellWithIdentifier:kThemeCellId];
+        if (!cell) {
+            cell = [[[UITableViewCell alloc] initWithStyle:UITableViewCellStyleSubtitle reuseIdentifier:kThemeCellId] autorelease];
+        }
+        BOOL darkRow = (indexPath.row == 1);
+        cell.selectionStyle = UITableViewCellSelectionStyleBlue;
+        cell.accessoryView = nil;
+        cell.accessoryType = (_darkTheme == darkRow) ? UITableViewCellAccessoryCheckmark
+                                                     : UITableViewCellAccessoryNone;
+        [self applySettingsMarqueesToCell:cell
+                                    title:(darkRow ? @"Dark" : @"Light")
+                                   detail:(darkRow ? @"Use the dark color scheme" : @"Use the light color scheme")];
+        return cell;
+    }
+
+    if (indexPath.section == 2 && indexPath.row == 0) {
         static NSString *kAboutCellId = @"SettingsAboutCell";
         UITableViewCell *cell = [tableView dequeueReusableCellWithIdentifier:kAboutCellId];
         if (!cell) {
@@ -2277,7 +2542,7 @@ static UIImage *MakeIconImage(VCIconType type, CGFloat size, BOOL active) {
         return cell;
     }
 
-    if (indexPath.row == 1) {
+    if (indexPath.section == 2 && indexPath.row == 1) {
         static NSString *kCreditsCellId = @"SettingsCreditsCell";
         UITableViewCell *cell = [tableView dequeueReusableCellWithIdentifier:kCreditsCellId];
         if (!cell) {
@@ -2291,7 +2556,7 @@ static UIImage *MakeIconImage(VCIconType type, CGFloat size, BOOL active) {
         return cell;
     }
 
-    if (indexPath.row == 2) {
+    if (indexPath.section == 2 && indexPath.row == 2) {
         static NSString *kFAQCellId = @"SettingsFAQCell";
         UITableViewCell *cell = [tableView dequeueReusableCellWithIdentifier:kFAQCellId];
         if (!cell) {
@@ -2325,8 +2590,25 @@ static UIImage *MakeIconImage(VCIconType type, CGFloat size, BOOL active) {
                                detail:[self settingsDetailTextForIndexPath:indexPath]];
 }
 
+- (void)tableView:(UITableView *)tableView willDisplayHeaderView:(UIView *)view forSection:(NSInteger)section {
+    (void)tableView;
+    (void)section;
+    VCAppearanceApplyHeaderView(view);
+    VCAppearanceScheduleVisibleTableHeadersRefresh(tableView);
+}
+
 - (void)tableView:(UITableView *)tableView didSelectRowAtIndexPath:(NSIndexPath *)indexPath {
     if (indexPath.section == 1) {
+        BOOL dark = (indexPath.row == 1);
+        if (_darkTheme != dark) {
+            _darkTheme = dark;
+            VCAppearanceSetDark(dark);
+            if ([_delegate respondsToSelector:@selector(settingsVC:didChangeDarkTheme:)]) {
+                [_delegate settingsVC:self didChangeDarkTheme:dark];
+            }
+            [self applyTheme];
+        }
+    } else if (indexPath.section == 2) {
         if (indexPath.row == 0) {
             AboutVC *about = [[[AboutVC alloc] init] autorelease];
             [self.navigationController pushViewController:about animated:YES];
@@ -2385,6 +2667,11 @@ static UIImage *MakeIconImage(VCIconType type, CGFloat size, BOOL active) {
 @end
 
 @implementation SettingsNavController
+
+- (void)viewDidLoad {
+    [super viewDidLoad];
+    VCAppearanceApplyNavigationBar(self.navigationBar);
+}
 
 - (BOOL)shouldAutorotate {
     return [[self topViewController] shouldAutorotate];
@@ -2877,12 +3164,15 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
     BOOL _showingTerminal;
     BOOL _autoUpdateSubscriptions;
     BOOL _stealthModeEnabled;
+    BOOL _darkThemeEnabled;
+    BOOL _statusOK;
     BOOL _didRunLaunchAutoUpdate;
     BOOL _launchAutoUpdateInProgress;
     BOOL _queuedMainMarqueeRelayout;
 }
 - (NSString *)shortUpdateFailureTextForSubscription:(NSDictionary *)sub errorText:(NSString *)errorText;
 - (void)showSubscriptionUpdateFailures:(NSArray *)failureTexts;
+- (void)applyTheme;
 @end
 
 @implementation MainVC
@@ -3276,6 +3566,7 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
     [ud setObject:_subscriptions forKey:kDefaultsSubsKey];
     [ud setBool:_autoUpdateSubscriptions forKey:kDefaultsAutoUpdateSubsKey];
     [ud setBool:_stealthModeEnabled forKey:kDefaultsStealthModeKey];
+    [ud setBool:_darkThemeEnabled forKey:kDefaultsDarkThemeKey];
     [ud synchronize];
 }
 
@@ -3307,6 +3598,8 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
     } else {
         _stealthModeEnabled = [ud boolForKey:kDefaultsStealthModeKey];
     }
+
+    _darkThemeEnabled = [ud boolForKey:kDefaultsDarkThemeKey];
 
     _selectedConfigIndex = -1;
     _selectedSubIndex = -1;
@@ -3495,8 +3788,8 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
 - (void)showStatus:(NSString *)text ok:(BOOL)ok {
     [_statusBaseText release];
     _statusBaseText = [[self sanitizeDaemonText:text] copy];
-    _statusLabel.textColor = ok ? [UIColor colorWithRed:0.1f green:0.5f blue:0.1f alpha:1.0f]
-                                : [UIColor colorWithRed:0.7f green:0.0f blue:0.0f alpha:1.0f];
+    _statusOK = ok;
+    _statusLabel.textColor = ok ? VCSuccessColor() : VCErrorColor();
     [self refreshStatusText];
 }
 
@@ -3661,9 +3954,9 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
 
 - (UIColor *)configPrefixColorForURI:(NSString *)uri {
     if ([self isSupportedConfigTupleForURI:uri]) {
-        return [UIColor grayColor];
+        return VCSecondaryTextColor();
     }
-    return [UIColor colorWithRed:0.78f green:0.12f blue:0.12f alpha:1.0f];
+    return VCErrorColor();
 }
 
 - (NSString *)unsupportedConfigStatusTextForURI:(NSString *)uri {
@@ -3805,8 +4098,8 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
 
     NSString *prefixText = ([prefix isKindOfClass:[NSString class]] ? prefix : @"");
     NSString *tailText = ([tail isKindOfClass:[NSString class]] ? tail : @"");
-    UIColor *effectivePrefixColor = [prefixColor isKindOfClass:[UIColor class]] ? prefixColor : [UIColor grayColor];
-    UIColor *detailColor = [UIColor grayColor];
+    UIColor *effectivePrefixColor = [prefixColor isKindOfClass:[UIColor class]] ? prefixColor : VCSecondaryTextColor();
+    UIColor *detailColor = VCSecondaryTextColor();
     UIFont *detailFont = cell.detailTextLabel.font;
     if (!detailFont) detailFont = [UIFont systemFontOfSize:11.0f];
 
@@ -3899,7 +4192,7 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
 
 - (void)applyDetailPrefix:(NSString *)prefix marqueeTail:(NSString *)tail toCell:(UITableViewCell *)cell {
     [self applyDetailPrefix:prefix
-                prefixColor:[UIColor grayColor]
+                prefixColor:VCSecondaryTextColor()
                 marqueeTail:tail
                      toCell:cell];
 }
@@ -4279,8 +4572,10 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
     btn.layer.cornerRadius = 6.0f;
     btn.layer.masksToBounds = YES;
     [btn setBackgroundImage:SolidImageWithColor([UIColor colorWithWhite:0.0f alpha:0.0f]) forState:UIControlStateNormal];
-    [btn setBackgroundImage:SolidImageWithColor([UIColor colorWithWhite:0.72f alpha:1.0f]) forState:UIControlStateHighlighted];
-    [btn setBackgroundImage:SolidImageWithColor([UIColor colorWithWhite:0.72f alpha:1.0f]) forState:UIControlStateSelected];
+    UIColor *highlight = VCAppearanceIsDark() ? [UIColor colorWithWhite:0.24f alpha:1.0f]
+                                               : [UIColor colorWithWhite:0.72f alpha:1.0f];
+    [btn setBackgroundImage:SolidImageWithColor(highlight) forState:UIControlStateHighlighted];
+    [btn setBackgroundImage:SolidImageWithColor(highlight) forState:UIControlStateSelected];
 }
 
 - (void)buttonTouchDown:(UIButton *)sender {
@@ -4299,12 +4594,13 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
 
 - (void)updateTopButtonsIcons {
     [_plusBtn setImage:MakeIconImage(VCIconTypeAdd, 20.0f, NO) forState:UIControlStateNormal];
-    UIImage *refresh = LoadBundledIconScaled(@"icon-refresh", 20.0f);
+    UIColor *iconColor = VCPrimaryTextColor();
+    UIImage *refresh = LoadBundledIconTinted(@"icon-refresh", 20.0f, iconColor);
     UIImage *terminal = _showingTerminal
-        ? LoadBundledIconScaled(@"icon-list", 20.0f)
-        : LoadBundledIconScaled(@"icon-terminal", 20.0f);
-    UIImage *settings = LoadBundledIconScaled(@"icon-settings", 20.0f);
-    UIImage *trash = LoadBundledIconScaled(@"icon-trash", 20.0f);
+        ? LoadBundledIconTinted(@"icon-list", 20.0f, iconColor)
+        : LoadBundledIconTinted(@"icon-terminal", 20.0f, iconColor);
+    UIImage *settings = LoadBundledIconTinted(@"icon-settings", 20.0f, iconColor);
+    UIImage *trash = LoadBundledIconTinted(@"icon-trash", 20.0f, iconColor);
 
     [_refreshBtn setImage:(refresh ? refresh : MakeIconImage(VCIconTypeRefresh, 20.0f, NO)) forState:UIControlStateNormal];
     [_terminalBtn setImage:(terminal ? terminal : MakeIconImage(_showingTerminal ? VCIconTypeList : VCIconTypeTerminal, 20.0f, _showingTerminal))
@@ -4810,6 +5106,13 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
                  ok:YES];
 }
 
+- (void)settingsVC:(SettingsVC *)vc didChangeDarkTheme:(BOOL)enabled {
+    (void)vc;
+    _darkThemeEnabled = enabled;
+    [self saveData];
+    [self applyTheme];
+}
+
 - (UIView *)accessoryChevronExpanded:(BOOL)expanded {
     UIView *v = [[[UIView alloc] initWithFrame:CGRectMake(0, 0, 20, 20)] autorelease];
     UIImageView *iv = [[[UIImageView alloc] initWithFrame:CGRectMake(2, 2, 16, 16)] autorelease];
@@ -4826,7 +5129,9 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
     UIView *v = [[[UIView alloc] initWithFrame:CGRectMake(0, 0, 44, 20)] autorelease];
 
     UIActivityIndicatorView *spinner =
-        [[[UIActivityIndicatorView alloc] initWithActivityIndicatorStyle:UIActivityIndicatorViewStyleGray] autorelease];
+        [[[UIActivityIndicatorView alloc] initWithActivityIndicatorStyle:(VCAppearanceIsDark()
+            ? UIActivityIndicatorViewStyleWhite
+            : UIActivityIndicatorViewStyleGray)] autorelease];
     spinner.frame = CGRectMake(0, 0, 20, 20);
     spinner.hidesWhenStopped = YES;
     [spinner startAnimating];
@@ -4844,7 +5149,7 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
 
     UIButton *btn = [UIButton buttonWithType:UIButtonTypeCustom];
     btn.frame = CGRectMake(0, 0, 24, 24);
-    UIImage *pingIcon = LoadBundledIconScaled(@"icon-ping", 18.0f);
+    UIImage *pingIcon = LoadBundledIconTinted(@"icon-ping", 18.0f, VCPrimaryTextColor());
     [btn setImage:(pingIcon ? pingIcon : MakeIconImage(VCIconTypeWifi, 18.0f, NO)) forState:UIControlStateNormal];
     btn.tag = tag;
     [btn addTarget:self action:@selector(pingButtonPressed:) forControlEvents:UIControlEventTouchUpInside];
@@ -5774,6 +6079,7 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
     SettingsVC *settings = [[[SettingsVC alloc] init] autorelease];
     settings.autoUpdate = _autoUpdateSubscriptions;
     settings.stealthMode = _stealthModeEnabled;
+    settings.darkTheme = _darkThemeEnabled;
     settings.delegate = self;
 
     SettingsNavController *nav = [[[SettingsNavController alloc] initWithRootViewController:settings] autorelease];
@@ -5873,14 +6179,37 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
     });
 }
 
+- (void)applyTheme {
+    _darkThemeEnabled = VCAppearanceIsDark();
+    UIColor *background = VCBackgroundColor();
+    self.view.backgroundColor = background;
+    _titleLabel.textColor = VCPrimaryTextColor();
+    _uptimeLabel.textColor = VCPrimaryTextColor();
+    _statusLabel.textColor = _statusOK ? VCSuccessColor() : VCErrorColor();
+    _logView.backgroundColor = background;
+    _logView.textColor = VCPrimaryTextColor();
+    _logView.indicatorStyle = VCAppearanceIsDark() ? UIScrollViewIndicatorStyleWhite
+                                                    : UIScrollViewIndicatorStyleDefault;
+    VCAppearanceApplyTable(_tableView);
+    VCAppearanceApplyStatusBar();
+
+    [self applyTopButtonFeedbackToButton:_plusBtn];
+    [self applyTopButtonFeedbackToButton:_terminalBtn];
+    [self applyTopButtonFeedbackToButton:_clearLogsBtn];
+    [self applyTopButtonFeedbackToButton:_refreshBtn];
+    [self applyTopButtonFeedbackToButton:_settingsBtn];
+    [self updateTopButtonsIcons];
+    [_tableView reloadData];
+    VCAppearanceRefreshVisibleTableHeaders(_tableView);
+}
+
 - (void)viewDidLoad {
     [super viewDidLoad];
-    self.view.backgroundColor = [UIColor colorWithWhite:0.97f alpha:1.0f];
 
     [self loadData];
 
     CGRect b = self.view.bounds;
-    UIColor *bg = [UIColor colorWithWhite:0.97f alpha:1.0f];
+    UIColor *bg = VCBackgroundColor();
     self.view.backgroundColor = bg;
 
     CGFloat topY = 10.0f;
@@ -5897,7 +6226,7 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
     _titleLabel = [[UILabel alloc] initWithFrame:CGRectMake(12, 6, plusX - 20, 28)];
     _titleLabel.text = @"vless-core";
     _titleLabel.font = [UIFont boldSystemFontOfSize:22.0f];
-    _titleLabel.textColor = [UIColor blackColor];
+    _titleLabel.textColor = VCPrimaryTextColor();
     _titleLabel.backgroundColor = [UIColor clearColor];
     _titleLabel.autoresizingMask = UIViewAutoresizingFlexibleWidth;
     [self.view addSubview:_titleLabel];
@@ -5954,7 +6283,7 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
     _uptimeLabel = [[UILabel alloc] initWithFrame:CGRectMake(16, 190, b.size.width - 32, 20)];
     _uptimeLabel.font = [UIFont boldSystemFontOfSize:13.0f];
     _uptimeLabel.text = @"00:00:00";
-    _uptimeLabel.textColor = [UIColor blackColor];
+    _uptimeLabel.textColor = VCPrimaryTextColor();
     _uptimeLabel.textAlignment = NSTextAlignmentCenter;
     _uptimeLabel.backgroundColor = [UIColor clearColor];
     _uptimeLabel.autoresizingMask = UIViewAutoresizingFlexibleWidth;
@@ -5964,6 +6293,7 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
     _statusLabel.font = [UIFont systemFontOfSize:12.5f];
     _statusLabel.numberOfLines = 2;
     _statusLabel.text = @"Ready";
+    _statusOK = YES;
     _statusLabel.backgroundColor = [UIColor clearColor];
     _statusLabel.autoresizingMask = UIViewAutoresizingFlexibleWidth;
     [self.view addSubview:_statusLabel];
@@ -5975,8 +6305,7 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
     _tableView = [[UITableView alloc] initWithFrame:CGRectMake(0, listY, b.size.width, listH) style:UITableViewStyleGrouped];
     _tableView.dataSource = self;
     _tableView.delegate = self;
-    _tableView.backgroundColor = [UIColor clearColor];
-    _tableView.opaque = NO;
+    _tableView.opaque = YES;
     _tableView.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
     UIView *footer = [[[UIView alloc] initWithFrame:CGRectZero] autorelease];
     footer.backgroundColor = [UIColor clearColor];
@@ -5987,6 +6316,9 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
     _logView.editable = NO;
     _logView.font = [UIFont systemFontOfSize:10.0f];
     _logView.backgroundColor = bg;
+    _logView.textColor = VCPrimaryTextColor();
+    _logView.indicatorStyle = VCAppearanceIsDark() ? UIScrollViewIndicatorStyleWhite
+                                                    : UIScrollViewIndicatorStyleDefault;
     _logView.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
     _logView.hidden = YES;
     _logView.text = @"Terminal logs";
@@ -5994,8 +6326,7 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
     [self.view addSubview:_logView];
 
     [self updateConnectButton];
-    [self updateTopButtonsIcons];
-    [_tableView reloadData];
+    [self applyTheme];
     [self queryInitialStatus];
 }
 
@@ -6272,7 +6603,6 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
         cell = [[[UITableViewCell alloc] initWithStyle:UITableViewCellStyleSubtitle reuseIdentifier:kCellId] autorelease];
         cell.accessoryType = UITableViewCellAccessoryNone;
         cell.detailTextLabel.font = [UIFont systemFontOfSize:11.0f];
-        cell.detailTextLabel.textColor = [UIColor grayColor];
     }
     cell.clipsToBounds = YES;
     cell.contentView.clipsToBounds = YES;
@@ -6281,6 +6611,7 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
     cell.accessoryType = UITableViewCellAccessoryNone;
     cell.accessoryView = nil;
     cell.selectionStyle = UITableViewCellSelectionStyleBlue;
+    VCAppearanceApplyCell(cell);
 
     if (indexPath.section == 0) {
         NSDictionary *cfg = [_configs objectAtIndex:indexPath.row];
@@ -6330,8 +6661,16 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
 
 - (void)tableView:(UITableView *)tableView willDisplayCell:(UITableViewCell *)cell forRowAtIndexPath:(NSIndexPath *)indexPath {
     (void)tableView;
+    VCAppearanceApplyCell(cell);
     [self applyMarqueeDetailForMainCell:cell atIndexPath:indexPath];
     [self scheduleMainMarqueeRelayout];
+}
+
+- (void)tableView:(UITableView *)tableView willDisplayHeaderView:(UIView *)view forSection:(NSInteger)section {
+    (void)tableView;
+    (void)section;
+    VCAppearanceApplyHeaderView(view);
+    VCAppearanceScheduleVisibleTableHeadersRefresh(tableView);
 }
 
 - (void)scrollViewDidEndDecelerating:(UIScrollView *)scrollView {
@@ -6562,7 +6901,9 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
     (void)launchOptions;
 
     ClearLogsViaDaemon();
+    VCAppearanceApplyStatusBar();
     _window = [[UIWindow alloc] initWithFrame:[[UIScreen mainScreen] bounds]];
+    _window.backgroundColor = VCBackgroundColor();
     MainVC *vc = [[[MainVC alloc] init] autorelease];
     _window.rootViewController = vc;
     [_window makeKeyAndVisible];
