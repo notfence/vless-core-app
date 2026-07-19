@@ -52,6 +52,22 @@ static NSString *const kSubscriptionLastUpdatedKey = @"last_updated";
 static const char *kDaemonPortPath = "/var/run/vpnctld.port";
 static const int kDaemonDefaultPort = 9093;
 static const int kDaemonPortMax = 9113;
+static const CGFloat kVCMainContentStartY = 246.0f;
+static const CGFloat kVCMainCompactContentStartY = 112.0f;
+
+static CGFloat VCClampUnit(CGFloat value) {
+    if (value < 0.0f) return 0.0f;
+    if (value > 1.0f) return 1.0f;
+    return value;
+}
+
+static CGRect VCInterpolateRect(CGRect from, CGRect to, CGFloat progress) {
+    CGFloat p = VCClampUnit(progress);
+    return CGRectMake(from.origin.x + (to.origin.x - from.origin.x) * p,
+                      from.origin.y + (to.origin.y - from.origin.y) * p,
+                      from.size.width + (to.size.width - from.size.width) * p,
+                      from.size.height + (to.size.height - from.size.height) * p);
+}
 
 static BOOL VCAppearanceIsDark(void) {
     return [[NSUserDefaults standardUserDefaults] boolForKey:kDefaultsDarkThemeKey];
@@ -3711,6 +3727,7 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
 - (void)refreshPresentedSubscriptionInfoIfNeeded;
 - (void)refreshLogs;
 - (void)updateLogSelectorAnimated:(BOOL)animated;
+- (void)updatePhoneConnectionLayout;
 - (void)updateMainSectionHeaderButton:(UIButton *)button section:(NSInteger)section animated:(BOOL)animated;
 - (void)updateMainSectionHeaderView:(UIView *)header section:(NSInteger)section animated:(BOOL)animated;
 - (void)updateStickyMainSectionHeader;
@@ -7544,6 +7561,10 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
     _logSelector.hidden = !_showingTerminal;
     _logView.hidden = !_showingTerminal;
     [self updateStickyMainSectionHeader];
+    [UIView animateWithDuration:0.18
+                     animations:^{
+                         [self updatePhoneConnectionLayout];
+                     }];
 
     if (_showingTerminal) {
         [self refreshLogs];
@@ -7731,6 +7752,48 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
     });
 }
 
+- (void)updatePhoneConnectionLayout {
+    if (IsPadDevice() || !_tableView || !_connectBtn || !_uptimeLabel || !_statusLabel) return;
+
+    CGFloat collapseDistance = kVCMainContentStartY - kVCMainCompactContentStartY;
+    CGFloat progress = 0.0f;
+    if (!_showingTerminal && collapseDistance > 0.0f) {
+        progress = VCClampUnit((_tableView.contentOffset.y + collapseDistance) / collapseDistance);
+    }
+
+    CGFloat width = self.view.bounds.size.width;
+    CGRect expandedButtonFrame = CGRectMake((width - 122.0f) * 0.5f, 60.0f, 122.0f, 122.0f);
+    CGRect compactButtonFrame = CGRectMake(12.0f, 52.0f, 104.0f, 48.0f);
+    CGRect expandedUptimeFrame = CGRectMake(16.0f, 190.0f, width - 32.0f, 20.0f);
+    CGRect compactUptimeFrame = CGRectMake(128.0f, 50.0f, width - 140.0f, 18.0f);
+    CGRect expandedStatusFrame = CGRectMake(16.0f, 216.0f, width - 32.0f, 30.0f);
+    CGRect compactStatusFrame = CGRectMake(128.0f, 71.0f, width - 140.0f, 37.0f);
+
+    _connectBtn.frame = VCInterpolateRect(expandedButtonFrame, compactButtonFrame, progress);
+    _connectBtn.layer.cornerRadius = _connectBtn.bounds.size.height * 0.5f;
+    CGFloat buttonFontSize = 20.0f - 5.0f * progress;
+    if (fabs([_connectBtn.titleLabel.font pointSize] - buttonFontSize) > 0.35f) {
+        _connectBtn.titleLabel.font = [UIFont boldSystemFontOfSize:buttonFontSize];
+    }
+
+    _uptimeLabel.frame = VCInterpolateRect(expandedUptimeFrame, compactUptimeFrame, progress);
+    CGFloat uptimeFontSize = 13.0f - progress;
+    if (fabs([_uptimeLabel.font pointSize] - uptimeFontSize) > 0.35f) {
+        _uptimeLabel.font = [UIFont boldSystemFontOfSize:uptimeFontSize];
+    }
+    _uptimeLabel.textAlignment = (progress < 0.5f) ? NSTextAlignmentCenter : NSTextAlignmentLeft;
+
+    _statusLabel.frame = VCInterpolateRect(expandedStatusFrame, compactStatusFrame, progress);
+    CGFloat statusFontSize = 12.5f - progress;
+    if (fabs([_statusLabel.font pointSize] - statusFontSize) > 0.35f) {
+        _statusLabel.font = [UIFont systemFontOfSize:statusFontSize];
+    }
+
+    UIEdgeInsets indicators = _tableView.scrollIndicatorInsets;
+    indicators.top = collapseDistance * (1.0f - progress);
+    _tableView.scrollIndicatorInsets = indicators;
+}
+
 - (void)applyTheme {
     _darkThemeEnabled = VCAppearanceIsDark();
     UIColor *background = VCBackgroundColor();
@@ -7763,6 +7826,8 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
     [self loadData];
 
     CGRect b = self.view.bounds;
+    BOOL collapsiblePhoneLayout = !IsPadDevice();
+    CGFloat listY = collapsiblePhoneLayout ? kVCMainCompactContentStartY : kVCMainContentStartY;
     UIColor *bg = VCBackgroundColor();
     self.view.backgroundColor = bg;
 
@@ -7834,7 +7899,7 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
     [self applyTouchFeedbackToButton:_connectBtn];
     [self.view addSubview:_connectBtn];
 
-    _uptimeLabel = [[UILabel alloc] initWithFrame:CGRectMake(16, 190, b.size.width - 32, 20)];
+    _uptimeLabel = [[UILabel alloc] initWithFrame:CGRectMake(16.0f, 190.0f, b.size.width - 32.0f, 20.0f)];
     _uptimeLabel.font = [UIFont boldSystemFontOfSize:13.0f];
     _uptimeLabel.text = @"00:00:00";
     _uptimeLabel.textColor = VCPrimaryTextColor();
@@ -7843,7 +7908,7 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
     _uptimeLabel.autoresizingMask = UIViewAutoresizingFlexibleWidth;
     [self.view addSubview:_uptimeLabel];
 
-    _statusLabel = [[UILabel alloc] initWithFrame:CGRectMake(16, 216, b.size.width - 32, 30)];
+    _statusLabel = [[UILabel alloc] initWithFrame:CGRectMake(16.0f, 216.0f, b.size.width - 32.0f, 30.0f)];
     _statusLabel.font = [UIFont systemFontOfSize:12.5f];
     _statusLabel.numberOfLines = 2;
     _statusLabel.text = @"Ready";
@@ -7852,7 +7917,6 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
     _statusLabel.autoresizingMask = UIViewAutoresizingFlexibleWidth;
     [self.view addSubview:_statusLabel];
 
-    CGFloat listY = 246.0f;
     CGFloat listH = b.size.height - listY;
     if (listH < 120.0f) listH = 120.0f;
 
@@ -7864,13 +7928,22 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
     UIView *footer = [[[UIView alloc] initWithFrame:CGRectZero] autorelease];
     footer.backgroundColor = [UIColor clearColor];
     _tableView.tableFooterView = footer;
+    if (collapsiblePhoneLayout) {
+        CGFloat collapseDistance = kVCMainContentStartY - kVCMainCompactContentStartY;
+        _tableView.contentInset = UIEdgeInsetsMake(collapseDistance, 0.0f, 0.0f, 0.0f);
+        _tableView.scrollIndicatorInsets = _tableView.contentInset;
+        _tableView.contentOffset = CGPointMake(0.0f, -collapseDistance);
+    }
     [self.view addSubview:_tableView];
 
+    CGFloat logY = kVCMainContentStartY;
+    CGFloat logH = b.size.height - logY;
+    if (logH < 120.0f) logH = 120.0f;
     CGFloat logSelectorWidth = 188.0f;
     if (logSelectorWidth > b.size.width - 24.0f) logSelectorWidth = b.size.width - 24.0f;
     _logSelector = [[UIView alloc] initWithFrame:CGRectZero];
     _logSelector.frame = CGRectMake((b.size.width - logSelectorWidth) * 0.5f,
-                                    listY + 2.0f,
+                                    logY + 2.0f,
                                     logSelectorWidth,
                                     28.0f);
     _logSelector.autoresizingMask = UIViewAutoresizingFlexibleLeftMargin |
@@ -7902,7 +7975,7 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
     _logFollowsTail[0] = YES;
     _logFollowsTail[1] = YES;
     [self updateLogSelectorAnimated:NO];
-    CGRect logFrame = CGRectMake(0.0f, listY + 32.0f, b.size.width, listH - 32.0f);
+    CGRect logFrame = CGRectMake(0.0f, logY + 32.0f, b.size.width, logH - 32.0f);
     _logView = [[UITextView alloc] initWithFrame:logFrame];
     _logView.editable = NO;
     _logView.font = [UIFont systemFontOfSize:10.0f];
@@ -7915,6 +7988,11 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
     _logView.text = @"";
     _logView.delegate = self;
     [self.view addSubview:_logView];
+
+    [self.view bringSubviewToFront:_connectBtn];
+    [self.view bringSubviewToFront:_uptimeLabel];
+    [self.view bringSubviewToFront:_statusLabel];
+    [self updatePhoneConnectionLayout];
 
     [self updateConnectButton];
     [self applyTheme];
@@ -7932,6 +8010,7 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
 
 - (void)viewDidLayoutSubviews {
     [super viewDidLayoutSubviews];
+    [self updatePhoneConnectionLayout];
     [self updateStickyMainSectionHeader];
 }
 
@@ -8738,6 +8817,7 @@ moveRowAtIndexPath:(NSIndexPath *)sourceIndexPath
 
 - (void)scrollViewDidScroll:(UIScrollView *)scrollView {
     if (scrollView == _tableView) {
+        [self updatePhoneConnectionLayout];
         [self updateStickyMainSectionHeader];
     }
 }
