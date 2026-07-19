@@ -42,6 +42,13 @@ static NSString *const kSubscriptionUploadKey = @"upload";
 static NSString *const kSubscriptionDownloadKey = @"download";
 static NSString *const kSubscriptionTotalKey = @"total";
 static NSString *const kSubscriptionExpireKey = @"expire";
+static NSString *const kSubscriptionMetadataKey = @"metadata";
+static NSString *const kSubscriptionDescriptionKey = @"description";
+static NSString *const kSubscriptionSupportURLKey = @"support_url";
+static NSString *const kSubscriptionWebPageURLKey = @"web_page_url";
+static NSString *const kSubscriptionUpdateIntervalKey = @"update_interval_hours";
+static NSString *const kSubscriptionRefillDateKey = @"refill_date";
+static NSString *const kSubscriptionLastUpdatedKey = @"last_updated";
 static const char *kDaemonPortPath = "/var/run/vpnctld.port";
 static const int kDaemonDefaultPort = 9093;
 static const int kDaemonPortMax = 9113;
@@ -135,6 +142,8 @@ typedef NS_ENUM(NSInteger, VCActionSheetTag) {
     VCActionSheetTagImportFileBrowser = 2002,
 };
 
+static NSInteger const kVCSubscriptionDeleteAlertTag = 3101;
+
 typedef NS_ENUM(NSInteger, VCIconType) {
     VCIconTypeAdd = 1,
     VCIconTypeTerminal = 2,
@@ -155,6 +164,7 @@ static NSInteger const kVCMainDetailTailTag = 7412;
 static NSInteger const kVCMainSectionHeaderButtonTagBase = 7420;
 static NSInteger const kVCMainSectionHeaderCountTagBase = 7430;
 static NSInteger const kVCMainSectionHeaderChevronTagBase = 7440;
+static NSInteger const kVCSubscriptionInfoButtonTagBase = 30000;
 static CGFloat const kVCMainSectionHeaderHeight = 46.0f;
 static CGFloat const kVCDetailMarqueeGap = 4.0f;
 static NSTimeInterval const kVCMarqueePauseSeconds = 1.0;
@@ -3203,7 +3213,425 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
 
 @end
 
-@interface MainVC : UIViewController <UITableViewDataSource, UITableViewDelegate, UIActionSheetDelegate, UIAlertViewDelegate, UITextViewDelegate, SettingsVCDelegate, QRScanVCDelegate> {
+@class SubscriptionInfoVC;
+@protocol SubscriptionInfoVCDelegate <NSObject>
+- (void)subscriptionInfoVCRequestedRefresh:(SubscriptionInfoVC *)vc atIndex:(NSInteger)index;
+- (void)subscriptionInfoVCRequestedDelete:(SubscriptionInfoVC *)vc atIndex:(NSInteger)index;
+@end
+
+@interface SubscriptionInfoVC : UIViewController <UITableViewDataSource, UITableViewDelegate, UIAlertViewDelegate> {
+    UITableView *_tableView;
+    NSDictionary *_subscription;
+    NSArray *_sections;
+    NSInteger _subscriptionIndex;
+    BOOL _stealthMode;
+    BOOL _refreshing;
+    id<SubscriptionInfoVCDelegate> _delegate;
+}
+- (id)initWithSubscription:(NSDictionary *)subscription
+                     index:(NSInteger)index
+               stealthMode:(BOOL)stealthMode
+                  delegate:(id<SubscriptionInfoVCDelegate>)delegate;
+- (NSInteger)subscriptionIndex;
+- (void)reloadWithSubscription:(NSDictionary *)subscription;
+- (void)finishRefreshWithSubscription:(NSDictionary *)subscription errorText:(NSString *)errorText;
+@end
+
+@implementation SubscriptionInfoVC
+
+- (id)initWithSubscription:(NSDictionary *)subscription
+                     index:(NSInteger)index
+               stealthMode:(BOOL)stealthMode
+                  delegate:(id<SubscriptionInfoVCDelegate>)delegate {
+    self = [super init];
+    if (!self) return nil;
+
+    _subscription = [subscription copy];
+    _subscriptionIndex = index;
+    _stealthMode = stealthMode;
+    _delegate = delegate;
+    return self;
+}
+
+- (void)dealloc {
+    [_tableView release];
+    [_subscription release];
+    [_sections release];
+    [super dealloc];
+}
+
+- (NSDictionary *)rowWithTitle:(NSString *)title detail:(NSString *)detail action:(NSString *)action {
+    NSMutableDictionary *row = [NSMutableDictionary dictionary];
+    [row setObject:(title ? title : @"") forKey:@"title"];
+    if ([detail isKindOfClass:[NSString class]] && [detail length] > 0) {
+        [row setObject:detail forKey:@"detail"];
+    }
+    if ([action isKindOfClass:[NSString class]] && [action length] > 0) {
+        [row setObject:action forKey:@"action"];
+    }
+    return row;
+}
+
+- (NSDictionary *)sectionWithTitle:(NSString *)title rows:(NSArray *)rows {
+    return [NSDictionary dictionaryWithObjectsAndKeys:
+            (title ? title : @""), @"title",
+            (rows ? rows : [NSArray array]), @"rows",
+            nil];
+}
+
+- (NSString *)formattedBytes:(unsigned long long)bytes {
+    static NSString *const units[] = {@"B", @"KB", @"MB", @"GB", @"TB", @"PB"};
+    double value = (double)bytes;
+    NSUInteger unit = 0;
+    while (value >= 1024.0 && unit < 5) {
+        value /= 1024.0;
+        unit++;
+    }
+    if (unit == 0 || value >= 10.0) {
+        return [NSString stringWithFormat:@"%.0f %@", value, units[unit]];
+    }
+    return [NSString stringWithFormat:@"%.1f %@", value, units[unit]];
+}
+
+- (NSString *)formattedTimestamp:(unsigned long long)timestamp includeTime:(BOOL)includeTime {
+    if (timestamp == 0) return nil;
+    NSDate *date = [NSDate dateWithTimeIntervalSince1970:(NSTimeInterval)timestamp];
+    if (!date) return nil;
+
+    NSDateFormatter *formatter = [[[NSDateFormatter alloc] init] autorelease];
+    [formatter setLocale:[[[NSLocale alloc] initWithLocaleIdentifier:@"en_US_POSIX"] autorelease]];
+    [formatter setDateFormat:(includeTime ? @"dd.MM.yyyy HH:mm" : @"dd.MM.yyyy")];
+    return [formatter stringFromDate:date];
+}
+
+- (void)buildSections {
+    NSMutableArray *newSections = [NSMutableArray array];
+    NSMutableArray *generalRows = [NSMutableArray array];
+    NSMutableArray *usageRows = [NSMutableArray array];
+    NSMutableArray *providerRows = [NSMutableArray array];
+
+    NSString *name = [_subscription objectForKey:@"name"];
+    if (![name isKindOfClass:[NSString class]] || [name length] == 0) name = @"Unnamed subscription";
+    [generalRows addObject:[self rowWithTitle:@"Name" detail:name action:nil]];
+
+    NSString *url = [_subscription objectForKey:@"url"];
+    if (![url isKindOfClass:[NSString class]]) url = @"";
+    NSString *shownURL = _stealthMode ? @"**link is hidden**" : url;
+    if ([shownURL length] > 0) {
+        [generalRows addObject:[self rowWithTitle:@"Subscription Link" detail:shownURL action:nil]];
+    }
+
+    NSDictionary *metadata = [_subscription objectForKey:kSubscriptionMetadataKey];
+    if (![metadata isKindOfClass:[NSDictionary class]]) metadata = nil;
+    NSString *description = [metadata objectForKey:kSubscriptionDescriptionKey];
+    if ([description isKindOfClass:[NSString class]] && [description length] > 0) {
+        [generalRows addObject:[self rowWithTitle:@"Description" detail:description action:nil]];
+    }
+    [newSections addObject:[self sectionWithTitle:@"Subscription" rows:generalRows]];
+
+    NSArray *items = [_subscription objectForKey:@"items"];
+    NSUInteger itemCount = [items isKindOfClass:[NSArray class]] ? [items count] : 0;
+    [usageRows addObject:[self rowWithTitle:@"Configurations"
+                                    detail:[NSString stringWithFormat:@"%lu", (unsigned long)itemCount]
+                                    action:nil]];
+
+    NSDictionary *userInfo = [_subscription objectForKey:kSubscriptionUserInfoKey];
+    if ([userInfo isKindOfClass:[NSDictionary class]]) {
+        NSNumber *uploadNumber = [userInfo objectForKey:kSubscriptionUploadKey];
+        NSNumber *downloadNumber = [userInfo objectForKey:kSubscriptionDownloadKey];
+        NSNumber *totalNumber = [userInfo objectForKey:kSubscriptionTotalKey];
+        NSNumber *expireNumber = [userInfo objectForKey:kSubscriptionExpireKey];
+        BOOL hasUpload = [uploadNumber isKindOfClass:[NSNumber class]];
+        BOOL hasDownload = [downloadNumber isKindOfClass:[NSNumber class]];
+
+        unsigned long long upload = hasUpload ? [uploadNumber unsignedLongLongValue] : 0;
+        unsigned long long download = hasDownload ? [downloadNumber unsignedLongLongValue] : 0;
+        if (hasUpload || hasDownload) {
+            unsigned long long used = (ULLONG_MAX - upload < download) ? ULLONG_MAX : upload + download;
+            [usageRows addObject:[self rowWithTitle:@"Traffic Used" detail:[self formattedBytes:used] action:nil]];
+        }
+        if (hasUpload) {
+            [usageRows addObject:[self rowWithTitle:@"Uploaded" detail:[self formattedBytes:upload] action:nil]];
+        }
+        if (hasDownload) {
+            [usageRows addObject:[self rowWithTitle:@"Downloaded" detail:[self formattedBytes:download] action:nil]];
+        }
+        if ([totalNumber isKindOfClass:[NSNumber class]]) {
+            unsigned long long total = [totalNumber unsignedLongLongValue];
+            NSString *limit = (total == 0) ? @"Unlimited" : [self formattedBytes:total];
+            [usageRows addObject:[self rowWithTitle:@"Traffic Limit" detail:limit action:nil]];
+        }
+        if ([expireNumber isKindOfClass:[NSNumber class]]) {
+            unsigned long long expire = [expireNumber unsignedLongLongValue];
+            NSString *expiry = (expire == 0) ? @"No expiration" : [self formattedTimestamp:expire includeTime:NO];
+            if ([expiry length] > 0) {
+                [usageRows addObject:[self rowWithTitle:@"Expires" detail:expiry action:nil]];
+            }
+        }
+    }
+
+    NSNumber *refillNumber = [metadata objectForKey:kSubscriptionRefillDateKey];
+    if ([refillNumber isKindOfClass:[NSNumber class]]) {
+        NSString *refill = [self formattedTimestamp:[refillNumber unsignedLongLongValue] includeTime:NO];
+        if ([refill length] > 0) {
+            [usageRows addObject:[self rowWithTitle:@"Traffic Refill" detail:refill action:nil]];
+        }
+    }
+    [newSections addObject:[self sectionWithTitle:@"Usage" rows:usageRows]];
+
+    NSString *webPageURL = [metadata objectForKey:kSubscriptionWebPageURLKey];
+    if ([webPageURL isKindOfClass:[NSString class]] && [webPageURL length] > 0) {
+        [providerRows addObject:[self rowWithTitle:@"Web Page"
+                                            detail:(_stealthMode ? @"**link is hidden**" : webPageURL)
+                                            action:nil]];
+    }
+    NSString *supportURL = [metadata objectForKey:kSubscriptionSupportURLKey];
+    if ([supportURL isKindOfClass:[NSString class]] && [supportURL length] > 0) {
+        [providerRows addObject:[self rowWithTitle:@"Support"
+                                            detail:(_stealthMode ? @"**link is hidden**" : supportURL)
+                                            action:nil]];
+    }
+    NSNumber *intervalNumber = [metadata objectForKey:kSubscriptionUpdateIntervalKey];
+    if ([intervalNumber isKindOfClass:[NSNumber class]]) {
+        unsigned long long hours = [intervalNumber unsignedLongLongValue];
+        NSString *interval = [NSString stringWithFormat:@"%llu hour%@", hours, (hours == 1 ? @"" : @"s")];
+        [providerRows addObject:[self rowWithTitle:@"Suggested Update Interval" detail:interval action:nil]];
+    }
+    NSNumber *lastUpdatedNumber = [metadata objectForKey:kSubscriptionLastUpdatedKey];
+    if ([lastUpdatedNumber isKindOfClass:[NSNumber class]]) {
+        NSString *lastUpdated = [self formattedTimestamp:[lastUpdatedNumber unsignedLongLongValue] includeTime:YES];
+        if ([lastUpdated length] > 0) {
+            [providerRows addObject:[self rowWithTitle:@"Last Updated" detail:lastUpdated action:nil]];
+        }
+    }
+    [providerRows addObject:[self rowWithTitle:@"Source"
+                                       detail:(SubscriptionDictionaryUsesHappHeaders(_subscription) ? @"HAPP" : @"URL")
+                                       action:nil]];
+    [newSections addObject:[self sectionWithTitle:@"Provider" rows:providerRows]];
+
+    NSArray *actions = [NSArray arrayWithObjects:
+                        [self rowWithTitle:(_refreshing ? @"Updating..." : @"Update Now") detail:nil action:@"refresh"],
+                        [self rowWithTitle:@"Delete Subscription" detail:nil action:@"delete"],
+                        nil];
+    [newSections addObject:[self sectionWithTitle:@"Actions" rows:actions]];
+
+    [_sections release];
+    _sections = [[NSArray alloc] initWithArray:newSections];
+}
+
+- (void)applyTheme {
+    self.view.backgroundColor = VCBackgroundColor();
+    VCAppearanceApplyNavigationBar(self.navigationController.navigationBar);
+    VCAppearanceApplyStatusBar();
+    VCAppearanceApplyTable(_tableView);
+    [_tableView reloadData];
+    VCAppearanceRefreshVisibleTableHeaders(_tableView);
+}
+
+- (void)viewDidLoad {
+    [super viewDidLoad];
+    self.title = @"Subscription Info";
+    self.view.backgroundColor = VCBackgroundColor();
+
+    UIBarButtonItem *back = [[[UIBarButtonItem alloc] initWithTitle:@"Back"
+                                                              style:UIBarButtonItemStyleBordered
+                                                             target:self
+                                                             action:@selector(backPressed)] autorelease];
+    self.navigationItem.leftBarButtonItem = back;
+
+    _tableView = [[UITableView alloc] initWithFrame:self.view.bounds style:UITableViewStyleGrouped];
+    _tableView.dataSource = self;
+    _tableView.delegate = self;
+    _tableView.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
+    [self.view addSubview:_tableView];
+
+    [self buildSections];
+    [self applyTheme];
+}
+
+- (void)viewWillAppear:(BOOL)animated {
+    [super viewWillAppear:animated];
+    [self applyTheme];
+}
+
+- (void)backPressed {
+    [self dismissViewControllerAnimated:YES completion:nil];
+}
+
+- (NSInteger)subscriptionIndex {
+    return _subscriptionIndex;
+}
+
+- (void)reloadWithSubscription:(NSDictionary *)subscription {
+    if (![subscription isKindOfClass:[NSDictionary class]]) return;
+    [_subscription release];
+    _subscription = [subscription copy];
+    [self buildSections];
+    [_tableView reloadData];
+}
+
+- (NSDictionary *)rowForIndexPath:(NSIndexPath *)indexPath {
+    NSDictionary *section = [_sections objectAtIndex:indexPath.section];
+    return [[section objectForKey:@"rows"] objectAtIndex:indexPath.row];
+}
+
+- (NSInteger)numberOfSectionsInTableView:(UITableView *)tableView {
+    (void)tableView;
+    return [_sections count];
+}
+
+- (NSInteger)tableView:(UITableView *)tableView numberOfRowsInSection:(NSInteger)section {
+    (void)tableView;
+    return [[[_sections objectAtIndex:section] objectForKey:@"rows"] count];
+}
+
+- (NSString *)tableView:(UITableView *)tableView titleForHeaderInSection:(NSInteger)section {
+    (void)tableView;
+    return [[_sections objectAtIndex:section] objectForKey:@"title"];
+}
+
+- (CGFloat)tableView:(UITableView *)tableView heightForRowAtIndexPath:(NSIndexPath *)indexPath {
+    NSDictionary *row = [self rowForIndexPath:indexPath];
+    if ([row objectForKey:@"action"]) return 44.0f;
+
+    NSString *detail = [row objectForKey:@"detail"];
+    CGFloat width = tableView.bounds.size.width - 52.0f;
+    CGSize detailSize = [detail sizeWithFont:[UIFont systemFontOfSize:13.0f]
+                          constrainedToSize:CGSizeMake(width, 1000.0f)
+                              lineBreakMode:NSLineBreakByWordWrapping];
+    CGFloat height = 28.0f + detailSize.height + 16.0f;
+    return (height < 58.0f) ? 58.0f : height;
+}
+
+- (UITableViewCell *)tableView:(UITableView *)tableView cellForRowAtIndexPath:(NSIndexPath *)indexPath {
+    NSDictionary *row = [self rowForIndexPath:indexPath];
+    NSString *action = [row objectForKey:@"action"];
+    NSString *reuseID = action ? @"SubscriptionActionCell" : @"SubscriptionInfoCell";
+    UITableViewCell *cell = [tableView dequeueReusableCellWithIdentifier:reuseID];
+    if (!cell) {
+        UITableViewCellStyle style = action ? UITableViewCellStyleDefault : UITableViewCellStyleSubtitle;
+        cell = [[[UITableViewCell alloc] initWithStyle:style reuseIdentifier:reuseID] autorelease];
+    }
+
+    cell.accessoryView = nil;
+    cell.accessoryType = UITableViewCellAccessoryNone;
+    cell.textLabel.text = [row objectForKey:@"title"];
+    cell.detailTextLabel.text = [row objectForKey:@"detail"];
+    VCAppearanceApplyCell(cell);
+
+    if (action) {
+        cell.textLabel.font = [UIFont boldSystemFontOfSize:15.0f];
+        cell.textLabel.textColor = [action isEqualToString:@"delete"] ? VCErrorColor() : VCAccentColor();
+        cell.selectionStyle = _refreshing ? UITableViewCellSelectionStyleNone : UITableViewCellSelectionStyleBlue;
+        if ([action isEqualToString:@"refresh"] && _refreshing) {
+            UIActivityIndicatorView *spinner = [[[UIActivityIndicatorView alloc]
+                initWithActivityIndicatorStyle:(VCAppearanceIsDark() ? UIActivityIndicatorViewStyleWhite
+                                                                     : UIActivityIndicatorViewStyleGray)] autorelease];
+            [spinner startAnimating];
+            cell.accessoryView = spinner;
+        }
+    } else {
+        cell.selectionStyle = UITableViewCellSelectionStyleNone;
+        cell.textLabel.font = [UIFont boldSystemFontOfSize:14.0f];
+        cell.detailTextLabel.font = [UIFont systemFontOfSize:13.0f];
+        cell.detailTextLabel.numberOfLines = 0;
+        cell.detailTextLabel.lineBreakMode = NSLineBreakByWordWrapping;
+    }
+    return cell;
+}
+
+- (void)tableView:(UITableView *)tableView willDisplayCell:(UITableViewCell *)cell forRowAtIndexPath:(NSIndexPath *)indexPath {
+    (void)tableView;
+    (void)indexPath;
+    VCAppearanceApplyCell(cell);
+    NSDictionary *row = [self rowForIndexPath:indexPath];
+    NSString *action = [row objectForKey:@"action"];
+    if ([action isEqualToString:@"delete"]) cell.textLabel.textColor = VCErrorColor();
+    else if ([action isEqualToString:@"refresh"]) cell.textLabel.textColor = VCAccentColor();
+}
+
+- (void)tableView:(UITableView *)tableView willDisplayHeaderView:(UIView *)view forSection:(NSInteger)section {
+    (void)tableView;
+    (void)section;
+    VCAppearanceApplyHeaderView(view);
+    VCAppearanceScheduleVisibleTableHeadersRefresh(tableView);
+}
+
+- (void)tableView:(UITableView *)tableView didSelectRowAtIndexPath:(NSIndexPath *)indexPath {
+    NSDictionary *row = [self rowForIndexPath:indexPath];
+    NSString *action = [row objectForKey:@"action"];
+    [tableView deselectRowAtIndexPath:indexPath animated:YES];
+    if (_refreshing || !action) return;
+
+    if ([action isEqualToString:@"refresh"]) {
+        _refreshing = YES;
+        [self buildSections];
+        [_tableView reloadData];
+        if ([_delegate respondsToSelector:@selector(subscriptionInfoVCRequestedRefresh:atIndex:)]) {
+            [_delegate subscriptionInfoVCRequestedRefresh:self atIndex:_subscriptionIndex];
+        } else {
+            [self finishRefreshWithSubscription:nil errorText:@"Subscription update is unavailable"];
+        }
+    } else if ([action isEqualToString:@"delete"]) {
+        UIAlertView *alert = [[[UIAlertView alloc] initWithTitle:@"Delete Subscription?"
+                                                        message:@"The subscription and all of its configurations will be removed."
+                                                       delegate:self
+                                              cancelButtonTitle:@"Cancel"
+                                              otherButtonTitles:@"Delete", nil] autorelease];
+        alert.tag = kVCSubscriptionDeleteAlertTag;
+        [alert show];
+    }
+}
+
+- (void)alertView:(UIAlertView *)alertView clickedButtonAtIndex:(NSInteger)buttonIndex {
+    if (alertView.tag != kVCSubscriptionDeleteAlertTag || buttonIndex == alertView.cancelButtonIndex) return;
+    if ([_delegate respondsToSelector:@selector(subscriptionInfoVCRequestedDelete:atIndex:)]) {
+        [_delegate subscriptionInfoVCRequestedDelete:self atIndex:_subscriptionIndex];
+    }
+}
+
+- (void)finishRefreshWithSubscription:(NSDictionary *)subscription errorText:(NSString *)errorText {
+    _refreshing = NO;
+    if ([subscription isKindOfClass:[NSDictionary class]]) [self reloadWithSubscription:subscription];
+    else {
+        [self buildSections];
+        [_tableView reloadData];
+    }
+
+    NSString *title = subscription ? @"Updated" : @"Update Failed";
+    NSString *message = errorText;
+    if (![message isKindOfClass:[NSString class]] || [message length] == 0) {
+        NSArray *items = [_subscription objectForKey:@"items"];
+        NSUInteger count = [items isKindOfClass:[NSArray class]] ? [items count] : 0;
+        message = [NSString stringWithFormat:@"Subscription updated (%lu configs)", (unsigned long)count];
+    }
+    if (!self.view.window) return;
+    UIAlertView *alert = [[[UIAlertView alloc] initWithTitle:title
+                                                    message:message
+                                                   delegate:nil
+                                          cancelButtonTitle:@"OK"
+                                          otherButtonTitles:nil] autorelease];
+    [alert show];
+}
+
+- (BOOL)shouldAutorotateToInterfaceOrientation:(UIInterfaceOrientation)interfaceOrientation {
+    if (IsPadDevice()) {
+        return UIInterfaceOrientationIsPortrait(interfaceOrientation) || UIInterfaceOrientationIsLandscape(interfaceOrientation);
+    }
+    return interfaceOrientation == UIInterfaceOrientationPortrait;
+}
+
+- (BOOL)shouldAutorotate {
+    return IsPadDevice();
+}
+
+- (NSUInteger)supportedInterfaceOrientations {
+    return IsPadDevice() ? UIInterfaceOrientationMaskAllButUpsideDown : UIInterfaceOrientationMaskPortrait;
+}
+
+@end
+
+@interface MainVC : UIViewController <UITableViewDataSource, UITableViewDelegate, UIActionSheetDelegate, UIAlertViewDelegate, UITextViewDelegate, SettingsVCDelegate, QRScanVCDelegate, SubscriptionInfoVCDelegate> {
     UIButton *_connectBtn;
     UIButton *_plusBtn;
     UIButton *_terminalBtn;
@@ -3262,11 +3690,12 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
 - (NSString *)shortUpdateFailureTextForSubscription:(NSDictionary *)sub errorText:(NSString *)errorText;
 - (void)showSubscriptionUpdateFailures:(NSArray *)failureTexts;
 - (void)applyTheme;
-- (UIView *)accessorySubscriptionHeaderExpanded:(BOOL)expanded loading:(BOOL)loading;
+- (UIView *)accessorySubscriptionHeaderAtIndex:(NSInteger)index expanded:(BOOL)expanded loading:(BOOL)loading;
 - (BOOL)isMainSectionExpanded:(NSInteger)section;
 - (void)finishMainSectionTransition:(NSNumber *)transitionNumber;
 - (void)rememberActiveLogPosition;
 - (void)reloadMainTableDataAfterExternalChange;
+- (void)refreshPresentedSubscriptionInfoIfNeeded;
 - (void)refreshLogs;
 - (void)updateLogSelectorAnimated:(BOOL)animated;
 - (void)updateMainSectionHeaderButton:(UIButton *)button section:(NSInteger)section animated:(BOOL)animated;
@@ -3668,6 +4097,81 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
     return [self subscriptionUserInfoFromHeaderValue:value];
 }
 
+- (NSDictionary *)subscriptionMetadataFromMetadataText:(NSString *)text {
+    if (![text isKindOfClass:[NSString class]] || [text length] == 0) return nil;
+
+    NSMutableDictionary *metadata = [NSMutableDictionary dictionary];
+    NSString *description = [self subscriptionHeaderValueNamed:@"announce" fromMetadataText:text];
+    if ([description length] == 0) {
+        description = [self subscriptionHeaderValueNamed:@"profile-description" fromMetadataText:text];
+    }
+    description = [self decodedSubscriptionTitleValue:description];
+    if ([description length] > 0) [metadata setObject:description forKey:kSubscriptionDescriptionKey];
+
+    NSString *supportURL = [self decodedSubscriptionTitleValue:
+                            [self subscriptionHeaderValueNamed:@"support-url" fromMetadataText:text]];
+    if ([supportURL length] > 0) [metadata setObject:supportURL forKey:kSubscriptionSupportURLKey];
+
+    NSString *webPageURL = [self decodedSubscriptionTitleValue:
+                            [self subscriptionHeaderValueNamed:@"profile-web-page-url" fromMetadataText:text]];
+    if ([webPageURL length] > 0) [metadata setObject:webPageURL forKey:kSubscriptionWebPageURLKey];
+
+    NSNumber *updateInterval = [self subscriptionUnsignedNumberFromString:
+                                [self subscriptionHeaderValueNamed:@"profile-update-interval" fromMetadataText:text]];
+    if (updateInterval) [metadata setObject:updateInterval forKey:kSubscriptionUpdateIntervalKey];
+
+    NSNumber *refillDate = [self subscriptionUnsignedNumberFromString:
+                            [self subscriptionHeaderValueNamed:@"subscription-refill-date" fromMetadataText:text]];
+    if (refillDate) [metadata setObject:refillDate forKey:kSubscriptionRefillDateKey];
+    return ([metadata count] > 0) ? metadata : nil;
+}
+
+- (NSDictionary *)subscriptionMetadataFromData:(NSData *)data {
+    if (!data || [data length] == 0) return nil;
+
+    NSString *raw = [[[NSString alloc] initWithData:data encoding:NSUTF8StringEncoding] autorelease];
+    if (!raw) raw = [[[NSString alloc] initWithData:data encoding:NSISOLatin1StringEncoding] autorelease];
+    NSDictionary *metadata = [self subscriptionMetadataFromMetadataText:raw];
+    if ([metadata count] > 0) return metadata;
+
+    NSString *b64 = [[raw componentsSeparatedByCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]] componentsJoinedByString:@""];
+    NSData *decoded = DecodeBase64String(b64);
+    if (!decoded || [decoded length] == 0) return nil;
+
+    NSString *decodedText = [[[NSString alloc] initWithData:decoded encoding:NSUTF8StringEncoding] autorelease];
+    if (!decodedText) decodedText = [[[NSString alloc] initWithData:decoded encoding:NSISOLatin1StringEncoding] autorelease];
+    return [self subscriptionMetadataFromMetadataText:decodedText];
+}
+
+- (NSDictionary *)subscriptionMetadataFromHTTPHeaders:(NSDictionary *)headers {
+    if (![headers isKindOfClass:[NSDictionary class]]) return nil;
+
+    NSMutableDictionary *metadata = [NSMutableDictionary dictionary];
+    NSString *description = [self subscriptionHeaderValueNamed:@"announce" fromHTTPHeaders:headers];
+    if ([description length] == 0) {
+        description = [self subscriptionHeaderValueNamed:@"profile-description" fromHTTPHeaders:headers];
+    }
+    description = [self decodedSubscriptionTitleValue:description];
+    if ([description length] > 0) [metadata setObject:description forKey:kSubscriptionDescriptionKey];
+
+    NSString *supportURL = [self decodedSubscriptionTitleValue:
+                            [self subscriptionHeaderValueNamed:@"support-url" fromHTTPHeaders:headers]];
+    if ([supportURL length] > 0) [metadata setObject:supportURL forKey:kSubscriptionSupportURLKey];
+
+    NSString *webPageURL = [self decodedSubscriptionTitleValue:
+                            [self subscriptionHeaderValueNamed:@"profile-web-page-url" fromHTTPHeaders:headers]];
+    if ([webPageURL length] > 0) [metadata setObject:webPageURL forKey:kSubscriptionWebPageURLKey];
+
+    NSNumber *updateInterval = [self subscriptionUnsignedNumberFromString:
+                                [self subscriptionHeaderValueNamed:@"profile-update-interval" fromHTTPHeaders:headers]];
+    if (updateInterval) [metadata setObject:updateInterval forKey:kSubscriptionUpdateIntervalKey];
+
+    NSNumber *refillDate = [self subscriptionUnsignedNumberFromString:
+                            [self subscriptionHeaderValueNamed:@"subscription-refill-date" fromHTTPHeaders:headers]];
+    if (refillDate) [metadata setObject:refillDate forKey:kSubscriptionRefillDateKey];
+    return ([metadata count] > 0) ? metadata : nil;
+}
+
 - (NSString *)formattedSubscriptionBytes:(unsigned long long)bytes {
     static NSString *const units[] = {@"B", @"KB", @"MB", @"GB", @"TB", @"PB"};
     double value = (double)bytes;
@@ -3820,7 +4324,7 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
     if (!_stealthModeEnabled || ![self isLikelyLinkText:trim]) {
         return trim;
     }
-    return @"**links are hidden**";
+    return @"**link is hidden**";
 }
 
 - (BOOL)isSubscriptionURL:(NSString *)s {
@@ -3976,8 +4480,9 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
         NSIndexPath *ip = [NSIndexPath indexPathForRow:oldRow inSection:1];
         UITableViewCell *cell = [_tableView cellForRowAtIndexPath:ip];
         if (cell) {
-            cell.accessoryView = [self accessorySubscriptionHeaderExpanded:(_expandedSubscription == oldIdx)
-                                                                       loading:NO];
+            cell.accessoryView = [self accessorySubscriptionHeaderAtIndex:oldIdx
+                                                                   expanded:(_expandedSubscription == oldIdx)
+                                                                    loading:NO];
         }
     }
 
@@ -3986,8 +4491,9 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
         NSIndexPath *ip = [NSIndexPath indexPathForRow:newRow inSection:1];
         UITableViewCell *cell = [_tableView cellForRowAtIndexPath:ip];
         if (cell) {
-            cell.accessoryView = [self accessorySubscriptionHeaderExpanded:(_expandedSubscription == subIdx)
-                                                                       loading:YES];
+            cell.accessoryView = [self accessorySubscriptionHeaderAtIndex:subIdx
+                                                                   expanded:(_expandedSubscription == subIdx)
+                                                                    loading:YES];
         }
     }
 }
@@ -5271,6 +5777,7 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
     NSString *hostName = useHappHeaders ? @"HAPP subscription" : [self hostFromURLString:fetchURLString];
     NSString *nameFromMeta = nil;
     NSDictionary *userInfoFromMeta = nil;
+    NSDictionary *metadataFromMeta = nil;
     BOOL allowInsecureFetch = SubscriptionDictionaryAllowsInsecureFetch(sub);
 
     NSString *fetchErr = nil;
@@ -5285,6 +5792,7 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
     }
     if ([curlHeaders length] > 0) {
         userInfoFromMeta = [self subscriptionUserInfoFromMetadataText:curlHeaders];
+        metadataFromMeta = [self subscriptionMetadataFromMetadataText:curlHeaders];
     }
     if (!data && !allowInsecureFetch && (!fetchErr || [fetchErr hasPrefix:@"vless-core-curl not found"])) {
         NSMutableURLRequest *req = [NSMutableURLRequest requestWithURL:url
@@ -5317,6 +5825,7 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
             NSDictionary *headers = [(NSHTTPURLResponse *)resp allHeaderFields];
             nameFromMeta = [self subscriptionTitleFromHTTPHeaders:headers];
             userInfoFromMeta = [self subscriptionUserInfoFromHTTPHeaders:headers];
+            metadataFromMeta = [self subscriptionMetadataFromHTTPHeaders:headers];
         }
     }
 
@@ -5333,6 +5842,9 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
     }
     if ([userInfoFromMeta count] == 0) {
         userInfoFromMeta = [self subscriptionUserInfoFromData:data];
+    }
+    if ([metadataFromMeta count] == 0) {
+        metadataFromMeta = [self subscriptionMetadataFromData:data];
     }
 
     NSArray *uris = [self parseSubscriptionData:data];
@@ -5353,6 +5865,13 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
     if ([userInfoFromMeta count] > 0) {
         [updated setObject:userInfoFromMeta forKey:kSubscriptionUserInfoKey];
     }
+    NSMutableDictionary *storedMetadata = [NSMutableDictionary dictionary];
+    if ([metadataFromMeta isKindOfClass:[NSDictionary class]]) {
+        [storedMetadata addEntriesFromDictionary:metadataFromMeta];
+    }
+    [storedMetadata setObject:[NSNumber numberWithUnsignedLongLong:(unsigned long long)[[NSDate date] timeIntervalSince1970]]
+                       forKey:kSubscriptionLastUpdatedKey];
+    [updated setObject:storedMetadata forKey:kSubscriptionMetadataKey];
 
     NSString *name = [updated objectForKey:@"name"];
     if ([nameFromMeta length] > 0) {
@@ -5533,6 +6052,7 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
             [self normalizeSelection];
             [self reloadMainTableDataAfterExternalChange];
             [self saveData];
+            [self refreshPresentedSubscriptionInfoIfNeeded];
 
             BOOL ok = okCount > 0;
             if (_pendingImportDoneStatus) {
@@ -5600,6 +6120,7 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
 
     [self normalizeSelection];
     [self reloadMainTableDataAfterExternalChange];
+    [self refreshPresentedSubscriptionInfoIfNeeded];
 
     if (showStatus) {
         BOOL ok = okCount > 0;
@@ -5647,26 +6168,36 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
     return v;
 }
 
-- (UIView *)accessorySubscriptionHeaderExpanded:(BOOL)expanded loading:(BOOL)loading {
-    if (!loading) {
-        return [self accessoryChevronExpanded:expanded];
+- (UIView *)accessorySubscriptionHeaderAtIndex:(NSInteger)index expanded:(BOOL)expanded loading:(BOOL)loading {
+    CGFloat width = loading ? 70.0f : 48.0f;
+    UIView *v = [[[UIView alloc] initWithFrame:CGRectMake(0, 0, width, 24)] autorelease];
+
+    UIButton *infoButton = [UIButton buttonWithType:UIButtonTypeCustom];
+    infoButton.frame = CGRectMake(0.0f, 0.0f, 24.0f, 24.0f);
+    infoButton.tag = kVCSubscriptionInfoButtonTagBase + index;
+    UIImage *infoIcon = LoadBundledIconTinted(@"info", 21.0f, VCSecondaryTextColor());
+    [infoButton setImage:infoIcon forState:UIControlStateNormal];
+    infoButton.accessibilityLabel = @"Subscription information";
+    infoButton.accessibilityHint = @"Opens subscription details and actions";
+    [infoButton addTarget:self action:@selector(subscriptionInfoButtonPressed:) forControlEvents:UIControlEventTouchUpInside];
+    [self applyTouchFeedbackToButton:infoButton];
+    [v addSubview:infoButton];
+
+    if (loading) {
+        UIActivityIndicatorView *spinner =
+            [[[UIActivityIndicatorView alloc] initWithActivityIndicatorStyle:(VCAppearanceIsDark()
+                ? UIActivityIndicatorViewStyleWhite
+                : UIActivityIndicatorViewStyleGray)] autorelease];
+        spinner.frame = CGRectMake(26.0f, 2.0f, 20.0f, 20.0f);
+        spinner.hidesWhenStopped = YES;
+        [spinner startAnimating];
+        [v addSubview:spinner];
     }
 
-    UIView *v = [[[UIView alloc] initWithFrame:CGRectMake(0, 0, 44, 20)] autorelease];
-
-    UIActivityIndicatorView *spinner =
-        [[[UIActivityIndicatorView alloc] initWithActivityIndicatorStyle:(VCAppearanceIsDark()
-            ? UIActivityIndicatorViewStyleWhite
-            : UIActivityIndicatorViewStyleGray)] autorelease];
-    spinner.frame = CGRectMake(0, 0, 20, 20);
-    spinner.hidesWhenStopped = YES;
-    [spinner startAnimating];
-    [v addSubview:spinner];
-
-    UIImageView *iv = [[[UIImageView alloc] initWithFrame:CGRectMake(24, 2, 16, 16)] autorelease];
+    CGFloat chevronX = loading ? 52.0f : 32.0f;
+    UIImageView *iv = [[[UIImageView alloc] initWithFrame:CGRectMake(chevronX, 4, 16, 16)] autorelease];
     iv.image = MakeIconImage(expanded ? VCIconTypeChevronDown : VCIconTypeChevronRight, 16.0f, NO);
     [v addSubview:iv];
-
     return v;
 }
 
@@ -6827,6 +7358,121 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
     [self presentViewController:nav animated:YES completion:nil];
 }
 
+- (void)subscriptionInfoButtonPressed:(UIButton *)sender {
+    NSInteger index = sender.tag - kVCSubscriptionInfoButtonTagBase;
+    if (index < 0 || index >= (NSInteger)[_subscriptions count]) return;
+
+    NSDictionary *subscription = [_subscriptions objectAtIndex:index];
+    SubscriptionInfoVC *info = [[[SubscriptionInfoVC alloc] initWithSubscription:subscription
+                                                                           index:index
+                                                                     stealthMode:_stealthModeEnabled
+                                                                        delegate:self] autorelease];
+    SettingsNavController *nav = [[[SettingsNavController alloc] initWithRootViewController:info] autorelease];
+    nav.modalPresentationStyle = UIModalPresentationFullScreen;
+    [self presentViewController:nav animated:YES completion:nil];
+}
+
+- (void)refreshPresentedSubscriptionInfoIfNeeded {
+    UIViewController *presented = self.presentedViewController;
+    if (![presented isKindOfClass:[UINavigationController class]]) return;
+    UIViewController *top = [(UINavigationController *)presented topViewController];
+    if (![top isKindOfClass:[SubscriptionInfoVC class]]) return;
+
+    SubscriptionInfoVC *info = (SubscriptionInfoVC *)top;
+    NSInteger index = [info subscriptionIndex];
+    if (index < 0 || index >= (NSInteger)[_subscriptions count]) return;
+    [info reloadWithSubscription:[_subscriptions objectAtIndex:index]];
+}
+
+- (void)subscriptionInfoVCRequestedRefresh:(SubscriptionInfoVC *)vc atIndex:(NSInteger)index {
+    if (_launchAutoUpdateInProgress) {
+        [vc finishRefreshWithSubscription:nil errorText:@"Another subscription update is already running"];
+        return;
+    }
+    if (index < 0 || index >= (NSInteger)[_subscriptions count]) {
+        [vc finishRefreshWithSubscription:nil errorText:@"Subscription no longer exists"];
+        return;
+    }
+
+    NSDictionary *snapshot = [[_subscriptions objectAtIndex:index] copy];
+    NSString *expectedURL = [[snapshot objectForKey:@"url"] copy];
+    SubscriptionInfoVC *infoVC = [vc retain];
+    _launchAutoUpdateInProgress = YES;
+    [self setUpdatingSubscriptionIndex:index];
+    [self showStatus:@"Updating subscription..." ok:YES];
+
+    dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_DEFAULT, 0), ^{
+        NSAutoreleasePool *pool = [[NSAutoreleasePool alloc] init];
+        NSString *errorText = nil;
+        NSDictionary *updated = [[self updatedSubscriptionDictionaryFromSource:snapshot errorText:&errorText] retain];
+        NSString *copiedError = [errorText copy];
+
+        dispatch_async(dispatch_get_main_queue(), ^{
+            [self setUpdatingSubscriptionIndex:-1];
+            _launchAutoUpdateInProgress = NO;
+
+            BOOL stillExists = (index >= 0 && index < (NSInteger)[_subscriptions count]);
+            NSString *currentURL = stillExists ? [[_subscriptions objectAtIndex:index] objectForKey:@"url"] : nil;
+            BOOL unchanged = stillExists && [expectedURL isKindOfClass:[NSString class]] &&
+                             [currentURL isKindOfClass:[NSString class]] && [currentURL isEqualToString:expectedURL];
+
+            if (updated && unchanged) {
+                [_subscriptions replaceObjectAtIndex:index withObject:updated];
+                [self normalizeSelection];
+                [self saveData];
+                [self reloadMainTableDataAfterExternalChange];
+                NSArray *items = [updated objectForKey:@"items"];
+                [self showStatus:[NSString stringWithFormat:@"Subscription updated (%lu configs)",
+                                  (unsigned long)([items isKindOfClass:[NSArray class]] ? [items count] : 0)]
+                              ok:YES];
+                [infoVC finishRefreshWithSubscription:updated errorText:nil];
+            } else {
+                NSString *message = copiedError;
+                if (!unchanged) message = @"Subscription changed while it was updating";
+                if (![message isKindOfClass:[NSString class]] || [message length] == 0) {
+                    message = @"Subscription update failed";
+                }
+                [self showStatus:message ok:NO];
+                [infoVC finishRefreshWithSubscription:nil errorText:message];
+            }
+
+            [updated release];
+            [copiedError release];
+            [expectedURL release];
+            [snapshot release];
+            [infoVC release];
+        });
+        [pool drain];
+    });
+}
+
+- (BOOL)deleteSubscriptionAtIndex:(NSInteger)subIdx {
+    if (subIdx < 0 || subIdx >= (NSInteger)[_subscriptions count]) return NO;
+    [_subscriptions removeObjectAtIndex:subIdx];
+
+    if (_expandedSubscription == subIdx) {
+        _expandedSubscription = -1;
+    } else if (_expandedSubscription > subIdx) {
+        _expandedSubscription--;
+    }
+    if (_selectedSubIndex == subIdx) {
+        _selectedSubIndex = -1;
+        _selectedSubItemIndex = -1;
+    } else if (_selectedSubIndex > subIdx) {
+        _selectedSubIndex--;
+    }
+    [self normalizeSelection];
+    [self saveData];
+    return YES;
+}
+
+- (void)subscriptionInfoVCRequestedDelete:(SubscriptionInfoVC *)vc atIndex:(NSInteger)index {
+    if (![self deleteSubscriptionAtIndex:index]) return;
+    [self reloadMainTableDataAfterExternalChange];
+    [self showStatus:@"Subscription deleted" ok:YES];
+    [vc dismissViewControllerAnimated:YES completion:nil];
+}
+
 - (void)terminalPressed {
     _showingTerminal = !_showingTerminal;
 
@@ -7628,26 +8274,8 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
     }
 
     if (isHeader) {
-        if (subIdx < 0 || subIdx >= (NSInteger)[_subscriptions count]) return;
-
-        [_subscriptions removeObjectAtIndex:subIdx];
-
-        if (_expandedSubscription == subIdx) {
-            _expandedSubscription = -1;
-        } else if (_expandedSubscription > subIdx) {
-            _expandedSubscription--;
-        }
-
-        if (_selectedSubIndex == subIdx) {
-            _selectedSubIndex = -1;
-            _selectedSubItemIndex = -1;
-        } else if (_selectedSubIndex > subIdx) {
-            _selectedSubIndex--;
-        }
-
-        [self normalizeSelection];
-        [self saveData];
-        [_tableView reloadData];
+        if (![self deleteSubscriptionAtIndex:subIdx]) return;
+        [self reloadMainTableDataAfterExternalChange];
         [self showStatus:@"Subscription deleted" ok:YES];
         return;
     }
@@ -7802,8 +8430,9 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
                 shownName = [self maskedLinkText:shownName];
                 cell.textLabel.text = shownName;
                 BOOL loading = (_updatingSubscriptionIndex == subIdx);
-                cell.accessoryView = [self accessorySubscriptionHeaderExpanded:(_expandedSubscription == subIdx)
-                                                                       loading:loading];
+                cell.accessoryView = [self accessorySubscriptionHeaderAtIndex:subIdx
+                                                                   expanded:(_expandedSubscription == subIdx)
+                                                                    loading:loading];
             } else {
                 NSString *uri = [items objectAtIndex:itemIdx];
                 cell.indentationLevel = 0;
