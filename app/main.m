@@ -1222,14 +1222,9 @@ static NSString *ReadFileTail(NSString *path, NSUInteger maxBytes) {
     return txt;
 }
 
-static NSString *BuildCombinedLogs(void) {
-    NSMutableString *s = [NSMutableString stringWithCapacity:8192];
-    [s appendString:@"=== /var/log/vpnctld.log ===\n"];
-    [s appendString:ReadFileTail(@"/var/log/vpnctld.log", 8192)];
-
-    [s appendString:@"\n\n=== /var/log/vless-core.log ===\n"];
-    [s appendString:ReadFileTail(@"/var/log/vless-core.log", 8192)];
-    return s;
+static NSString *ReadLogAtIndex(NSInteger index) {
+    NSString *path = (index == 1) ? @"/var/log/vless-core.log" : @"/var/log/vpnctld.log";
+    return ReadFileTail(path, 8192);
 }
 
 static int Base64Value(unsigned char c) {
@@ -3145,6 +3140,9 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
     UILabel *_titleLabel;
 
     UITableView *_tableView;
+    UIView *_logSelector;
+    UIButton *_logSelectorButtons[2];
+    UIView *_logSelectionIndicator;
     UITextView *_logView;
     UIView *_stickySectionHeaderView;
     NSTimer *_logTimer;
@@ -3165,7 +3163,12 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
     NSInteger _expandedSubscription;
     NSInteger _updatingSubscriptionIndex;
     NSInteger _stickySectionHeaderSection;
+    NSInteger _activeLogIndex;
     NSUInteger _mainSectionTransitionToken;
+    NSString *_logTexts[2];
+    CGPoint _logContentOffsets[2];
+    BOOL _logContentOffsetsValid[2];
+    BOOL _logFollowsTail[2];
 
     BOOL _connected;
     BOOL _showingTerminal;
@@ -3186,7 +3189,10 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
 - (UIView *)accessorySubscriptionHeaderExpanded:(BOOL)expanded loading:(BOOL)loading;
 - (BOOL)isMainSectionExpanded:(NSInteger)section;
 - (void)finishMainSectionTransition:(NSNumber *)transitionNumber;
+- (void)rememberActiveLogPosition;
 - (void)reloadMainTableDataAfterExternalChange;
+- (void)refreshLogs;
+- (void)updateLogSelectorAnimated:(BOOL)animated;
 - (void)updateMainSectionHeaderButton:(UIButton *)button section:(NSInteger)section animated:(BOOL)animated;
 - (void)updateMainSectionHeaderView:(UIView *)header section:(NSInteger)section animated:(BOOL)animated;
 - (void)updateStickyMainSectionHeader;
@@ -6115,6 +6121,7 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
     _showingTerminal = !_showingTerminal;
 
     _tableView.hidden = _showingTerminal;
+    _logSelector.hidden = !_showingTerminal;
     _logView.hidden = !_showingTerminal;
     [self updateStickyMainSectionHeader];
 
@@ -6128,6 +6135,7 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
                                                          repeats:YES] retain];
         }
     } else {
+        [self rememberActiveLogPosition];
         [_logTimer invalidate];
         [_logTimer release];
         _logTimer = nil;
@@ -6136,31 +6144,130 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
     [self updateTopButtonsIcons];
 }
 
+- (CGFloat)maximumLogOffsetY {
+    CGFloat maxOffsetY = _logView.contentSize.height - _logView.bounds.size.height;
+    return (maxOffsetY > 0.0f) ? maxOffsetY : 0.0f;
+}
+
+- (void)rememberActiveLogPosition {
+    if (_activeLogIndex < 0 || _activeLogIndex > 1 || !_logView) return;
+
+    CGFloat maxOffsetY = [self maximumLogOffsetY];
+    _logContentOffsets[_activeLogIndex] = _logView.contentOffset;
+    _logContentOffsetsValid[_activeLogIndex] = YES;
+    _logFollowsTail[_activeLogIndex] = (_logView.contentOffset.y >= (maxOffsetY - 20.0f));
+}
+
+- (void)displayLogText:(NSString *)text
+               atIndex:(NSInteger)index
+                offset:(CGPoint)savedOffset
+            followTail:(BOOL)followTail {
+    if (index < 0 || index > 1) return;
+
+    NSString *copiedText = [(text ? text : @"") copy];
+    [_logTexts[index] release];
+    _logTexts[index] = copiedText;
+    _logView.text = _logTexts[index];
+    [_logView setNeedsLayout];
+    [_logView layoutIfNeeded];
+
+    CGFloat maxOffsetY = [self maximumLogOffsetY];
+    CGPoint targetOffset = savedOffset;
+    targetOffset.x = 0.0f;
+    if (followTail) {
+        targetOffset.y = maxOffsetY;
+    } else {
+        if (targetOffset.y < 0.0f) targetOffset.y = 0.0f;
+        if (targetOffset.y > maxOffsetY) targetOffset.y = maxOffsetY;
+    }
+    [_logView setContentOffset:targetOffset animated:NO];
+
+    _logContentOffsets[index] = _logView.contentOffset;
+    _logContentOffsetsValid[index] = YES;
+    _logFollowsTail[index] = followTail || maxOffsetY <= 0.0f;
+}
+
+- (void)updateLogSelectorAnimated:(BOOL)animated {
+    if (!_logSelector || !_logSelectionIndicator) return;
+
+    for (NSInteger i = 0; i < 2; i++) {
+        UIButton *button = _logSelectorButtons[i];
+        [button setTitleColor:VCSecondaryTextColor() forState:UIControlStateNormal];
+        [button setTitleColor:VCAccentColor() forState:UIControlStateSelected];
+        [button setTitleColor:VCPrimaryTextColor() forState:UIControlStateHighlighted];
+        button.selected = (i == _activeLogIndex);
+    }
+
+    _logSelectionIndicator.backgroundColor = VCAccentColor();
+    CGFloat segmentWidth = _logSelector.bounds.size.width * 0.5f;
+    CGRect indicatorFrame = _logSelectionIndicator.frame;
+    indicatorFrame.origin.x = segmentWidth * _activeLogIndex + (segmentWidth - indicatorFrame.size.width) * 0.5f;
+    void (^updates)(void) = ^{
+        _logSelectionIndicator.frame = indicatorFrame;
+    };
+    if (animated) {
+        [UIView animateWithDuration:0.16 animations:updates];
+    } else {
+        updates();
+    }
+}
+
+- (void)logSourceChanged:(UIButton *)sender {
+    NSInteger newIndex = sender.tag;
+    if (newIndex < 0 || newIndex > 1 || newIndex == _activeLogIndex) return;
+
+    [self rememberActiveLogPosition];
+    _activeLogIndex = newIndex;
+    [self updateLogSelectorAnimated:YES];
+
+    CGPoint savedOffset = _logContentOffsetsValid[newIndex]
+        ? _logContentOffsets[newIndex]
+        : CGPointZero;
+    BOOL followTail = _logContentOffsetsValid[newIndex]
+        ? _logFollowsTail[newIndex]
+        : YES;
+    [self displayLogText:ReadLogAtIndex(newIndex)
+                 atIndex:newIndex
+                  offset:savedOffset
+              followTail:followTail];
+}
+
 - (void)refreshLogs {
-    if (_logView.selectedRange.length > 0) {
+    if (!_showingTerminal || _activeLogIndex < 0 || _activeLogIndex > 1) {
+        return;
+    }
+    if (_logView.tracking || _logView.dragging || _logView.decelerating ||
+        _logView.selectedRange.length > 0) {
         return;
     }
 
-    NSString *newText = BuildCombinedLogs();
-    NSString *oldText = _logView.text ? _logView.text : @"";
+    NSString *newText = ReadLogAtIndex(_activeLogIndex);
+    NSString *oldText = _logTexts[_activeLogIndex] ? _logTexts[_activeLogIndex] : @"";
     if ([newText isEqualToString:oldText]) {
         return;
     }
 
-    CGFloat maxOffsetY = _logView.contentSize.height - _logView.bounds.size.height;
-    if (maxOffsetY < 0.0f) maxOffsetY = 0.0f;
+    CGPoint savedOffset = _logView.contentOffset;
+    CGFloat maxOffsetY = [self maximumLogOffsetY];
     BOOL wasNearBottom = (_logView.contentOffset.y >= (maxOffsetY - 20.0f));
-
-    _logView.text = newText;
-    if (wasNearBottom && [_logView.text length] > 0) {
-        NSRange r = NSMakeRange([_logView.text length] - 1, 1);
-        [_logView scrollRangeToVisible:r];
-    }
+    [self displayLogText:newText
+                 atIndex:_activeLogIndex
+                  offset:savedOffset
+              followTail:wasNearBottom];
 }
 
 - (void)forceRefreshLogs {
-    _logView.text = BuildCombinedLogs();
-    [_logView setContentOffset:CGPointZero animated:NO];
+    for (NSInteger i = 0; i < 2; i++) {
+        [_logTexts[i] release];
+        _logTexts[i] = nil;
+        _logContentOffsets[i] = CGPointZero;
+        _logContentOffsetsValid[i] = NO;
+        _logFollowsTail[i] = YES;
+    }
+    [self displayLogText:ReadLogAtIndex(_activeLogIndex)
+                 atIndex:_activeLogIndex
+                  offset:CGPointZero
+              followTail:NO];
 }
 
 - (void)clearLogsPressed {
@@ -6211,6 +6318,7 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
     _titleLabel.textColor = VCPrimaryTextColor();
     _uptimeLabel.textColor = VCPrimaryTextColor();
     _statusLabel.textColor = _statusOK ? VCSuccessColor() : VCErrorColor();
+    [self updateLogSelectorAnimated:NO];
     _logView.backgroundColor = background;
     _logView.textColor = VCPrimaryTextColor();
     _logView.indicatorStyle = VCAppearanceIsDark() ? UIScrollViewIndicatorStyleWhite
@@ -6338,7 +6446,44 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
     _tableView.tableFooterView = footer;
     [self.view addSubview:_tableView];
 
-    _logView = [[UITextView alloc] initWithFrame:_tableView.frame];
+    CGFloat logSelectorWidth = 188.0f;
+    if (logSelectorWidth > b.size.width - 24.0f) logSelectorWidth = b.size.width - 24.0f;
+    _logSelector = [[UIView alloc] initWithFrame:CGRectZero];
+    _logSelector.frame = CGRectMake((b.size.width - logSelectorWidth) * 0.5f,
+                                    listY + 2.0f,
+                                    logSelectorWidth,
+                                    28.0f);
+    _logSelector.autoresizingMask = UIViewAutoresizingFlexibleLeftMargin |
+                                    UIViewAutoresizingFlexibleRightMargin;
+    _logSelector.backgroundColor = [UIColor clearColor];
+    _logSelector.hidden = YES;
+
+    NSArray *logTitles = [NSArray arrayWithObjects:@"vpnctld", @"vless-core", nil];
+    CGFloat logButtonWidth = logSelectorWidth * 0.5f;
+    for (NSInteger i = 0; i < 2; i++) {
+        UIButton *button = [UIButton buttonWithType:UIButtonTypeCustom];
+        button.frame = CGRectMake(logButtonWidth * i, 0.0f, logButtonWidth, 26.0f);
+        button.tag = i;
+        button.titleLabel.font = [UIFont systemFontOfSize:12.0f];
+        [button setTitle:[logTitles objectAtIndex:i] forState:UIControlStateNormal];
+        [button addTarget:self
+                   action:@selector(logSourceChanged:)
+         forControlEvents:UIControlEventTouchUpInside];
+        _logSelectorButtons[i] = button;
+        [_logSelector addSubview:button];
+    }
+
+    _logSelectionIndicator = [[UIView alloc] initWithFrame:CGRectMake(0.0f, 26.0f, 32.0f, 2.0f)];
+    _logSelectionIndicator.layer.cornerRadius = 1.0f;
+    [_logSelector addSubview:_logSelectionIndicator];
+    [self.view addSubview:_logSelector];
+
+    _activeLogIndex = 0;
+    _logFollowsTail[0] = YES;
+    _logFollowsTail[1] = YES;
+    [self updateLogSelectorAnimated:NO];
+    CGRect logFrame = CGRectMake(0.0f, listY + 32.0f, b.size.width, listH - 32.0f);
+    _logView = [[UITextView alloc] initWithFrame:logFrame];
     _logView.editable = NO;
     _logView.font = [UIFont systemFontOfSize:10.0f];
     _logView.backgroundColor = bg;
@@ -6347,7 +6492,7 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
                                                     : UIScrollViewIndicatorStyleDefault;
     _logView.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
     _logView.hidden = YES;
-    _logView.text = @"Terminal logs";
+    _logView.text = @"";
     _logView.delegate = self;
     [self.view addSubview:_logView];
 
@@ -6417,7 +6562,11 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
     [_titleLabel release];
 
     [_tableView release];
+    [_logSelector release];
+    [_logSelectionIndicator release];
     [_logView release];
+    [_logTexts[0] release];
+    [_logTexts[1] release];
     [_stickySectionHeaderView release];
     [_importBrowserItems release];
     [_pendingImportDoneStatus release];
@@ -6984,12 +7133,18 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
 - (void)scrollViewDidEndDecelerating:(UIScrollView *)scrollView {
     if (scrollView == _tableView) {
         [self scheduleMainMarqueeRelayout];
+    } else if (scrollView == _logView) {
+        [self rememberActiveLogPosition];
+        [self refreshLogs];
     }
 }
 
 - (void)scrollViewDidEndDragging:(UIScrollView *)scrollView willDecelerate:(BOOL)decelerate {
     if (scrollView == _tableView && !decelerate) {
         [self scheduleMainMarqueeRelayout];
+    } else if (scrollView == _logView && !decelerate) {
+        [self rememberActiveLogPosition];
+        [self refreshLogs];
     }
 }
 
