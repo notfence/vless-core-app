@@ -27,12 +27,16 @@ BOOTSTRAP_BIN := $(BUILD_DIR)/vpnctld-bootstrap
 PKG_ROOT := $(BUILD_DIR)/pkgroot
 DEB_OUT := $(BUILD_DIR)/com.vlesscore.app_iphoneos-arm.deb
 
-APP_SRC := app/main.m third_party/quirc/quirc.c third_party/quirc/decode.c third_party/quirc/identify.c third_party/quirc/version_db.c
+OPENSSL_IOS_DIR ?= $(abspath ../vless-core-cli/third_party/openssl-ios6-armv7)
+OPENSSL_IOS_INCLUDE ?= $(OPENSSL_IOS_DIR)/include
+OPENSSL_IOS_CRYPTO_LIB ?= $(OPENSSL_IOS_DIR)/lib/libcrypto.a
+
+APP_SRC := app/main.m happ/happ_crypto.c third_party/quirc/quirc.c third_party/quirc/decode.c third_party/quirc/identify.c third_party/quirc/version_db.c
 DAEMON_SRC := daemon/vpnctld.c daemon/vpnicon_statusbar.c
 BOOTSTRAP_SRC := daemon/vpnctld_bootstrap.c
 
-APP_CFLAGS := -fno-objc-arc -Wall -Wextra -O2 -arch armv7 -miphoneos-version-min=6.0 -isysroot $(IOS_SDK) -Ithird_party/quirc
-APP_LDFLAGS := -framework UIKit -framework Foundation -framework CoreGraphics -framework QuartzCore -framework AVFoundation -framework CoreMedia -framework CoreVideo
+APP_CFLAGS := -fno-objc-arc -Wall -Wextra -O2 -arch armv7 -miphoneos-version-min=6.0 -isysroot $(IOS_SDK) -Ihapp -Ithird_party/quirc -I$(OPENSSL_IOS_INCLUDE)
+APP_LDFLAGS := -framework UIKit -framework Foundation -framework CoreGraphics -framework QuartzCore -framework AVFoundation -framework CoreMedia -framework CoreVideo $(OPENSSL_IOS_CRYPTO_LIB)
 
 DAEMON_CFLAGS := -Wall -Wextra -O2 -std=c11 -arch armv7 -miphoneos-version-min=6.0 -isysroot $(IOS_SDK)
 
@@ -50,6 +54,8 @@ check-ios-toolchain:
 	@test -x "$(IOS_RANLIB)" || (echo "Missing iOS ranlib: $(IOS_RANLIB)"; echo "Set IOS_TOOLCHAIN=/path/to/ios6/toolchain"; exit 1)
 	@test -x "$(IOS_STRIP)" || (echo "Missing iOS strip: $(IOS_STRIP)"; echo "Set IOS_TOOLCHAIN=/path/to/ios6/toolchain"; exit 1)
 	@test -d "$(IOS_SDK)" || (echo "Missing iOS SDK: $(IOS_SDK)"; echo "Set IOS_SDK=/path/to/iPhoneOS6.1.sdk"; exit 1)
+	@test -f "$(OPENSSL_IOS_INCLUDE)/openssl/evp.h" || (echo "Missing OpenSSL headers: $(OPENSSL_IOS_INCLUDE)"; echo "Build OpenSSL in ../vless-core-cli or override OPENSSL_IOS_DIR"; exit 1)
+	@test -f "$(OPENSSL_IOS_CRYPTO_LIB)" || (echo "Missing OpenSSL crypto library: $(OPENSSL_IOS_CRYPTO_LIB)"; echo "Build OpenSSL in ../vless-core-cli or override OPENSSL_IOS_DIR"; exit 1)
 	@test -n "$(IOS_BLOCKS_RUNTIME_DIR)" || (echo "Missing $(IOS_BLOCKS_RUNTIME_LIB) under $(IOS_TOOLCHAIN)"; echo "Add it to the toolchain or set IOS_BLOCKS_RUNTIME_DIR=/path/to/runtime/lib"; exit 1)
 	@test -x "$(LDID)" || (echo "Missing ldid tool: $(LDID)"; echo "Set IOS_TOOLCHAIN correctly or override LDID"; exit 1)
 

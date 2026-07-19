@@ -35,5 +35,5 @@ echo "https://github.com/notfence/vless-core-app" || true
 echo "uicache is coming..." || true
 refresh_uicache || true
 sync >/dev/null 2>&1 || true
-echo "Installation done! You can now exit the installer."
+echo "Installation done! You can now exit the installer. Respring is not required."
 exit 0

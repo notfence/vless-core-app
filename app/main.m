@@ -3,6 +3,7 @@
 #import <AVFoundation/AVFoundation.h>
 #import <CoreMedia/CoreMedia.h>
 #import <CoreVideo/CoreVideo.h>
+#include "happ_crypto.h"
 #include "quirc.h"
 
 #include <sys/socket.h>
@@ -33,6 +34,9 @@ static NSString *const kDefaultsStealthModeKey = @"vlesscore.stealth_mode";
 static NSString *const kDefaultsDarkThemeKey = @"vlesscore.dark_theme";
 static NSString *const kDefaultsSubHWIDKey = @"vlesscore.subscription_hwid";
 static NSString *const kSubscriptionAllowInsecureFetchKey = @"allow_insecure_fetch";
+static NSString *const kSubscriptionHappSourceKey = @"happ_source";
+static NSString *const kHappSubscriptionUserAgent = @"Happ/3.26.3/iOS";
+static NSString *const kHappAddPrefix = @"happ://add/";
 static NSString *const kSubscriptionUserInfoKey = @"subscription_userinfo";
 static NSString *const kSubscriptionUploadKey = @"upload";
 static NSString *const kSubscriptionDownloadKey = @"download";
@@ -972,6 +976,22 @@ static BOOL SubscriptionDictionaryAllowsInsecureFetch(NSDictionary *sub) {
     return NO;
 }
 
+static BOOL SubscriptionDictionaryUsesHappHeaders(NSDictionary *sub) {
+    if (![sub isKindOfClass:[NSDictionary class]]) return NO;
+
+    id value = [sub objectForKey:kSubscriptionHappSourceKey];
+    if ([value respondsToSelector:@selector(boolValue)]) {
+        if ([value boolValue]) return YES;
+    }
+
+    NSString *urlString = [sub objectForKey:@"url"];
+    NSString *lower = [urlString isKindOfClass:[NSString class]] ? [urlString lowercaseString] : nil;
+    if ([lower hasPrefix:kHappAddPrefix] ||
+        [lower hasPrefix:@"happ://crypt4/"] ||
+        [lower hasPrefix:@"happ://crypt5/"]) return YES;
+    return NO;
+}
+
 static BOOL CurlExitCodeCanRetryInsecurely(int exitCode) {
     return exitCode == 60; /* CURLE_PEER_FAILED_VERIFICATION */
 }
@@ -1005,7 +1025,7 @@ static BOOL SubscriptionDataLooksLikeHTML(NSData *data) {
            [lower rangeOfString:@"<body"].location != NSNotFound;
 }
 
-static NSData *FetchURLViaVlessCoreCurl(NSString *urlString, BOOL allowInsecureFetch, NSString **errOut, NSString **headersOut, int *exitCodeOut) {
+static NSData *FetchURLViaVlessCoreCurl(NSString *urlString, BOOL allowInsecureFetch, BOOL useHappHeaders, NSString **errOut, NSString **headersOut, int *exitCodeOut) {
     const char *curl_path = "/usr/bin/vless-core-curl";
     const char *ca_bundle_path = "/usr/share/vless-core/cacert.pem";
 
@@ -1035,6 +1055,34 @@ static NSData *FetchURLViaVlessCoreCurl(NSString *urlString, BOOL allowInsecureF
     const char *hwid_c = [hwid UTF8String];
     if (hwid_c && *hwid_c) {
         snprintf(hwid_header, sizeof(hwid_header), "X-HWID: %s", hwid_c);
+    }
+
+    char happ_locale_header[256];
+    char happ_os_header[64];
+    char happ_os_version_header[128];
+    char happ_model_header[256];
+    memset(happ_locale_header, 0, sizeof(happ_locale_header));
+    memset(happ_os_header, 0, sizeof(happ_os_header));
+    memset(happ_os_version_header, 0, sizeof(happ_os_version_header));
+    memset(happ_model_header, 0, sizeof(happ_model_header));
+    if (useHappHeaders) {
+        UIDevice *device = [UIDevice currentDevice];
+        NSString *locale = [[NSLocale currentLocale] objectForKey:NSLocaleLanguageCode];
+        NSString *systemVersion = TrimSimpleString([device systemVersion]);
+        NSString *model = TrimSimpleString([device model]);
+        const char *locale_c = [locale UTF8String];
+        const char *system_version_c = [systemVersion UTF8String];
+        const char *model_c = [model UTF8String];
+        if (locale_c && *locale_c) {
+            snprintf(happ_locale_header, sizeof(happ_locale_header), "X-Device-Locale: %s", locale_c);
+        }
+        snprintf(happ_os_header, sizeof(happ_os_header), "%s", "X-Device-OS: iOS");
+        if (system_version_c && *system_version_c) {
+            snprintf(happ_os_version_header, sizeof(happ_os_version_header), "X-Ver-OS: %s", system_version_c);
+        }
+        if (model_c && *model_c) {
+            snprintf(happ_model_header, sizeof(happ_model_header), "X-Device-Model: %s", model_c);
+        }
     }
 
     char out_tmpl[] = "/tmp/vlesscore-sub-out-XXXXXX";
@@ -1085,7 +1133,7 @@ static NSData *FetchURLViaVlessCoreCurl(NSString *urlString, BOOL allowInsecureF
         close(out_fd);
         close(err_fd);
 
-        char *argv[32];
+        char *argv[44];
         int argc = 0;
         argv[argc++] = (char *)"vless-core-curl";
         argv[argc++] = (char *)"--fail";
@@ -1102,6 +1150,27 @@ static NSData *FetchURLViaVlessCoreCurl(NSString *urlString, BOOL allowInsecureF
         argv[argc++] = (char *)"X25519:P-256:P-384";
         argv[argc++] = (char *)"-D";
         argv[argc++] = hdr_tmpl;
+
+        if (useHappHeaders) {
+            argv[argc++] = (char *)"--user-agent";
+            argv[argc++] = (char *)[kHappSubscriptionUserAgent UTF8String];
+            if (happ_locale_header[0] != '\0') {
+                argv[argc++] = (char *)"-H";
+                argv[argc++] = happ_locale_header;
+            }
+            if (happ_os_header[0] != '\0') {
+                argv[argc++] = (char *)"-H";
+                argv[argc++] = happ_os_header;
+            }
+            if (happ_os_version_header[0] != '\0') {
+                argv[argc++] = (char *)"-H";
+                argv[argc++] = happ_os_version_header;
+            }
+            if (happ_model_header[0] != '\0') {
+                argv[argc++] = (char *)"-H";
+                argv[argc++] = happ_model_header;
+            }
+        }
 
         if (allowInsecureFetch) {
             argv[argc++] = (char *)"--insecure";
@@ -1887,7 +1956,7 @@ static UIImage *MakeIconImage(VCIconType type, CGFloat size, BOOL active) {
         @"Q: How can I delete my config/subscription?\n"
         @"A: Just swipe on it from right to the left.\n\n"
         @"Q: Why isn't the subscription added?\n"
-        @"A: The app accepts direct vless:// or socks5:// links, or http(s) subscription URLs that return valid config entries. "
+        @"A: The app accepts direct vless:// or socks5:// links, happ://add/, happ://crypt4/ and happ://crypt5/ links, or http(s) subscription URLs that return valid config entries. "
         @"If your provider blocks requests, redirects heavily, or returns an empty list, import will fail.\n\n"
         @"Q: Which protocols are supported?\n"
         @"A: VLESS and SOCKS5 links are supported. For now, supported sets are vless tcp+reality with omitted flow or xtls-rprx-vision, vless tcp+tls with omitted flow or xtls-rprx-vision, vless xhttp+tls, vless xhttp+reality, vless ws+tls, vless ws+none, and [socks5]. "
@@ -2939,7 +3008,7 @@ static UIImage *MakeIconImage(VCIconType type, CGFloat size, BOOL active) {
         if ([availableTypes containsObject:kVCQRMetadataType]) {
             [_metadataOutput setMetadataObjectTypes:[NSArray arrayWithObject:kVCQRMetadataType]];
             _metadataCanScanQR = YES;
-            _hintLabel.text = @"Point camera at QR code with vless://, socks5://, or subscription URL";
+            _hintLabel.text = @"Point camera at a config, HAPP, or subscription QR code";
             return;
         }
         [_metadataOutput setMetadataObjectTypes:availableTypes];
@@ -2961,7 +3030,7 @@ static UIImage *MakeIconImage(VCIconType type, CGFloat size, BOOL active) {
     _hintLabel.font = [UIFont boldSystemFontOfSize:16.0];
     _hintLabel.textAlignment = NSTextAlignmentCenter;
     _hintLabel.numberOfLines = 2;
-    _hintLabel.text = @"Point camera at QR code with vless://, socks5://, or subscription URL";
+    _hintLabel.text = @"Point camera at a config, HAPP, or subscription QR code";
     [self.view addSubview:_hintLabel];
 
     _cancelButton = [UIButton buttonWithType:UIButtonTypeCustom];
@@ -3188,6 +3257,7 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
     BOOL _didRunLaunchAutoUpdate;
     BOOL _launchAutoUpdateInProgress;
     BOOL _queuedMainMarqueeRelayout;
+    BOOL _pendingInsecureImportUsesHappHeaders;
 }
 - (NSString *)shortUpdateFailureTextForSubscription:(NSDictionary *)sub errorText:(NSString *)errorText;
 - (void)showSubscriptionUpdateFailures:(NSArray *)failureTexts;
@@ -3734,7 +3804,7 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
     if ([trim length] == 0) return NO;
 
     NSString *lower = [trim lowercaseString];
-    if ([lower hasPrefix:@"http://"] || [lower hasPrefix:@"https://"] || [lower hasPrefix:@"vless://"] || [lower hasPrefix:@"socks5://"]) return YES;
+    if ([lower hasPrefix:@"http://"] || [lower hasPrefix:@"https://"] || [lower hasPrefix:@"vless://"] || [lower hasPrefix:@"socks5://"] || [lower hasPrefix:@"happ://"]) return YES;
     if ([trim rangeOfString:@"/"].location != NSNotFound) return YES;
     if ([trim rangeOfString:@"."].location != NSNotFound) return YES;
     if ([trim rangeOfString:@":"].location != NSNotFound) return YES;
@@ -4865,7 +4935,7 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
     }
 
     NSError *reErr = nil;
-    NSRegularExpression *re = [NSRegularExpression regularExpressionWithPattern:@"(?:vless://|socks5://|https?://)[^\\s\"'<>]+"
+    NSRegularExpression *re = [NSRegularExpression regularExpressionWithPattern:@"(?:vless://|socks5://|happ://(?:add|crypt4|crypt5)/|https?://)[^\\s\"'<>]+"
                                                                          options:NSRegularExpressionCaseInsensitive
                                                                            error:&reErr];
     if (!re || reErr) {
@@ -4889,6 +4959,9 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
         NSString *lower = [link lowercaseString];
         if (![lower hasPrefix:@"vless://"] &&
             ![lower hasPrefix:@"socks5://"] &&
+            ![lower hasPrefix:kHappAddPrefix] &&
+            ![lower hasPrefix:@"happ://crypt4/"] &&
+            ![lower hasPrefix:@"happ://crypt5/"] &&
             ![lower hasPrefix:@"http://"] &&
             ![lower hasPrefix:@"https://"]) {
             continue;
@@ -4901,6 +4974,203 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
     return out;
 }
 
+- (NSString *)happJSONStringValue:(id)value {
+    if ([value isKindOfClass:[NSString class]]) return (NSString *)value;
+    if ([value isKindOfClass:[NSNumber class]]) return [(NSNumber *)value stringValue];
+    return nil;
+}
+
+- (NSDictionary *)happJSONDictionaryValue:(id)value {
+    return [value isKindOfClass:[NSDictionary class]] ? (NSDictionary *)value : nil;
+}
+
+- (NSArray *)happJSONArrayValue:(id)value {
+    return [value isKindOfClass:[NSArray class]] ? (NSArray *)value : nil;
+}
+
+- (NSString *)percentEncodedHappURIValue:(NSString *)value {
+    if (![value isKindOfClass:[NSString class]]) return @"";
+    CFStringRef encoded = CFURLCreateStringByAddingPercentEscapes(kCFAllocatorDefault,
+                                                                  (CFStringRef)value,
+                                                                  NULL,
+                                                                  CFSTR(":/?#[]@!$&'()*+,;=%"),
+                                                                  kCFStringEncodingUTF8);
+    if (!encoded) return @"";
+    return [(NSString *)encoded autorelease];
+}
+
+- (NSString *)happJSONStringFromDictionary:(NSDictionary *)dictionary {
+    if (![dictionary isKindOfClass:[NSDictionary class]] || [dictionary count] == 0) return nil;
+    if (![NSJSONSerialization isValidJSONObject:dictionary]) return nil;
+
+    NSError *error = nil;
+    NSData *data = [NSJSONSerialization dataWithJSONObject:dictionary options:0 error:&error];
+    if (!data || error) return nil;
+    return [[[NSString alloc] initWithData:data encoding:NSUTF8StringEncoding] autorelease];
+}
+
+- (void)addHappURIQueryValue:(NSString *)value key:(NSString *)key toParts:(NSMutableArray *)parts {
+    if (![value isKindOfClass:[NSString class]] || [value length] == 0) return;
+    if (![key isKindOfClass:[NSString class]] || [key length] == 0) return;
+    [parts addObject:[NSString stringWithFormat:@"%@=%@", key, [self percentEncodedHappURIValue:value]]];
+}
+
+- (NSString *)vlessURIFromHappJSONConfig:(NSDictionary *)config {
+    if (![config isKindOfClass:[NSDictionary class]]) return nil;
+
+    NSArray *outbounds = [self happJSONArrayValue:[config objectForKey:@"outbounds"]];
+    NSDictionary *proxy = nil;
+    for (id value in outbounds) {
+        NSDictionary *candidate = [self happJSONDictionaryValue:value];
+        NSString *protocol = [[self happJSONStringValue:[candidate objectForKey:@"protocol"]] lowercaseString];
+        NSString *tag = [[self happJSONStringValue:[candidate objectForKey:@"tag"]] lowercaseString];
+        if ([protocol isEqualToString:@"vless"] && [tag isEqualToString:@"proxy"]) {
+            proxy = candidate;
+            break;
+        }
+        if (!proxy && [protocol isEqualToString:@"vless"]) proxy = candidate;
+    }
+    if (!proxy) return nil;
+
+    NSDictionary *settings = [self happJSONDictionaryValue:[proxy objectForKey:@"settings"]];
+    NSArray *vnext = [self happJSONArrayValue:[settings objectForKey:@"vnext"]];
+    NSDictionary *server = ([vnext count] > 0) ? [self happJSONDictionaryValue:[vnext objectAtIndex:0]] : nil;
+    NSArray *users = [self happJSONArrayValue:[server objectForKey:@"users"]];
+    NSDictionary *user = ([users count] > 0) ? [self happJSONDictionaryValue:[users objectAtIndex:0]] : nil;
+
+    NSString *address = [self safeTrim:[self happJSONStringValue:[server objectForKey:@"address"]]];
+    NSString *portText = [self safeTrim:[self happJSONStringValue:[server objectForKey:@"port"]]];
+    NSString *uuid = [self safeTrim:[self happJSONStringValue:[user objectForKey:@"id"]]];
+    NSString *encryption = [[self safeTrim:[self happJSONStringValue:[user objectForKey:@"encryption"]]] lowercaseString];
+    if ([address length] == 0 || [portText length] == 0 || [uuid length] == 0) return nil;
+    NSInteger port = [portText integerValue];
+    if (port <= 0 || port > 65535) return nil;
+    if ([encryption length] > 0 && ![encryption isEqualToString:@"none"]) return nil;
+
+    NSDictionary *stream = [self happJSONDictionaryValue:[proxy objectForKey:@"streamSettings"]];
+    NSString *network = [[self safeTrim:[self happJSONStringValue:[stream objectForKey:@"network"]]] lowercaseString];
+    NSString *security = [[self safeTrim:[self happJSONStringValue:[stream objectForKey:@"security"]]] lowercaseString];
+    if ([network isEqualToString:@"splithttp"]) network = @"xhttp";
+    if ([network length] == 0) network = @"tcp";
+    if ([security length] == 0) security = @"none";
+
+    BOOL tcpSupported = [network isEqualToString:@"tcp"] &&
+                        ([security isEqualToString:@"tls"] || [security isEqualToString:@"reality"]);
+    BOOL xhttpSupported = [network isEqualToString:@"xhttp"] &&
+                          ([security isEqualToString:@"tls"] || [security isEqualToString:@"reality"]);
+    BOOL wsSupported = [network isEqualToString:@"ws"] &&
+                       ([security isEqualToString:@"tls"] || [security isEqualToString:@"none"]);
+    if (!tcpSupported && !xhttpSupported && !wsSupported) return nil;
+
+    NSMutableArray *query = [NSMutableArray arrayWithObjects:@"encryption=none", nil];
+    [self addHappURIQueryValue:network key:@"type" toParts:query];
+    [self addHappURIQueryValue:security key:@"security" toParts:query];
+
+    NSString *flow = [self safeTrim:[self happJSONStringValue:[user objectForKey:@"flow"]]];
+    if (tcpSupported && [flow length] > 0) {
+        if (![flow isEqualToString:@"xtls-rprx-vision"]) return nil;
+        [self addHappURIQueryValue:flow key:@"flow" toParts:query];
+    }
+
+    NSDictionary *securitySettings = nil;
+    if ([security isEqualToString:@"reality"]) {
+        securitySettings = [self happJSONDictionaryValue:[stream objectForKey:@"realitySettings"]];
+    } else if ([security isEqualToString:@"tls"]) {
+        securitySettings = [self happJSONDictionaryValue:[stream objectForKey:@"tlsSettings"]];
+    }
+
+    NSString *sni = [self safeTrim:[self happJSONStringValue:[securitySettings objectForKey:@"serverName"]]];
+    NSString *fingerprint = [self safeTrim:[self happJSONStringValue:[securitySettings objectForKey:@"fingerprint"]]];
+    [self addHappURIQueryValue:sni key:@"sni" toParts:query];
+    [self addHappURIQueryValue:fingerprint key:@"fp" toParts:query];
+
+    NSArray *alpnValues = [self happJSONArrayValue:[securitySettings objectForKey:@"alpn"]];
+    NSMutableArray *cleanALPN = [NSMutableArray array];
+    for (id value in alpnValues) {
+        NSString *alpn = [self safeTrim:[self happJSONStringValue:value]];
+        if ([alpn length] > 0) [cleanALPN addObject:alpn];
+    }
+    if ([cleanALPN count] > 0) {
+        [self addHappURIQueryValue:[cleanALPN componentsJoinedByString:@","] key:@"alpn" toParts:query];
+    }
+
+    id allowInsecure = [securitySettings objectForKey:@"allowInsecure"];
+    if ([allowInsecure respondsToSelector:@selector(boolValue)] && [allowInsecure boolValue]) {
+        [query addObject:@"allowInsecure=1"];
+    }
+
+    if ([security isEqualToString:@"reality"]) {
+        NSString *publicKey = [self safeTrim:[self happJSONStringValue:[securitySettings objectForKey:@"publicKey"]]];
+        NSString *shortID = [self safeTrim:[self happJSONStringValue:[securitySettings objectForKey:@"shortId"]]];
+        NSString *spiderX = [self safeTrim:[self happJSONStringValue:[securitySettings objectForKey:@"spiderX"]]];
+        if ([publicKey length] == 0) return nil;
+        [self addHappURIQueryValue:publicKey key:@"pbk" toParts:query];
+        [self addHappURIQueryValue:shortID key:@"sid" toParts:query];
+        [self addHappURIQueryValue:spiderX key:@"spx" toParts:query];
+    }
+
+    if (xhttpSupported) {
+        NSDictionary *xhttp = [self happJSONDictionaryValue:[stream objectForKey:@"xhttpSettings"]];
+        NSString *path = [self safeTrim:[self happJSONStringValue:[xhttp objectForKey:@"path"]]];
+        NSString *host = [self safeTrim:[self happJSONStringValue:[xhttp objectForKey:@"host"]]];
+        NSString *mode = [self safeTrim:[self happJSONStringValue:[xhttp objectForKey:@"mode"]]];
+        NSDictionary *extra = [self happJSONDictionaryValue:[xhttp objectForKey:@"extra"]];
+        [self addHappURIQueryValue:([path length] > 0 ? path : @"/") key:@"path" toParts:query];
+        [self addHappURIQueryValue:host key:@"host" toParts:query];
+        [self addHappURIQueryValue:mode key:@"mode" toParts:query];
+        [self addHappURIQueryValue:[self happJSONStringFromDictionary:extra] key:@"extra" toParts:query];
+    } else if (wsSupported) {
+        NSDictionary *ws = [self happJSONDictionaryValue:[stream objectForKey:@"wsSettings"]];
+        NSString *path = [self safeTrim:[self happJSONStringValue:[ws objectForKey:@"path"]]];
+        NSDictionary *headers = [self happJSONDictionaryValue:[ws objectForKey:@"headers"]];
+        NSString *host = [self safeTrim:[self happJSONStringValue:[headers objectForKey:@"Host"]]];
+        if ([host length] == 0) host = [self safeTrim:[self happJSONStringValue:[headers objectForKey:@"host"]]];
+        [self addHappURIQueryValue:([path length] > 0 ? path : @"/") key:@"path" toParts:query];
+        [self addHappURIQueryValue:host key:@"host" toParts:query];
+    }
+
+    NSString *authorityHost = address;
+    if ([address rangeOfString:@":"].location != NSNotFound && ![address hasPrefix:@"["]) {
+        authorityHost = [NSString stringWithFormat:@"[%@]", address];
+    }
+    NSString *title = [self safeTrim:[self happJSONStringValue:[config objectForKey:@"remarks"]]];
+    NSString *fragment = ([title length] > 0)
+                             ? [NSString stringWithFormat:@"#%@", [self percentEncodedHappURIValue:title]]
+                             : @"";
+    return [NSString stringWithFormat:@"vless://%@@%@:%ld?%@%@",
+                                      uuid,
+                                      authorityHost,
+                                      (long)port,
+                                      [query componentsJoinedByString:@"&"],
+                                      fragment];
+}
+
+- (NSArray *)extractConfigURIsFromHappJSONData:(NSData *)data {
+    if (!data || [data length] == 0) return [NSArray array];
+
+    NSError *error = nil;
+    id root = [NSJSONSerialization JSONObjectWithData:data options:0 error:&error];
+    if (!root || error) return [NSArray array];
+
+    NSArray *configs = [self happJSONArrayValue:root];
+    if (!configs && [root isKindOfClass:[NSDictionary class]]) {
+        NSDictionary *dictionary = (NSDictionary *)root;
+        configs = [self happJSONArrayValue:[dictionary objectForKey:@"configs"]];
+        if (!configs && [dictionary objectForKey:@"outbounds"]) {
+            configs = [NSArray arrayWithObject:dictionary];
+        }
+    }
+    if (![configs isKindOfClass:[NSArray class]]) return [NSArray array];
+
+    NSMutableArray *uris = [NSMutableArray array];
+    for (id value in configs) {
+        NSString *uri = [self vlessURIFromHappJSONConfig:[self happJSONDictionaryValue:value]];
+        if ([uri length] == 0 || [uris containsObject:uri]) continue;
+        if ([self isSupportedConfigTupleForURI:uri]) [uris addObject:uri];
+    }
+    return uris;
+}
+
 - (NSArray *)parseSubscriptionData:(NSData *)data {
     if (!data || [data length] == 0) return [NSArray array];
 
@@ -4910,6 +5180,9 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
     NSArray *uris = [NSArray array];
     if (raw) {
         uris = [self extractConfigURIsFromText:raw];
+        if ([uris count] > 0) return [self sanitizeSubscriptionURIs:uris];
+
+        uris = [self extractConfigURIsFromHappJSONData:data];
         if ([uris count] > 0) return [self sanitizeSubscriptionURIs:uris];
 
         NSString *b64 = [[raw componentsSeparatedByCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]] componentsJoinedByString:@""];
@@ -4975,14 +5248,27 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
         return nil;
     }
 
-    NSURL *url = [NSURL URLWithString:urlString];
+    BOOL useHappHeaders = SubscriptionDictionaryUsesHappHeaders(sub);
+    NSString *fetchURLString = urlString;
+    if (useHappHeaders && [self isHappEncryptedLink:urlString]) {
+        NSString *decryptError = nil;
+        fetchURLString = [self decryptedHappLink:urlString errorText:&decryptError];
+        if (![fetchURLString isKindOfClass:[NSString class]] || [fetchURLString length] == 0) {
+            if (errorTextOut) {
+                *errorTextOut = ([decryptError length] > 0) ? decryptError : @"HAPP link decryption failed";
+            }
+            return nil;
+        }
+    }
+
+    NSURL *url = [NSURL URLWithString:fetchURLString];
     if (!url) {
         if (errorTextOut) *errorTextOut = @"Subscription URL is invalid";
         return nil;
     }
 
-    NSString *nameFromURL = [self subscriptionNameFromURLString:urlString];
-    NSString *hostName = [self hostFromURLString:urlString];
+    NSString *nameFromURL = useHappHeaders ? @"HAPP subscription" : [self subscriptionNameFromURLString:fetchURLString];
+    NSString *hostName = useHappHeaders ? @"HAPP subscription" : [self hostFromURLString:fetchURLString];
     NSString *nameFromMeta = nil;
     NSDictionary *userInfoFromMeta = nil;
     BOOL allowInsecureFetch = SubscriptionDictionaryAllowsInsecureFetch(sub);
@@ -4990,7 +5276,7 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
     NSString *fetchErr = nil;
     NSString *curlHeaders = nil;
     int curlExitCode = -1;
-    NSData *data = FetchURLViaVlessCoreCurl(urlString, allowInsecureFetch, &fetchErr, &curlHeaders, &curlExitCode);
+    NSData *data = FetchURLViaVlessCoreCurl(fetchURLString, allowInsecureFetch, useHappHeaders, &fetchErr, &curlHeaders, &curlExitCode);
     if (!data && !allowInsecureFetch && CurlExitCodeCanRetryInsecurely(curlExitCode)) {
         if (insecureRetryAvailableOut) *insecureRetryAvailableOut = YES;
     }
@@ -5007,6 +5293,17 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
         NSString *hwid = SubscriptionHWID();
         if ([hwid isKindOfClass:[NSString class]] && [hwid length] > 0) {
             [req setValue:hwid forHTTPHeaderField:@"X-HWID"];
+        }
+        if (useHappHeaders) {
+            [req setValue:kHappSubscriptionUserAgent forHTTPHeaderField:@"User-Agent"];
+            UIDevice *device = [UIDevice currentDevice];
+            NSString *locale = [[NSLocale currentLocale] objectForKey:NSLocaleLanguageCode];
+            NSString *systemVersion = TrimSimpleString([device systemVersion]);
+            NSString *model = TrimSimpleString([device model]);
+            if ([locale length] > 0) [req setValue:locale forHTTPHeaderField:@"X-Device-Locale"];
+            [req setValue:@"iOS" forHTTPHeaderField:@"X-Device-OS"];
+            if ([systemVersion length] > 0) [req setValue:systemVersion forHTTPHeaderField:@"X-Ver-OS"];
+            if ([model length] > 0) [req setValue:model forHTTPHeaderField:@"X-Device-Model"];
         }
         NSURLResponse *resp = nil;
         NSError *err = nil;
@@ -5418,8 +5715,10 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
     return -1;
 }
 
-- (NSDictionary *)subscriptionDictionaryForURL:(NSString *)urlString allowInsecureFetch:(BOOL)allowInsecureFetch {
-    NSString *name = [self subscriptionNameFromURLString:urlString];
+- (NSDictionary *)subscriptionDictionaryForURL:(NSString *)urlString
+                             allowInsecureFetch:(BOOL)allowInsecureFetch
+                                     happSource:(BOOL)happSource {
+    NSString *name = happSource ? @"HAPP subscription" : [self subscriptionNameFromURLString:urlString];
     NSMutableDictionary *sub = [NSMutableDictionary dictionaryWithObjectsAndKeys:
                                 name, @"name",
                                 urlString, @"url",
@@ -5428,7 +5727,16 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
     if (allowInsecureFetch) {
         [sub setObject:[NSNumber numberWithBool:YES] forKey:kSubscriptionAllowInsecureFetchKey];
     }
+    if (happSource) {
+        [sub setObject:[NSNumber numberWithBool:YES] forKey:kSubscriptionHappSourceKey];
+    }
     return sub;
+}
+
+- (NSDictionary *)subscriptionDictionaryForURL:(NSString *)urlString allowInsecureFetch:(BOOL)allowInsecureFetch {
+    return [self subscriptionDictionaryForURL:urlString
+                           allowInsecureFetch:allowInsecureFetch
+                                   happSource:NO];
 }
 
 - (void)selectSubscriptionAtIndex:(NSInteger)subIndex {
@@ -5441,7 +5749,9 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
     [_tableView reloadData];
 }
 
-- (void)showInsecureSubscriptionImportPromptForURLs:(NSArray *)urlStrings fromBatchImport:(BOOL)fromBatchImport {
+- (void)showInsecureSubscriptionImportPromptForURLs:(NSArray *)urlStrings
+                                    fromBatchImport:(BOOL)fromBatchImport
+                                         happSource:(BOOL)happSource {
     NSMutableArray *cleanURLs = [NSMutableArray array];
     for (id obj in urlStrings) {
         if (![obj isKindOfClass:[NSString class]]) continue;
@@ -5459,6 +5769,7 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
 
     [_pendingInsecureImportURLs release];
     _pendingInsecureImportURLs = [cleanURLs copy];
+    _pendingInsecureImportUsesHappHeaders = happSource;
 
     NSUInteger count = [cleanURLs count];
     NSString *detail = nil;
@@ -5480,8 +5791,20 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
                   ok:NO];
 }
 
+- (void)showInsecureSubscriptionImportPromptForURLs:(NSArray *)urlStrings fromBatchImport:(BOOL)fromBatchImport {
+    [self showInsecureSubscriptionImportPromptForURLs:urlStrings
+                                      fromBatchImport:fromBatchImport
+                                           happSource:NO];
+}
+
 - (void)showInsecureSubscriptionImportPromptForURL:(NSString *)urlString {
     [self showInsecureSubscriptionImportPromptForURLs:[NSArray arrayWithObject:urlString] fromBatchImport:NO];
+}
+
+- (void)showInsecureSubscriptionImportPromptForURL:(NSString *)urlString happSource:(BOOL)happSource {
+    [self showInsecureSubscriptionImportPromptForURLs:[NSArray arrayWithObject:urlString]
+                                      fromBatchImport:NO
+                                           happSource:happSource];
 }
 
 - (void)commitUpdatedSubscription:(NSDictionary *)updated existingIndex:(NSInteger)existingIndex {
@@ -5618,7 +5941,20 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
         NSUInteger failedCount = 0;
 
         for (NSString *urlString in urlsToImport) {
-            NSDictionary *sub = [self subscriptionDictionaryForURL:urlString allowInsecureFetch:allowInsecureFetch];
+            BOOL happAddSource = [self isHappAddLink:urlString];
+            BOOL happSource = happAddSource || [self isHappEncryptedLink:urlString];
+            NSString *subscriptionURL = happAddSource ? [self targetFromHappAddLink:urlString] : urlString;
+            if (happAddSource &&
+                (![subscriptionURL isKindOfClass:[NSString class]] ||
+                 ![self isSubscriptionURL:subscriptionURL])) {
+                failedCount++;
+                [failureTexts addObject:[self shortImportFailureTextForURL:urlString
+                                                                errorText:@"HAPP add link does not contain a valid subscription URL"]];
+                continue;
+            }
+            NSDictionary *sub = [self subscriptionDictionaryForURL:subscriptionURL
+                                                 allowInsecureFetch:allowInsecureFetch
+                                                         happSource:happSource];
             NSString *errorText = nil;
             BOOL insecureRetryAvailable = NO;
             NSDictionary *updated = [self updatedSubscriptionDictionaryFromSource:sub
@@ -5684,8 +6020,16 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
             [self showStatus:status ok:([parts count] > 0 || [insecureURLs count] > 0)];
 
             if ([insecureURLs count] > 0) {
+                BOOL allHappSources = YES;
+                for (NSString *urlString in insecureURLs) {
+                    if (![self isHappEncryptedLink:urlString] && ![self isHappAddLink:urlString]) {
+                        allHappSources = NO;
+                        break;
+                    }
+                }
                 [self showInsecureSubscriptionImportPromptForURLs:insecureURLs
-                                                   fromBatchImport:([urlsToImport count] > 1)];
+                                                   fromBatchImport:([urlsToImport count] > 1)
+                                                        happSource:allHappSources];
             }
             if ([failureTexts count] > 0) {
                 [self showSubscriptionImportFailures:failureTexts];
@@ -5737,7 +6081,9 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
     [self showStatus:@"Configuration imported" ok:YES];
 }
 
-- (void)importSubscriptionURL:(NSString *)urlString allowInsecureFetch:(BOOL)allowInsecureFetch {
+- (void)importSubscriptionURL:(NSString *)urlString
+           allowInsecureFetch:(BOOL)allowInsecureFetch
+                   happSource:(BOOL)happSource {
     NSString *normalizedURL = [self safeTrim:urlString];
     if (![normalizedURL isKindOfClass:[NSString class]] || [normalizedURL length] == 0) {
         [self showStatus:@"Invalid subscription URL" ok:NO];
@@ -5748,6 +6094,12 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
     if (existing >= 0) {
         NSArray *items = [self subscriptionItemsAtIndex:existing];
         if (!allowInsecureFetch && [items count] > 0) {
+            if (happSource && !SubscriptionDictionaryUsesHappHeaders([_subscriptions objectAtIndex:existing])) {
+                NSMutableDictionary *stored = [NSMutableDictionary dictionaryWithDictionary:[_subscriptions objectAtIndex:existing]];
+                [stored setObject:[NSNumber numberWithBool:YES] forKey:kSubscriptionHappSourceKey];
+                [_subscriptions replaceObjectAtIndex:existing withObject:stored];
+                [self saveData];
+            }
             [self selectSubscriptionAtIndex:existing];
             [self showStatus:@"Subscription already exists (skipped)" ok:YES];
             return;
@@ -5757,6 +6109,9 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
         [sub setObject:normalizedURL forKey:@"url"];
         if (allowInsecureFetch) {
             [sub setObject:[NSNumber numberWithBool:YES] forKey:kSubscriptionAllowInsecureFetchKey];
+        }
+        if (happSource) {
+            [sub setObject:[NSNumber numberWithBool:YES] forKey:kSubscriptionHappSourceKey];
         }
 
         NSString *errorText = nil;
@@ -5772,7 +6127,8 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
         if (!allowInsecureFetch &&
             !SubscriptionDictionaryAllowsInsecureFetch(sub) &&
             insecureRetryAvailable) {
-            [self showInsecureSubscriptionImportPromptForURL:normalizedURL];
+            [self showInsecureSubscriptionImportPromptForURL:normalizedURL
+                                                  happSource:SubscriptionDictionaryUsesHappHeaders(sub)];
             return;
         }
 
@@ -5780,7 +6136,9 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
         return;
     }
 
-    NSDictionary *sub = [self subscriptionDictionaryForURL:normalizedURL allowInsecureFetch:allowInsecureFetch];
+    NSDictionary *sub = [self subscriptionDictionaryForURL:normalizedURL
+                                         allowInsecureFetch:allowInsecureFetch
+                                                 happSource:happSource];
     NSString *errorText = nil;
     BOOL insecureRetryAvailable = NO;
     NSDictionary *updated = [self updatedSubscriptionDictionaryFromSource:sub
@@ -5792,21 +6150,140 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
     }
 
     if (!allowInsecureFetch && insecureRetryAvailable) {
-        [self showInsecureSubscriptionImportPromptForURL:normalizedURL];
+        [self showInsecureSubscriptionImportPromptForURL:normalizedURL happSource:happSource];
         return;
     }
 
     [self showStatus:([errorText length] > 0 ? errorText : @"Subscription import failed") ok:NO];
 }
 
+- (void)importSubscriptionURL:(NSString *)urlString allowInsecureFetch:(BOOL)allowInsecureFetch {
+    [self importSubscriptionURL:urlString allowInsecureFetch:allowInsecureFetch happSource:NO];
+}
+
 - (void)importSubscriptionURL:(NSString *)urlString {
     [self importSubscriptionURL:urlString allowInsecureFetch:NO];
+}
+
+- (BOOL)isHappEncryptedLink:(NSString *)text {
+    if (![text isKindOfClass:[NSString class]] || [text length] == 0) return NO;
+    const char *utf8 = [text UTF8String];
+    return utf8 && VCHappIsEncryptedLink(utf8);
+}
+
+- (BOOL)isHappAddLink:(NSString *)text {
+    if (![text isKindOfClass:[NSString class]] || [text length] == 0) return NO;
+    return [[text lowercaseString] hasPrefix:kHappAddPrefix];
+}
+
+- (NSString *)targetFromHappAddLink:(NSString *)link {
+    if (![self isHappAddLink:link] || [link length] <= [kHappAddPrefix length]) return nil;
+    return [self safeTrim:[link substringFromIndex:[kHappAddPrefix length]]];
+}
+
+- (NSString *)decryptedHappLink:(NSString *)link errorText:(NSString **)errorTextOut {
+    if (errorTextOut) *errorTextOut = nil;
+
+    const char *utf8 = [link UTF8String];
+    if (!utf8) {
+        if (errorTextOut) *errorTextOut = @"HAPP link is not valid UTF-8";
+        return nil;
+    }
+
+    unsigned char *plaintext = NULL;
+    size_t plaintextLength = 0;
+    char error[256];
+    char mode[16];
+    memset(error, 0, sizeof(error));
+    memset(mode, 0, sizeof(mode));
+    int result = VCHappDecryptLink(utf8,
+                                   &plaintext,
+                                   &plaintextLength,
+                                   mode,
+                                   sizeof(mode),
+                                   error,
+                                   sizeof(error));
+    if (result != 1 || !plaintext || plaintextLength == 0) {
+        if (plaintext) VCHappFreePlaintext(plaintext);
+        if (errorTextOut) {
+            NSString *detail = (error[0] != '\0') ? [NSString stringWithUTF8String:error] : nil;
+            *errorTextOut = ([detail length] > 0)
+                                ? [NSString stringWithFormat:@"Invalid HAPP link: %@", detail]
+                                : @"Invalid HAPP link";
+        }
+        return nil;
+    }
+
+    NSString *decoded = [[[NSString alloc] initWithBytes:plaintext
+                                                   length:plaintextLength
+                                                 encoding:NSUTF8StringEncoding] autorelease];
+    VCHappFreePlaintext(plaintext);
+    decoded = [self safeTrim:decoded];
+    if (![decoded isKindOfClass:[NSString class]] || [decoded length] == 0) {
+        if (errorTextOut) *errorTextOut = @"HAPP payload is not valid UTF-8";
+        return nil;
+    }
+    return decoded;
+}
+
+- (void)importHappEncryptedLink:(NSString *)link {
+    NSString *errorText = nil;
+    NSString *decoded = [self decryptedHappLink:link errorText:&errorText];
+    if (![decoded isKindOfClass:[NSString class]] || [decoded length] == 0) {
+        [self showStatus:([errorText length] > 0 ? errorText : @"Invalid HAPP link") ok:NO];
+        return;
+    }
+
+    if ([self isDirectConfigURI:decoded]) {
+        [self importDirectURI:decoded];
+        return;
+    }
+    if ([self isSubscriptionURL:decoded]) {
+        [self importSubscriptionURL:link allowInsecureFetch:NO happSource:YES];
+        return;
+    }
+
+    [self showStatus:@"HAPP link does not contain a supported config or subscription URL" ok:NO];
+}
+
+- (void)importHappAddLink:(NSString *)link {
+    NSString *target = [self targetFromHappAddLink:link];
+    if (![target isKindOfClass:[NSString class]] || [target length] == 0) {
+        [self showStatus:@"HAPP add link does not contain an import URL" ok:NO];
+        return;
+    }
+
+    if ([self isDirectConfigURI:target]) {
+        [self importDirectURI:target];
+        return;
+    }
+    if ([self isSubscriptionURL:target]) {
+        [self importSubscriptionURL:target allowInsecureFetch:NO happSource:YES];
+        return;
+    }
+
+    [self showStatus:@"HAPP add link does not contain a supported config or subscription URL" ok:NO];
 }
 
 - (void)importTextEntry:(NSString *)rawText {
     NSString *text = [self safeTrim:rawText];
     if ([text length] == 0) {
         [self showStatus:@"Import text is empty" ok:NO];
+        return;
+    }
+
+    if ([self isHappEncryptedLink:text]) {
+        [self importHappEncryptedLink:text];
+        return;
+    }
+
+    if ([self isHappAddLink:text]) {
+        [self importHappAddLink:text];
+        return;
+    }
+
+    if ([[text lowercaseString] hasPrefix:@"happ://"]) {
+        [self showStatus:@"Unsupported HAPP link format (use happ://add/, crypt4/ or crypt5/)" ok:NO];
         return;
     }
 
@@ -5825,7 +6302,11 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
     if ([links count] > 0) {
         if ([links count] == 1) {
             NSString *single = [links objectAtIndex:0];
-            if ([self isDirectConfigURI:single]) {
+            if ([self isHappEncryptedLink:single]) {
+                [self importHappEncryptedLink:single];
+            } else if ([self isHappAddLink:single]) {
+                [self importHappAddLink:single];
+            } else if ([self isDirectConfigURI:single]) {
                 [self importDirectURI:single];
             } else if ([self isSubscriptionURL:single]) {
                 [self importSubscriptionURL:single];
@@ -5842,27 +6323,53 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
         NSMutableArray *subscriptionURLsToImport = [NSMutableArray array];
 
         for (NSString *link in links) {
-            if ([self isDirectConfigURI:link]) {
-                if ([self existingConfigIndexForURI:link] >= 0) {
+            NSString *importLink = link;
+            BOOL happEncryptedLink = [self isHappEncryptedLink:link];
+            BOOL happAddLink = [self isHappAddLink:link];
+            BOOL happLink = happEncryptedLink || happAddLink;
+            if (happEncryptedLink) {
+                NSString *decryptError = nil;
+                NSString *decoded = [self decryptedHappLink:link errorText:&decryptError];
+                if ([self isDirectConfigURI:decoded]) {
+                    importLink = decoded;
+                } else if ([self isSubscriptionURL:decoded]) {
+                    importLink = link;
+                } else {
+                    skippedSubs++;
+                    continue;
+                }
+            } else if (happAddLink) {
+                NSString *target = [self targetFromHappAddLink:link];
+                if ([self isDirectConfigURI:target] || [self isSubscriptionURL:target]) {
+                    importLink = target;
+                } else {
+                    skippedSubs++;
+                    continue;
+                }
+            }
+
+            if ([self isDirectConfigURI:importLink]) {
+                if ([self existingConfigIndexForURI:importLink] >= 0) {
                     skippedConfigs++;
                     continue;
                 }
 
-                NSString *name = [self displayNameForURI:link index:[_configs count]];
+                NSString *name = [self displayNameForURI:importLink index:[_configs count]];
                 NSDictionary *cfg = [NSDictionary dictionaryWithObjectsAndKeys:
                                      name, @"name",
-                                     link, @"uri",
+                                     importLink, @"uri",
                                      nil];
                 [_configs addObject:cfg];
                 importedConfigs++;
-            } else if ([self isSubscriptionURL:link]) {
-                if ([self existingSubscriptionIndexForURL:link] >= 0) {
+            } else if ([self isSubscriptionURL:importLink] || happLink) {
+                if ([self existingSubscriptionIndexForURL:importLink] >= 0) {
                     skippedSubs++;
                     continue;
                 }
 
-                if (![subscriptionURLsToImport containsObject:link]) {
-                    [subscriptionURLsToImport addObject:link];
+                NSString *queuedLink = happAddLink ? link : importLink;
+                if (![subscriptionURLsToImport containsObject:queuedLink]) {
+                    [subscriptionURLsToImport addObject:queuedLink];
                     pendingSubs++;
                 }
             }
@@ -5936,7 +6443,7 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
         return;
     }
 
-    [self showStatus:@"Unsupported import format (use vless://, socks5://, or http(s) subscription)" ok:NO];
+    [self showStatus:@"Unsupported import format (use vless://, socks5://, happ://add/, crypt4/ or crypt5/, or http(s) subscription)" ok:NO];
 }
 
 - (NSString *)decodeImportTextData:(NSData *)data {
@@ -7436,7 +7943,7 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
             [self startQRImportFlow];
         } else if (buttonIndex == 3) {
             UIAlertView *av = [[[UIAlertView alloc] initWithTitle:@"Manual Import"
-                                                          message:@"Paste vless://, socks5://, or subscription URL"
+                                                          message:@"Paste a config or subscription link"
                                                          delegate:self
                                                 cancelButtonTitle:@"Cancel"
                                                 otherButtonTitles:@"Import", nil] autorelease];
@@ -7444,7 +7951,7 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
             av.tag = VCAlertTagImportManual;
 
             UITextField *tf = [av textFieldAtIndex:0];
-            tf.placeholder = @"vless://..., socks5://..., or https://...";
+            tf.placeholder = @"vless://..., happ://add/..., or https://...";
             tf.clearButtonMode = UITextFieldViewModeWhileEditing;
             tf.keyboardType = UIKeyboardTypeURL;
             tf.autocapitalizationType = UITextAutocapitalizationTypeNone;
@@ -7532,13 +8039,20 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
 
     if (alertView.tag == VCAlertTagImportInsecureSubscription) {
         NSArray *urlStrings = [_pendingInsecureImportURLs retain];
+        BOOL useHappHeaders = _pendingInsecureImportUsesHappHeaders;
         [_pendingInsecureImportURLs release];
         _pendingInsecureImportURLs = nil;
+        _pendingInsecureImportUsesHappHeaders = NO;
 
         if (buttonIndex == 1) {
             if ([urlStrings count] == 1) {
                 NSString *urlString = [urlStrings objectAtIndex:0];
-                [self importSubscriptionURL:urlString allowInsecureFetch:YES];
+                if (useHappHeaders && [self isHappAddLink:urlString]) {
+                    urlString = [self targetFromHappAddLink:urlString];
+                }
+                [self importSubscriptionURL:urlString
+                         allowInsecureFetch:YES
+                                 happSource:useHappHeaders];
             } else if ([urlStrings count] > 1) {
                 [self startBackgroundSubscriptionImportForURLs:urlStrings
                                             allowInsecureFetch:YES
