@@ -5175,7 +5175,7 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
 
     UIButton *btn = [UIButton buttonWithType:UIButtonTypeCustom];
     btn.frame = CGRectMake(0, 0, 24, 24);
-    UIImage *pingIcon = LoadBundledIconTinted(@"icon-ping", 18.0f, VCPrimaryTextColor());
+    UIImage *pingIcon = LoadBundledIconTinted(@"icon-ping", 20.0f, VCPrimaryTextColor());
     [btn setImage:(pingIcon ? pingIcon : MakeIconImage(VCIconTypeWifi, 18.0f, NO)) forState:UIControlStateNormal];
     btn.tag = tag;
     [btn addTarget:self action:@selector(pingButtonPressed:) forControlEvents:UIControlEventTouchUpInside];
