@@ -154,6 +154,7 @@ typedef NS_ENUM(NSInteger, VCIconType) {
     VCIconTypeWifi = 7,
     VCIconTypeCheck = 8,
     VCIconTypeList = 9,
+    VCIconTypeReorder = 10,
 };
 
 static NSInteger const kVCSettingsTitleMarqueeTag = 7400;
@@ -164,6 +165,7 @@ static NSInteger const kVCMainDetailTailTag = 7412;
 static NSInteger const kVCMainSectionHeaderButtonTagBase = 7420;
 static NSInteger const kVCMainSectionHeaderCountTagBase = 7430;
 static NSInteger const kVCMainSectionHeaderChevronTagBase = 7440;
+static NSInteger const kVCMainSectionHeaderOrderButtonTagBase = 7450;
 static NSInteger const kVCSubscriptionInfoButtonTagBase = 30000;
 static CGFloat const kVCMainSectionHeaderHeight = 46.0f;
 static CGFloat const kVCDetailMarqueeGap = 4.0f;
@@ -1695,6 +1697,13 @@ static UIImage *MakeIconImage(VCIconType type, CGFloat size, BOOL active) {
             [dot fill];
             CGContextMoveToPoint(ctx, size * 0.34f, y);
             CGContextAddLineToPoint(ctx, size * 0.80f, y);
+        }
+        CGContextStrokePath(ctx);
+    } else if (type == VCIconTypeReorder) {
+        CGFloat ys[3] = { size * 0.28f, size * 0.50f, size * 0.72f };
+        for (int i = 0; i < 3; i++) {
+            CGContextMoveToPoint(ctx, size * 0.18f, ys[i]);
+            CGContextAddLineToPoint(ctx, size * 0.82f, ys[i]);
         }
         CGContextStrokePath(ctx);
     }
@@ -3656,6 +3665,7 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
     NSString *_pendingImportDoneStatus;
     NSArray *_pendingImportRefreshIndices;
     NSArray *_pendingInsecureImportURLs;
+    NSDictionary *_subscriptionToReexpandAfterReorder;
 
     NSMutableArray *_configs;
     NSMutableArray *_subscriptions;
@@ -3666,6 +3676,7 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
     NSInteger _expandedSubscription;
     NSInteger _updatingSubscriptionIndex;
     NSInteger _stickySectionHeaderSection;
+    NSInteger _reorderingSection;
     NSInteger _activeLogIndex;
     NSUInteger _mainSectionTransitionToken;
     NSString *_logTexts[2];
@@ -3691,6 +3702,7 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
 - (void)showSubscriptionUpdateFailures:(NSArray *)failureTexts;
 - (void)applyTheme;
 - (UIView *)accessorySubscriptionHeaderAtIndex:(NSInteger)index expanded:(BOOL)expanded loading:(BOOL)loading;
+- (void)setMainReorderingSection:(NSInteger)section showStatus:(BOOL)showStatus;
 - (BOOL)isMainSectionExpanded:(NSInteger)section;
 - (void)finishMainSectionTransition:(NSNumber *)transitionNumber;
 - (void)rememberActiveLogPosition;
@@ -4397,6 +4409,7 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
     _expandedSubscription = -1;
     _updatingSubscriptionIndex = -1;
     _stickySectionHeaderSection = -1;
+    _reorderingSection = -1;
     _configurationsSectionExpanded = NO;
     _subscriptionsSectionExpanded = NO;
 
@@ -7296,6 +7309,9 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
 }
 
 - (void)togglePressed {
+    if (_reorderingSection >= 0) {
+        [self setMainReorderingSection:-1 showStatus:NO];
+    }
     if (!_connected) {
         NSString *uri = [self uriForCurrentSelection];
         if (!uri) {
@@ -7333,6 +7349,9 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
 }
 
 - (void)plusPressed {
+    if (_reorderingSection >= 0) {
+        [self setMainReorderingSection:-1 showStatus:NO];
+    }
     UIActionSheet *sheet = [[[UIActionSheet alloc] initWithTitle:@"Import"
                                                          delegate:self
                                                 cancelButtonTitle:@"Cancel"
@@ -7343,10 +7362,16 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
 }
 
 - (void)refreshPressed {
+    if (_reorderingSection >= 0) {
+        [self setMainReorderingSection:-1 showStatus:NO];
+    }
     [self startBackgroundSubscriptionRefreshWithStatus:@"Updating subscriptions..."];
 }
 
 - (void)settingsPressed {
+    if (_reorderingSection >= 0) {
+        [self setMainReorderingSection:-1 showStatus:NO];
+    }
     SettingsVC *settings = [[[SettingsVC alloc] init] autorelease];
     settings.autoUpdate = _autoUpdateSubscriptions;
     settings.stealthMode = _stealthModeEnabled;
@@ -7474,6 +7499,9 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
 }
 
 - (void)terminalPressed {
+    if (_reorderingSection >= 0) {
+        [self setMainReorderingSection:-1 showStatus:NO];
+    }
     _showingTerminal = !_showingTerminal;
 
     _tableView.hidden = _showingTerminal;
@@ -7928,6 +7956,7 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
     [_pendingImportDoneStatus release];
     [_pendingImportRefreshIndices release];
     [_pendingInsecureImportURLs release];
+    [_subscriptionToReexpandAfterReorder release];
 
     [_configs release];
     [_subscriptions release];
@@ -7955,9 +7984,77 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
     return (section == 0) ? @"Configurations" : @"Subscriptions";
 }
 
+- (void)setMainReorderingSection:(NSInteger)section showStatus:(BOOL)showStatus {
+    if (section < 0 || section > 1) section = -1;
+    if (_reorderingSection == section) return;
+
+    NSInteger previousSection = _reorderingSection;
+    if (previousSection >= 0) {
+        [_tableView setEditing:NO animated:NO];
+    }
+
+    if (previousSection == 1 && section != 1 && _subscriptionToReexpandAfterReorder) {
+        NSUInteger index = [_subscriptions indexOfObjectIdenticalTo:_subscriptionToReexpandAfterReorder];
+        _expandedSubscription = (index == NSNotFound) ? -1 : (NSInteger)index;
+        [_subscriptionToReexpandAfterReorder release];
+        _subscriptionToReexpandAfterReorder = nil;
+    }
+
+    _reorderingSection = section;
+    if (section == 0) {
+        _configurationsSectionExpanded = YES;
+    } else if (section == 1) {
+        _subscriptionsSectionExpanded = YES;
+        [_subscriptionToReexpandAfterReorder release];
+        _subscriptionToReexpandAfterReorder = nil;
+        if (_expandedSubscription >= 0 && _expandedSubscription < (NSInteger)[_subscriptions count]) {
+            _subscriptionToReexpandAfterReorder = [[_subscriptions objectAtIndex:_expandedSubscription] retain];
+        }
+        _expandedSubscription = -1;
+    }
+
+    [self reloadMainTableDataAfterExternalChange];
+    if (_reorderingSection >= 0) {
+        [_tableView setEditing:YES animated:YES];
+        if (showStatus) {
+            [self showStatus:(_reorderingSection == 0
+                                  ? @"Drag configurations to change their order"
+                                  : @"Drag subscriptions to change their order")
+                         ok:YES];
+        }
+    } else if (showStatus && previousSection >= 0) {
+        [self showStatus:(previousSection == 0
+                              ? @"Configuration order saved"
+                              : @"Subscription order saved")
+                     ok:YES];
+    }
+}
+
+- (void)mainSectionOrderPressed:(UIButton *)sender {
+    NSInteger section = sender.tag - kVCMainSectionHeaderOrderButtonTagBase;
+    if (section < 0 || section > 1) return;
+
+    NSArray *items = (section == 0) ? (NSArray *)_configs : (NSArray *)_subscriptions;
+    if ([items count] < 2) return;
+    if (_reorderingSection == section) {
+        [self setMainReorderingSection:-1 showStatus:YES];
+        return;
+    }
+    if (section == 1 && _launchAutoUpdateInProgress) {
+        [self showStatus:@"Wait for the subscription update to finish" ok:YES];
+        return;
+    }
+
+    [self setMainReorderingSection:section showStatus:YES];
+}
+
 - (void)mainSectionHeaderPressed:(UIButton *)sender {
     NSInteger section = sender.tag - kVCMainSectionHeaderButtonTagBase;
     if (section < 0 || section > 1) return;
+    if (_reorderingSection >= 0) {
+        [self showStatus:@"Finish reordering first" ok:YES];
+        return;
+    }
     NSInteger oldRowCount = [_tableView numberOfRowsInSection:section];
 
     if (section == 0) {
@@ -8031,7 +8128,7 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
     button.tag = kVCMainSectionHeaderButtonTagBase + section;
     button.autoresizingMask = UIViewAutoresizingFlexibleWidth;
     button.contentHorizontalAlignment = UIControlContentHorizontalAlignmentLeft;
-    button.contentEdgeInsets = UIEdgeInsetsMake(0.0f, 14.0f, 0.0f, 104.0f);
+    button.contentEdgeInsets = UIEdgeInsetsMake(0.0f, 14.0f, 0.0f, 132.0f);
     button.titleLabel.font = [UIFont boldSystemFontOfSize:15.0f];
     [button setTitle:[self tableView:tableView titleForHeaderInSection:section] forState:UIControlStateNormal];
     [button setTitleColor:VCSecondaryTextColor() forState:UIControlStateNormal];
@@ -8051,7 +8148,7 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
     button.accessibilityHint = expanded ? @"Double tap to collapse" : @"Double tap to expand";
     [button addTarget:self action:@selector(mainSectionHeaderPressed:) forControlEvents:UIControlEventTouchUpInside];
 
-    UILabel *countLabel = [[[UILabel alloc] initWithFrame:CGRectMake(button.bounds.size.width - 88.0f,
+    UILabel *countLabel = [[[UILabel alloc] initWithFrame:CGRectMake(button.bounds.size.width - 116.0f,
                                                                       7.0f,
                                                                       42.0f,
                                                                       22.0f)] autorelease];
@@ -8086,6 +8183,30 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
                                UIViewAutoresizingFlexibleBottomMargin;
     [button addSubview:chevron];
     [header addSubview:button];
+
+    UIButton *orderButton = [UIButton buttonWithType:UIButtonTypeCustom];
+    orderButton.frame = CGRectMake(width - 74.0f, 11.0f, 24.0f, 24.0f);
+    orderButton.tag = kVCMainSectionHeaderOrderButtonTagBase + section;
+    orderButton.autoresizingMask = UIViewAutoresizingFlexibleLeftMargin;
+    BOOL reordering = (_reorderingSection == section);
+    VCIconType orderIconType = reordering ? VCIconTypeCheck : VCIconTypeReorder;
+    [orderButton setImage:TintImageWithColor(MakeIconImage(orderIconType, 17.0f, reordering),
+                                             reordering ? VCAccentColor() : VCSecondaryTextColor())
+                  forState:UIControlStateNormal];
+    [orderButton setImage:TintImageWithColor(MakeIconImage(orderIconType, 17.0f, reordering),
+                                             VCPrimaryTextColor())
+                  forState:UIControlStateHighlighted];
+    orderButton.hidden = count < 2;
+    if (reordering) {
+        orderButton.accessibilityLabel = (section == 0) ? @"Finish reordering configurations" : @"Finish reordering subscriptions";
+        orderButton.accessibilityHint = @"Saves the current order";
+    } else {
+        orderButton.accessibilityLabel = (section == 0) ? @"Reorder configurations" : @"Reorder subscriptions";
+        orderButton.accessibilityHint = @"Shows drag handles in this list";
+    }
+    [orderButton addTarget:self action:@selector(mainSectionOrderPressed:) forControlEvents:UIControlEventTouchUpInside];
+    [header addSubview:orderButton];
+
     VCAppearanceApplyHeaderView(header);
     return header;
 }
@@ -8126,6 +8247,25 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
 
     UIButton *button = (UIButton *)[header viewWithTag:(kVCMainSectionHeaderButtonTagBase + section)];
     [self updateMainSectionHeaderButton:button section:section animated:animated];
+
+    UIButton *orderButton = (UIButton *)[header viewWithTag:(kVCMainSectionHeaderOrderButtonTagBase + section)];
+    NSUInteger count = (section == 0) ? [_configs count] : [_subscriptions count];
+    BOOL reordering = (_reorderingSection == section);
+    VCIconType orderIconType = reordering ? VCIconTypeCheck : VCIconTypeReorder;
+    orderButton.hidden = count < 2;
+    [orderButton setImage:TintImageWithColor(MakeIconImage(orderIconType, 17.0f, reordering),
+                                             reordering ? VCAccentColor() : VCSecondaryTextColor())
+                  forState:UIControlStateNormal];
+    [orderButton setImage:TintImageWithColor(MakeIconImage(orderIconType, 17.0f, reordering),
+                                             VCPrimaryTextColor())
+                  forState:UIControlStateHighlighted];
+    if (reordering) {
+        orderButton.accessibilityLabel = (section == 0) ? @"Finish reordering configurations" : @"Finish reordering subscriptions";
+        orderButton.accessibilityHint = @"Saves the current order";
+    } else {
+        orderButton.accessibilityLabel = (section == 0) ? @"Reorder configurations" : @"Reorder subscriptions";
+        orderButton.accessibilityHint = @"Shows drag handles in this list";
+    }
 }
 
 - (void)finishMainSectionTransition:(NSNumber *)transitionNumber {
@@ -8223,6 +8363,9 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
 
 - (BOOL)tableView:(UITableView *)tableView canEditRowAtIndexPath:(NSIndexPath *)indexPath {
     (void)tableView;
+    if (_reorderingSection >= 0) {
+        return indexPath.section == _reorderingSection;
+    }
     if (indexPath.section == 0) {
         return YES;
     }
@@ -8236,7 +8379,91 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
 - (UITableViewCellEditingStyle)tableView:(UITableView *)tableView editingStyleForRowAtIndexPath:(NSIndexPath *)indexPath {
     (void)tableView;
     (void)indexPath;
+    if (_reorderingSection >= 0) return UITableViewCellEditingStyleNone;
     return UITableViewCellEditingStyleDelete;
+}
+
+- (BOOL)tableView:(UITableView *)tableView shouldIndentWhileEditingRowAtIndexPath:(NSIndexPath *)indexPath {
+    (void)tableView;
+    (void)indexPath;
+    return _reorderingSection < 0;
+}
+
+- (BOOL)tableView:(UITableView *)tableView canMoveRowAtIndexPath:(NSIndexPath *)indexPath {
+    (void)tableView;
+    if (_reorderingSection < 0 || indexPath.section != _reorderingSection) return NO;
+    if (indexPath.section == 0) {
+        return indexPath.row >= 0 && indexPath.row < (NSInteger)[_configs count];
+    }
+
+    NSInteger subIdx = -1;
+    NSInteger itemIdx = -1;
+    BOOL isHeader = NO;
+    return [self mapSubscriptionRow:indexPath.row
+                         toSubIndex:&subIdx
+                          itemIndex:&itemIdx
+                           isHeader:&isHeader] && isHeader;
+}
+
+- (NSIndexPath *)tableView:(UITableView *)tableView
+targetIndexPathForMoveFromRowAtIndexPath:(NSIndexPath *)sourceIndexPath
+       toProposedIndexPath:(NSIndexPath *)proposedDestinationIndexPath {
+    (void)tableView;
+    NSInteger count = (_reorderingSection == 0) ? (NSInteger)[_configs count]
+                                                : (NSInteger)[_subscriptions count];
+    if (count <= 0) return sourceIndexPath;
+
+    NSInteger row = proposedDestinationIndexPath.row;
+    if (proposedDestinationIndexPath.section < _reorderingSection) row = 0;
+    else if (proposedDestinationIndexPath.section > _reorderingSection) row = count - 1;
+    if (row < 0) row = 0;
+    if (row >= count) row = count - 1;
+    return [NSIndexPath indexPathForRow:row inSection:_reorderingSection];
+}
+
+- (void)tableView:(UITableView *)tableView
+moveRowAtIndexPath:(NSIndexPath *)sourceIndexPath
+       toIndexPath:(NSIndexPath *)destinationIndexPath {
+    (void)tableView;
+    if (_reorderingSection < 0 ||
+        sourceIndexPath.section != _reorderingSection ||
+        destinationIndexPath.section != _reorderingSection ||
+        sourceIndexPath.row == destinationIndexPath.row) {
+        return;
+    }
+
+    NSMutableArray *items = (_reorderingSection == 0) ? _configs : _subscriptions;
+    if (sourceIndexPath.row < 0 || sourceIndexPath.row >= (NSInteger)[items count] ||
+        destinationIndexPath.row < 0 || destinationIndexPath.row >= (NSInteger)[items count]) {
+        return;
+    }
+
+    id selected = nil;
+    if (_reorderingSection == 0 &&
+        _selectedConfigIndex >= 0 && _selectedConfigIndex < (NSInteger)[_configs count]) {
+        selected = [[_configs objectAtIndex:_selectedConfigIndex] retain];
+    } else if (_reorderingSection == 1 &&
+               _selectedSubIndex >= 0 && _selectedSubIndex < (NSInteger)[_subscriptions count]) {
+        selected = [[_subscriptions objectAtIndex:_selectedSubIndex] retain];
+    }
+
+    id moved = [[items objectAtIndex:sourceIndexPath.row] retain];
+    [items removeObjectAtIndex:sourceIndexPath.row];
+    [items insertObject:moved atIndex:destinationIndexPath.row];
+    [moved release];
+
+    if (selected) {
+        NSUInteger newIndex = [items indexOfObjectIdenticalTo:selected];
+        if (_reorderingSection == 0) {
+            _selectedConfigIndex = (newIndex == NSNotFound) ? -1 : (NSInteger)newIndex;
+        } else {
+            _selectedSubIndex = (newIndex == NSNotFound) ? -1 : (NSInteger)newIndex;
+        }
+        [selected release];
+    }
+
+    [self normalizeSelection];
+    [self saveData];
 }
 
 - (void)tableView:(UITableView *)tableView commitEditingStyle:(UITableViewCellEditingStyle)editingStyle forRowAtIndexPath:(NSIndexPath *)indexPath {
@@ -8402,7 +8629,9 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
     cell.indentationWidth = 14.0f;
     cell.accessoryType = UITableViewCellAccessoryNone;
     cell.accessoryView = nil;
-    cell.selectionStyle = UITableViewCellSelectionStyleBlue;
+    cell.showsReorderControl = (_reorderingSection == indexPath.section);
+    cell.selectionStyle = (_reorderingSection >= 0) ? UITableViewCellSelectionStyleNone
+                                                     : UITableViewCellSelectionStyleBlue;
     VCAppearanceApplyCell(cell);
 
     if (indexPath.section == 0) {
@@ -8410,7 +8639,9 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
         NSString *name = [cfg objectForKey:@"name"];
         NSString *shownConfigName = ([name length] > 0) ? name : [NSString stringWithFormat:@"Config %ld", (long)(indexPath.row + 1)];
         cell.textLabel.text = [self maskedLinkText:shownConfigName];
-        cell.accessoryView = [self accessoryPingWithTag:(10000 + indexPath.row) selected:(_selectedConfigIndex == indexPath.row)];
+        if (_reorderingSection != 0) {
+            cell.accessoryView = [self accessoryPingWithTag:(10000 + indexPath.row) selected:(_selectedConfigIndex == indexPath.row)];
+        }
     } else {
         NSInteger subIdx = -1;
         NSInteger itemIdx = -1;
@@ -8429,10 +8660,12 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
                 }
                 shownName = [self maskedLinkText:shownName];
                 cell.textLabel.text = shownName;
-                BOOL loading = (_updatingSubscriptionIndex == subIdx);
-                cell.accessoryView = [self accessorySubscriptionHeaderAtIndex:subIdx
-                                                                   expanded:(_expandedSubscription == subIdx)
-                                                                    loading:loading];
+                if (_reorderingSection != 1) {
+                    BOOL loading = (_updatingSubscriptionIndex == subIdx);
+                    cell.accessoryView = [self accessorySubscriptionHeaderAtIndex:subIdx
+                                                                       expanded:(_expandedSubscription == subIdx)
+                                                                        loading:loading];
+                }
             } else {
                 NSString *uri = [items objectAtIndex:itemIdx];
                 cell.indentationLevel = 0;
@@ -8493,6 +8726,10 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
 
 - (void)tableView:(UITableView *)tableView didSelectRowAtIndexPath:(NSIndexPath *)indexPath {
     (void)tableView;
+    if (_reorderingSection >= 0) {
+        [_tableView deselectRowAtIndexPath:indexPath animated:NO];
+        return;
+    }
     BOOL animateSubscriptionsSection = NO;
     NSString *oldURI = nil;
     if (_connected) {
