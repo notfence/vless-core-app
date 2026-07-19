@@ -3698,8 +3698,14 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
     NSUInteger _mainSectionTransitionToken;
     NSString *_logTexts[2];
     CGPoint _logContentOffsets[2];
+    CGFloat _mainTableDragStartOffsetY;
+    CGFloat _mainTableOffsetBeforeTransition;
     BOOL _logContentOffsetsValid[2];
     BOOL _logFollowsTail[2];
+    BOOL _mainTableDragStartOffsetValid;
+    BOOL _mainTableTransitionSnapshotValid;
+    BOOL _phoneConnectionCompact;
+    BOOL _phoneConnectionCompactBeforeTransition;
 
     BOOL _connected;
     BOOL _showingTerminal;
@@ -3727,7 +3733,19 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
 - (void)refreshPresentedSubscriptionInfoIfNeeded;
 - (void)refreshLogs;
 - (void)updateLogSelectorAnimated:(BOOL)animated;
+- (void)updatePhoneConnectionScrollInsets;
 - (void)updatePhoneConnectionLayout;
+- (CGFloat)maximumMainTableContentOffsetY;
+- (CGFloat)phoneConnectionSnapOffsetForProposedOffset:(CGFloat)proposedOffset
+                                         currentOffset:(CGFloat)currentOffset
+                                              velocity:(CGFloat)velocity;
+- (void)animatePhoneConnectionToOffset:(CGFloat)targetOffset;
+- (void)snapPhoneConnectionLayoutIfNeededAnimated:(BOOL)animated;
+- (void)prepareMainTableStructuralTransition;
+- (void)completeMainTableStructuralTransition;
+- (void)restoreMainTableAfterStructuralTransitionCompact:(BOOL)compact
+                                          preservedOffset:(CGFloat)preservedOffset;
+- (void)refreshVisibleSubscriptionHeaderAccessories;
 - (void)updateMainSectionHeaderButton:(UIButton *)button section:(NSInteger)section animated:(BOOL)animated;
 - (void)updateMainSectionHeaderView:(UIView *)header section:(NSInteger)section animated:(BOOL)animated;
 - (void)updateStickyMainSectionHeader;
@@ -7752,8 +7770,26 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
     });
 }
 
+- (void)updatePhoneConnectionScrollInsets {
+    if (IsPadDevice() || !_tableView || _mainSectionTransitionInProgress) return;
+
+    CGFloat collapseDistance = kVCMainContentStartY - kVCMainCompactContentStartY;
+    CGFloat requiredBottomInset = _tableView.bounds.size.height - _tableView.contentSize.height;
+    if (requiredBottomInset < 0.0f) requiredBottomInset = 0.0f;
+
+    UIEdgeInsets insets = _tableView.contentInset;
+    if (fabs(insets.top - collapseDistance) <= 0.5f &&
+        fabs(insets.bottom - requiredBottomInset) <= 0.5f) {
+        return;
+    }
+    insets.top = collapseDistance;
+    insets.bottom = requiredBottomInset;
+    _tableView.contentInset = insets;
+}
+
 - (void)updatePhoneConnectionLayout {
     if (IsPadDevice() || !_tableView || !_connectBtn || !_uptimeLabel || !_statusLabel) return;
+    if (_mainSectionTransitionInProgress) return;
 
     CGFloat collapseDistance = kVCMainContentStartY - kVCMainCompactContentStartY;
     CGFloat progress = 0.0f;
@@ -7769,6 +7805,8 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
     CGRect expandedStatusFrame = CGRectMake(16.0f, 216.0f, width - 32.0f, 30.0f);
     CGRect compactStatusFrame = CGRectMake(128.0f, 71.0f, width - 140.0f, 37.0f);
 
+    [CATransaction begin];
+    [CATransaction setDisableActions:YES];
     _connectBtn.frame = VCInterpolateRect(expandedButtonFrame, compactButtonFrame, progress);
     _connectBtn.layer.cornerRadius = _connectBtn.bounds.size.height * 0.5f;
     CGFloat buttonFontSize = 20.0f - 5.0f * progress;
@@ -7789,9 +7827,193 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
         _statusLabel.font = [UIFont systemFontOfSize:statusFontSize];
     }
 
+    CGFloat labelAlpha = fabs(progress * 2.0f - 1.0f);
+    _uptimeLabel.alpha = labelAlpha;
+    _statusLabel.alpha = labelAlpha;
+
     UIEdgeInsets indicators = _tableView.scrollIndicatorInsets;
     indicators.top = collapseDistance * (1.0f - progress);
     _tableView.scrollIndicatorInsets = indicators;
+    [CATransaction commit];
+
+    if (progress <= 0.001f) {
+        _phoneConnectionCompact = NO;
+    } else if (progress >= 0.999f) {
+        _phoneConnectionCompact = YES;
+    }
+}
+
+- (CGFloat)maximumMainTableContentOffsetY {
+    if (!_tableView) return 0.0f;
+
+    CGFloat minimumOffset = -_tableView.contentInset.top;
+    CGFloat maximumOffset = _tableView.contentSize.height - _tableView.bounds.size.height +
+                            _tableView.contentInset.bottom;
+    return (maximumOffset > minimumOffset) ? maximumOffset : minimumOffset;
+}
+
+- (CGFloat)phoneConnectionSnapOffsetForProposedOffset:(CGFloat)proposedOffset
+                                         currentOffset:(CGFloat)currentOffset
+                                              velocity:(CGFloat)velocity {
+    CGFloat collapseDistance = kVCMainContentStartY - kVCMainCompactContentStartY;
+    CGFloat expandedOffset = -collapseDistance;
+    if (collapseDistance <= 0.0f) return proposedOffset;
+    if ([self maximumMainTableContentOffsetY] < -0.5f) return expandedOffset;
+    if (proposedOffset <= expandedOffset) return expandedOffset;
+    if (proposedOffset >= 0.0f) return proposedOffset;
+
+    if (velocity > 0.05f) return 0.0f;
+    if (velocity < -0.05f) return expandedOffset;
+
+    CGFloat movement = proposedOffset - currentOffset;
+    if (movement > 3.0f) return 0.0f;
+    if (movement < -3.0f) return expandedOffset;
+
+    CGFloat compactTrigger = expandedOffset + collapseDistance * 0.28f;
+    return (proposedOffset >= compactTrigger) ? 0.0f : expandedOffset;
+}
+
+- (void)animatePhoneConnectionToOffset:(CGFloat)targetOffset {
+    if (!_tableView) return;
+
+    CGFloat collapseDistance = kVCMainContentStartY - kVCMainCompactContentStartY;
+    CGFloat expandedOffset = -collapseDistance;
+    CGFloat maximumOffset = [self maximumMainTableContentOffsetY];
+    if (targetOffset < expandedOffset) targetOffset = expandedOffset;
+    if (targetOffset > maximumOffset) targetOffset = maximumOffset;
+
+    CGFloat distance = fabs(targetOffset - _tableView.contentOffset.y);
+    _phoneConnectionCompact = targetOffset >= -0.5f;
+    if (distance <= 0.5f || collapseDistance <= 0.0f) {
+        [_tableView setContentOffset:CGPointMake(_tableView.contentOffset.x, targetOffset)
+                            animated:NO];
+        [self updatePhoneConnectionLayout];
+        return;
+    }
+
+    [_tableView setContentOffset:CGPointMake(_tableView.contentOffset.x, targetOffset)
+                        animated:YES];
+}
+
+- (void)snapPhoneConnectionLayoutIfNeededAnimated:(BOOL)animated {
+    if (IsPadDevice() || _showingTerminal || !_tableView) return;
+
+    [_tableView layoutIfNeeded];
+    [self updatePhoneConnectionScrollInsets];
+    CGFloat collapseDistance = kVCMainContentStartY - kVCMainCompactContentStartY;
+    CGFloat expandedOffset = -collapseDistance;
+    CGFloat currentOffset = _tableView.contentOffset.y;
+    if ([self maximumMainTableContentOffsetY] < -0.5f) {
+        if (fabs(currentOffset - expandedOffset) > 0.5f) {
+            if (animated) {
+                [self animatePhoneConnectionToOffset:expandedOffset];
+            } else {
+                [_tableView setContentOffset:CGPointMake(_tableView.contentOffset.x, expandedOffset)
+                                    animated:NO];
+            }
+        }
+        return;
+    }
+    if (currentOffset <= expandedOffset + 0.5f) {
+        _phoneConnectionCompact = NO;
+        return;
+    }
+    if (currentOffset >= -0.5f) {
+        _phoneConnectionCompact = YES;
+        return;
+    }
+
+    if (_tableView.tracking || _tableView.dragging || _tableView.decelerating) return;
+
+    CGFloat targetOffset = _phoneConnectionCompact ? 0.0f : expandedOffset;
+    if (animated) {
+        [self animatePhoneConnectionToOffset:targetOffset];
+    } else {
+        [_tableView setContentOffset:CGPointMake(_tableView.contentOffset.x, targetOffset)
+                            animated:NO];
+        [self updatePhoneConnectionLayout];
+    }
+}
+
+- (void)prepareMainTableStructuralTransition {
+    if (!_mainSectionTransitionInProgress && !IsPadDevice() && _tableView) {
+        _mainTableOffsetBeforeTransition = _tableView.contentOffset.y;
+        _phoneConnectionCompactBeforeTransition = (_tableView.contentOffset.y >= -0.5f)
+            ? YES
+            : _phoneConnectionCompact;
+        _mainTableTransitionSnapshotValid = YES;
+    }
+    _mainSectionTransitionInProgress = YES;
+    if (IsPadDevice() || !_tableView) return;
+
+    UIEdgeInsets insets = _tableView.contentInset;
+    CGFloat collapseDistance = kVCMainContentStartY - kVCMainCompactContentStartY;
+    CGFloat positiveOffset = _tableView.contentOffset.y;
+    if (positiveOffset < 0.0f) positiveOffset = 0.0f;
+    CGFloat safeBottomInset = _tableView.bounds.size.height + positiveOffset + collapseDistance;
+    if (insets.bottom < safeBottomInset) {
+        insets.bottom = safeBottomInset;
+        _tableView.contentInset = insets;
+    }
+}
+
+- (void)restoreMainTableAfterStructuralTransitionCompact:(BOOL)compact
+                                          preservedOffset:(CGFloat)preservedOffset {
+    if (IsPadDevice() || !_tableView) return;
+
+    [self updatePhoneConnectionScrollInsets];
+    CGFloat collapseDistance = kVCMainContentStartY - kVCMainCompactContentStartY;
+    CGFloat targetOffset = -collapseDistance;
+    if (compact) {
+        targetOffset = preservedOffset;
+        if (targetOffset < 0.0f) targetOffset = 0.0f;
+        CGFloat maximumOffset = [self maximumMainTableContentOffsetY];
+        if (maximumOffset < 0.0f) maximumOffset = 0.0f;
+        if (targetOffset > maximumOffset) targetOffset = maximumOffset;
+    }
+
+    _phoneConnectionCompact = compact;
+    [_tableView setContentOffset:CGPointMake(_tableView.contentOffset.x, targetOffset)
+                        animated:NO];
+    [self updatePhoneConnectionLayout];
+}
+
+- (void)completeMainTableStructuralTransition {
+    if (!_tableView) {
+        _mainSectionTransitionInProgress = NO;
+        _mainTableTransitionSnapshotValid = NO;
+        return;
+    }
+
+    [_tableView layoutIfNeeded];
+    BOOL restoreSnapshot = _mainTableTransitionSnapshotValid && !IsPadDevice();
+    BOOL restoreCompact = _phoneConnectionCompactBeforeTransition;
+    CGFloat restoreOffset = _mainTableOffsetBeforeTransition;
+
+    _mainSectionTransitionInProgress = NO;
+    [self updatePhoneConnectionScrollInsets];
+
+    if (restoreSnapshot) {
+        [self restoreMainTableAfterStructuralTransitionCompact:restoreCompact
+                                                preservedOffset:restoreOffset];
+
+        NSUInteger transitionToken = _mainSectionTransitionToken;
+        dispatch_async(dispatch_get_main_queue(), ^{
+            if (transitionToken != _mainSectionTransitionToken ||
+                _mainSectionTransitionInProgress ||
+                _tableView.tracking || _tableView.dragging || _tableView.decelerating) {
+                return;
+            }
+            [_tableView layoutIfNeeded];
+            [self restoreMainTableAfterStructuralTransitionCompact:restoreCompact
+                                                    preservedOffset:restoreOffset];
+            [self updateStickyMainSectionHeader];
+        });
+    } else {
+        [self snapPhoneConnectionLayoutIfNeededAnimated:NO];
+    }
+
+    _mainTableTransitionSnapshotValid = NO;
 }
 
 - (void)applyTheme {
@@ -8010,6 +8232,7 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
 
 - (void)viewDidLayoutSubviews {
     [super viewDidLayoutSubviews];
+    [self updatePhoneConnectionScrollInsets];
     [self updatePhoneConnectionLayout];
     [self updateStickyMainSectionHeader];
 }
@@ -8166,6 +8389,7 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
 - (void)mainSectionHeaderPressed:(UIButton *)sender {
     NSInteger section = sender.tag - kVCMainSectionHeaderButtonTagBase;
     if (section < 0 || section > 1) return;
+    if (_mainSectionTransitionInProgress) return;
     if (_reorderingSection >= 0) {
         [self showStatus:@"Finish reordering first" ok:YES];
         return;
@@ -8181,7 +8405,7 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
 
     NSUInteger transitionToken = ++_mainSectionTransitionToken;
     NSNumber *transitionNumber = [NSNumber numberWithUnsignedInteger:transitionToken];
-    _mainSectionTransitionInProgress = YES;
+    [self prepareMainTableStructuralTransition];
     [CATransaction begin];
 
     [self updateMainSectionHeaderButton:sender section:section animated:YES];
@@ -8387,19 +8611,34 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
     if ([transitionNumber unsignedIntegerValue] != _mainSectionTransitionToken) return;
     if (!_mainSectionTransitionInProgress) return;
 
-    _mainSectionTransitionInProgress = NO;
-    [_tableView layoutIfNeeded];
+    [self completeMainTableStructuralTransition];
     VCAppearanceRefreshVisibleTableHeaders(_tableView);
     [self refreshStickyMainSectionHeader];
 }
 
 - (void)reloadMainTableDataAfterExternalChange {
     _mainSectionTransitionToken++;
-    _mainSectionTransitionInProgress = NO;
+    [self prepareMainTableStructuralTransition];
     [_tableView reloadData];
-    [_tableView layoutIfNeeded];
+    [self completeMainTableStructuralTransition];
     VCAppearanceRefreshVisibleTableHeaders(_tableView);
     [self refreshStickyMainSectionHeader];
+}
+
+- (void)refreshVisibleSubscriptionHeaderAccessories {
+    if (!_tableView || !_subscriptionsSectionExpanded || _reorderingSection == 1) return;
+
+    for (NSInteger subIdx = 0; subIdx < (NSInteger)[_subscriptions count]; subIdx++) {
+        NSInteger row = [self rowForSubscriptionHeaderAtIndex:subIdx];
+        if (row < 0) continue;
+        NSIndexPath *indexPath = [NSIndexPath indexPathForRow:row inSection:1];
+        UITableViewCell *cell = [_tableView cellForRowAtIndexPath:indexPath];
+        if (!cell) continue;
+
+        cell.accessoryView = [self accessorySubscriptionHeaderAtIndex:subIdx
+                                                             expanded:(_expandedSubscription == subIdx)
+                                                              loading:(_updatingSubscriptionIndex == subIdx)];
+    }
 }
 
 - (UIView *)tableView:(UITableView *)tableView viewForHeaderInSection:(NSInteger)section {
@@ -8603,7 +8842,7 @@ moveRowAtIndexPath:(NSIndexPath *)sourceIndexPath
 
         [self normalizeSelection];
         [self saveData];
-        [_tableView reloadData];
+        [self reloadMainTableDataAfterExternalChange];
         [self showStatus:@"Configuration deleted" ok:YES];
         return;
     }
@@ -8651,7 +8890,7 @@ moveRowAtIndexPath:(NSIndexPath *)sourceIndexPath
 
     [self normalizeSelection];
     [self saveData];
-    [_tableView reloadData];
+    [self reloadMainTableDataAfterExternalChange];
     [self showStatus:@"Subscription config deleted" ok:YES];
 }
 
@@ -8822,8 +9061,38 @@ moveRowAtIndexPath:(NSIndexPath *)sourceIndexPath
     }
 }
 
+- (void)scrollViewWillBeginDragging:(UIScrollView *)scrollView {
+    if (scrollView != _tableView) return;
+    _mainTableDragStartOffsetY = scrollView.contentOffset.y;
+    _mainTableDragStartOffsetValid = YES;
+}
+
+- (void)scrollViewWillEndDragging:(UIScrollView *)scrollView
+                     withVelocity:(CGPoint)velocity
+              targetContentOffset:(inout CGPoint *)targetContentOffset {
+    if (scrollView != _tableView || IsPadDevice() || _showingTerminal || !targetContentOffset) return;
+
+    CGFloat referenceOffset = _mainTableDragStartOffsetValid
+        ? _mainTableDragStartOffsetY
+        : scrollView.contentOffset.y;
+    CGFloat proposedOffset = targetContentOffset->y;
+    CGFloat snappedOffset = [self phoneConnectionSnapOffsetForProposedOffset:proposedOffset
+                                                               currentOffset:referenceOffset
+                                                                    velocity:velocity.y];
+    CGFloat collapseDistance = kVCMainContentStartY - kVCMainCompactContentStartY;
+    CGFloat expandedOffset = -collapseDistance;
+    if (snappedOffset <= expandedOffset + 0.5f) {
+        _phoneConnectionCompact = NO;
+    } else if (snappedOffset >= -0.5f) {
+        _phoneConnectionCompact = YES;
+    }
+
+    targetContentOffset->y = snappedOffset;
+}
+
 - (void)scrollViewDidEndDecelerating:(UIScrollView *)scrollView {
     if (scrollView == _tableView) {
+        [self snapPhoneConnectionLayoutIfNeededAnimated:YES];
         [self scheduleMainMarqueeRelayout];
     } else if (scrollView == _logView) {
         [self rememberActiveLogPosition];
@@ -8832,12 +9101,30 @@ moveRowAtIndexPath:(NSIndexPath *)sourceIndexPath
 }
 
 - (void)scrollViewDidEndDragging:(UIScrollView *)scrollView willDecelerate:(BOOL)decelerate {
-    if (scrollView == _tableView && !decelerate) {
-        [self scheduleMainMarqueeRelayout];
+    if (scrollView == _tableView) {
+        if (!decelerate) {
+            CGFloat collapseDistance = kVCMainContentStartY - kVCMainCompactContentStartY;
+            CGFloat expandedOffset = -collapseDistance;
+            CGFloat currentOffset = scrollView.contentOffset.y;
+            if (currentOffset > expandedOffset + 0.5f && currentOffset < -0.5f) {
+                [self animatePhoneConnectionToOffset:(_phoneConnectionCompact ? 0.0f : expandedOffset)];
+            } else {
+                [self snapPhoneConnectionLayoutIfNeededAnimated:YES];
+            }
+            [self scheduleMainMarqueeRelayout];
+        }
+        _mainTableDragStartOffsetValid = NO;
     } else if (scrollView == _logView && !decelerate) {
         [self rememberActiveLogPosition];
         [self refreshLogs];
     }
+}
+
+- (void)scrollViewDidEndScrollingAnimation:(UIScrollView *)scrollView {
+    if (scrollView != _tableView) return;
+    [self updatePhoneConnectionLayout];
+    [self updateStickyMainSectionHeader];
+    [self scheduleMainMarqueeRelayout];
 }
 
 - (void)tableView:(UITableView *)tableView didSelectRowAtIndexPath:(NSIndexPath *)indexPath {
@@ -8846,7 +9133,14 @@ moveRowAtIndexPath:(NSIndexPath *)sourceIndexPath
         [_tableView deselectRowAtIndexPath:indexPath animated:NO];
         return;
     }
+    if (_mainSectionTransitionInProgress) {
+        [_tableView deselectRowAtIndexPath:indexPath animated:NO];
+        return;
+    }
     BOOL animateSubscriptionsSection = NO;
+    NSInteger oldExpandedSubscription = -1;
+    NSInteger oldExpandedHeaderRow = -1;
+    NSInteger oldExpandedItemCount = 0;
     NSString *oldURI = nil;
     if (_connected) {
         NSString *u = [self uriForCurrentSelection];
@@ -8869,6 +9163,11 @@ moveRowAtIndexPath:(NSIndexPath *)sourceIndexPath
         if ([self mapSubscriptionRow:indexPath.row toSubIndex:&subIdx itemIndex:&itemIdx isHeader:&isHeader]) {
             if (isHeader) {
                 animateSubscriptionsSection = YES;
+                oldExpandedSubscription = _expandedSubscription;
+                if (oldExpandedSubscription >= 0) {
+                    oldExpandedHeaderRow = [self rowForSubscriptionHeaderAtIndex:oldExpandedSubscription];
+                    oldExpandedItemCount = (NSInteger)[[self subscriptionItemsAtIndex:oldExpandedSubscription] count];
+                }
                 if (_expandedSubscription == subIdx) {
                     _expandedSubscription = -1;
                 } else {
@@ -8891,6 +9190,7 @@ moveRowAtIndexPath:(NSIndexPath *)sourceIndexPath
         }
     }
 
+    [_tableView deselectRowAtIndexPath:indexPath animated:YES];
     [self normalizeSelection];
     if (_connected && oldURI) {
         NSString *newURI = [self uriForCurrentSelection];
@@ -8898,18 +9198,53 @@ moveRowAtIndexPath:(NSIndexPath *)sourceIndexPath
     }
 
     if (animateSubscriptionsSection) {
-        [UIView transitionWithView:_tableView
-                          duration:0.18
-                           options:UIViewAnimationOptionTransitionCrossDissolve
-                        animations:^{
-                            [_tableView reloadData];
-                        }
-                        completion:nil];
+        NSInteger newExpandedSubscription = _expandedSubscription;
+        NSInteger newExpandedHeaderRow = (newExpandedSubscription >= 0)
+            ? [self rowForSubscriptionHeaderAtIndex:newExpandedSubscription]
+            : -1;
+        NSInteger newExpandedItemCount = (newExpandedSubscription >= 0)
+            ? (NSInteger)[[self subscriptionItemsAtIndex:newExpandedSubscription] count]
+            : 0;
+
+        NSMutableArray *deletedRows = [NSMutableArray array];
+        for (NSInteger item = 0; item < oldExpandedItemCount; item++) {
+            [deletedRows addObject:[NSIndexPath indexPathForRow:(oldExpandedHeaderRow + 1 + item)
+                                                       inSection:1]];
+        }
+
+        NSMutableArray *insertedRows = [NSMutableArray array];
+        for (NSInteger item = 0; item < newExpandedItemCount; item++) {
+            [insertedRows addObject:[NSIndexPath indexPathForRow:(newExpandedHeaderRow + 1 + item)
+                                                        inSection:1]];
+        }
+
+        NSUInteger transitionToken = ++_mainSectionTransitionToken;
+        [self prepareMainTableStructuralTransition];
+        [CATransaction begin];
+        [CATransaction setCompletionBlock:^{
+            if (transitionToken != _mainSectionTransitionToken) return;
+            [self completeMainTableStructuralTransition];
+            [self refreshVisibleSubscriptionHeaderAccessories];
+            [self refreshStickyMainSectionHeader];
+        }];
+
+        [_tableView beginUpdates];
+        if ([deletedRows count] > 0) {
+            [_tableView deleteRowsAtIndexPaths:deletedRows withRowAnimation:UITableViewRowAnimationFade];
+        }
+        if ([insertedRows count] > 0) {
+            [_tableView insertRowsAtIndexPaths:insertedRows withRowAnimation:UITableViewRowAnimationFade];
+        }
+        [_tableView endUpdates];
+        [CATransaction commit];
+
+        if ([deletedRows count] == 0 && [insertedRows count] == 0) {
+            [self refreshVisibleSubscriptionHeaderAccessories];
+        }
     } else {
         [_tableView reloadData];
     }
     [oldURI release];
-    [_tableView deselectRowAtIndexPath:indexPath animated:YES];
 }
 
 #pragma mark - Import UI
