@@ -17,6 +17,7 @@
 #include <errno.h>
 #include <string.h>
 #include <math.h>
+#include <limits.h>
 #include <stdlib.h>
 #include <stdio.h>
 #include <signal.h>
@@ -32,6 +33,11 @@ static NSString *const kDefaultsStealthModeKey = @"vlesscore.stealth_mode";
 static NSString *const kDefaultsDarkThemeKey = @"vlesscore.dark_theme";
 static NSString *const kDefaultsSubHWIDKey = @"vlesscore.subscription_hwid";
 static NSString *const kSubscriptionAllowInsecureFetchKey = @"allow_insecure_fetch";
+static NSString *const kSubscriptionUserInfoKey = @"subscription_userinfo";
+static NSString *const kSubscriptionUploadKey = @"upload";
+static NSString *const kSubscriptionDownloadKey = @"download";
+static NSString *const kSubscriptionTotalKey = @"total";
+static NSString *const kSubscriptionExpireKey = @"expire";
 static const char *kDaemonPortPath = "/var/run/vpnctld.port";
 static const int kDaemonDefaultPort = 9093;
 static const int kDaemonPortMax = 9113;
@@ -3477,6 +3483,191 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
     return nil;
 }
 
+- (NSString *)subscriptionHeaderValueNamed:(NSString *)headerName fromMetadataText:(NSString *)text {
+    if (![headerName isKindOfClass:[NSString class]] || [headerName length] == 0) return nil;
+    if (![text isKindOfClass:[NSString class]] || [text length] == 0) return nil;
+
+    NSString *wanted = [headerName lowercaseString];
+    NSString *found = nil;
+    NSArray *lines = [text componentsSeparatedByCharactersInSet:[NSCharacterSet newlineCharacterSet]];
+    for (NSString *line in lines) {
+        if (![line isKindOfClass:[NSString class]]) continue;
+
+        NSString *trim = [self safeTrim:line];
+        if ([trim hasPrefix:@"#"]) {
+            trim = [self safeTrim:[trim substringFromIndex:1]];
+        }
+
+        NSRange sep = [trim rangeOfString:@":"];
+        if (sep.location == NSNotFound) continue;
+
+        NSString *name = [[self safeTrim:[trim substringToIndex:sep.location]] lowercaseString];
+        if (![name isEqualToString:wanted]) continue;
+
+        NSString *value = [self safeTrim:[trim substringFromIndex:(sep.location + 1)]];
+        if ([value length] > 0) {
+            found = value;
+        }
+    }
+    return found;
+}
+
+- (NSString *)subscriptionHeaderValueNamed:(NSString *)headerName fromHTTPHeaders:(NSDictionary *)headers {
+    if (![headerName isKindOfClass:[NSString class]] || [headerName length] == 0) return nil;
+    if (![headers isKindOfClass:[NSDictionary class]]) return nil;
+
+    NSString *wanted = [headerName lowercaseString];
+    for (id key in headers) {
+        if (![key isKindOfClass:[NSString class]]) continue;
+        if (![[((NSString *)key) lowercaseString] isEqualToString:wanted]) continue;
+
+        id rawValue = [headers objectForKey:key];
+        if (![rawValue isKindOfClass:[NSString class]]) continue;
+        NSString *value = [self safeTrim:(NSString *)rawValue];
+        if ([value length] > 0) return value;
+    }
+    return nil;
+}
+
+- (NSNumber *)subscriptionUnsignedNumberFromString:(NSString *)text {
+    NSString *value = [self safeTrim:text];
+    if ([value length] == 0) return nil;
+
+    const char *raw = [value UTF8String];
+    if (!raw || !*raw || *raw == '-') return nil;
+
+    errno = 0;
+    char *end = NULL;
+    unsigned long long parsed = strtoull(raw, &end, 10);
+    if (errno == ERANGE || end == raw) return nil;
+    while (end && (*end == ' ' || *end == '\t')) end++;
+    if (!end || *end != '\0') return nil;
+    return [NSNumber numberWithUnsignedLongLong:parsed];
+}
+
+- (NSDictionary *)subscriptionUserInfoFromHeaderValue:(NSString *)headerValue {
+    if (![headerValue isKindOfClass:[NSString class]] || [headerValue length] == 0) return nil;
+
+    NSMutableDictionary *info = [NSMutableDictionary dictionary];
+    NSArray *parts = [headerValue componentsSeparatedByString:@";"];
+    for (NSString *part in parts) {
+        if (![part isKindOfClass:[NSString class]]) continue;
+
+        NSRange eq = [part rangeOfString:@"="];
+        if (eq.location == NSNotFound) continue;
+
+        NSString *key = [[self safeTrim:[part substringToIndex:eq.location]] lowercaseString];
+        BOOL knownKey = [key isEqualToString:kSubscriptionUploadKey] ||
+                        [key isEqualToString:kSubscriptionDownloadKey] ||
+                        [key isEqualToString:kSubscriptionTotalKey] ||
+                        [key isEqualToString:kSubscriptionExpireKey];
+        if (!knownKey) continue;
+
+        NSNumber *number = [self subscriptionUnsignedNumberFromString:[part substringFromIndex:(eq.location + 1)]];
+        if (number) {
+            [info setObject:number forKey:key];
+        }
+    }
+    return ([info count] > 0) ? info : nil;
+}
+
+- (NSDictionary *)subscriptionUserInfoFromMetadataText:(NSString *)text {
+    NSString *value = [self subscriptionHeaderValueNamed:@"subscription-userinfo" fromMetadataText:text];
+    return [self subscriptionUserInfoFromHeaderValue:value];
+}
+
+- (NSDictionary *)subscriptionUserInfoFromData:(NSData *)data {
+    if (!data || [data length] == 0) return nil;
+
+    NSString *raw = [[[NSString alloc] initWithData:data encoding:NSUTF8StringEncoding] autorelease];
+    if (!raw) raw = [[[NSString alloc] initWithData:data encoding:NSISOLatin1StringEncoding] autorelease];
+    NSDictionary *info = [self subscriptionUserInfoFromMetadataText:raw];
+    if ([info count] > 0) return info;
+
+    NSString *b64 = [[raw componentsSeparatedByCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]] componentsJoinedByString:@""];
+    NSData *decoded = DecodeBase64String(b64);
+    if (!decoded || [decoded length] == 0) return nil;
+
+    NSString *decodedText = [[[NSString alloc] initWithData:decoded encoding:NSUTF8StringEncoding] autorelease];
+    if (!decodedText) decodedText = [[[NSString alloc] initWithData:decoded encoding:NSISOLatin1StringEncoding] autorelease];
+    return [self subscriptionUserInfoFromMetadataText:decodedText];
+}
+
+- (NSDictionary *)subscriptionUserInfoFromHTTPHeaders:(NSDictionary *)headers {
+    NSString *value = [self subscriptionHeaderValueNamed:@"subscription-userinfo" fromHTTPHeaders:headers];
+    return [self subscriptionUserInfoFromHeaderValue:value];
+}
+
+- (NSString *)formattedSubscriptionBytes:(unsigned long long)bytes {
+    static NSString *const units[] = {@"B", @"KB", @"MB", @"GB", @"TB", @"PB"};
+    double value = (double)bytes;
+    NSUInteger unit = 0;
+    while (value >= 1024.0 && unit < 5) {
+        value /= 1024.0;
+        unit++;
+    }
+
+    if (unit == 0 || value >= 10.0) {
+        return [NSString stringWithFormat:@"%.0f %@", value, units[unit]];
+    }
+    return [NSString stringWithFormat:@"%.1f %@", value, units[unit]];
+}
+
+- (NSString *)subscriptionTrafficTextFromDictionary:(NSDictionary *)sub {
+    NSDictionary *info = [sub objectForKey:kSubscriptionUserInfoKey];
+    if (![info isKindOfClass:[NSDictionary class]]) return nil;
+
+    NSNumber *uploadNumber = [info objectForKey:kSubscriptionUploadKey];
+    NSNumber *downloadNumber = [info objectForKey:kSubscriptionDownloadKey];
+    NSNumber *totalNumber = [info objectForKey:kSubscriptionTotalKey];
+    BOOL hasUsed = [uploadNumber isKindOfClass:[NSNumber class]] || [downloadNumber isKindOfClass:[NSNumber class]];
+    BOOL hasTotal = [totalNumber isKindOfClass:[NSNumber class]];
+    if (!hasUsed && !hasTotal) return nil;
+
+    unsigned long long upload = [uploadNumber isKindOfClass:[NSNumber class]] ? [uploadNumber unsignedLongLongValue] : 0;
+    unsigned long long download = [downloadNumber isKindOfClass:[NSNumber class]] ? [downloadNumber unsignedLongLongValue] : 0;
+    unsigned long long used = (ULLONG_MAX - upload < download) ? ULLONG_MAX : upload + download;
+
+    NSString *usedText = [self formattedSubscriptionBytes:used];
+    if (hasTotal) {
+        unsigned long long total = [totalNumber unsignedLongLongValue];
+        NSString *totalText = (total > 0) ? [self formattedSubscriptionBytes:total] : @"∞";
+        return [NSString stringWithFormat:@"%@ / %@",
+                usedText,
+                totalText];
+    }
+    return [NSString stringWithFormat:@"%@ used", usedText];
+}
+
+- (NSString *)subscriptionExpiryTextFromDictionary:(NSDictionary *)sub {
+    NSDictionary *info = [sub objectForKey:kSubscriptionUserInfoKey];
+    if (![info isKindOfClass:[NSDictionary class]]) return nil;
+
+    NSNumber *expireNumber = [info objectForKey:kSubscriptionExpireKey];
+    if (![expireNumber isKindOfClass:[NSNumber class]]) return nil;
+
+    unsigned long long timestamp = [expireNumber unsignedLongLongValue];
+    if (timestamp == 0) return @"no expiry";
+
+    NSDate *date = [NSDate dateWithTimeIntervalSince1970:(NSTimeInterval)timestamp];
+    if (!date) return nil;
+
+    NSDateFormatter *formatter = [[[NSDateFormatter alloc] init] autorelease];
+    [formatter setLocale:[[[NSLocale alloc] initWithLocaleIdentifier:@"en_US_POSIX"] autorelease]];
+    [formatter setDateFormat:@"dd.MM.yyyy"];
+    NSString *formatted = [formatter stringFromDate:date];
+    return ([formatted length] > 0) ? [NSString stringWithFormat:@"until %@", formatted] : nil;
+}
+
+- (NSString *)subscriptionDetailTailFromDictionary:(NSDictionary *)sub {
+    NSMutableArray *parts = [NSMutableArray array];
+    NSString *traffic = [self subscriptionTrafficTextFromDictionary:sub];
+    NSString *expiry = [self subscriptionExpiryTextFromDictionary:sub];
+    if ([traffic length] > 0) [parts addObject:traffic];
+    if ([expiry length] > 0) [parts addObject:expiry];
+    return [parts componentsJoinedByString:@" • "];
+}
+
 - (NSString *)transportTypeFromURI:(NSString *)uri {
     NSString *scheme = [self schemeFromURIString:uri];
     if ([scheme isEqualToString:@"socks5"]) return @"tcp";
@@ -4793,6 +4984,7 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
     NSString *nameFromURL = [self subscriptionNameFromURLString:urlString];
     NSString *hostName = [self hostFromURLString:urlString];
     NSString *nameFromMeta = nil;
+    NSDictionary *userInfoFromMeta = nil;
     BOOL allowInsecureFetch = SubscriptionDictionaryAllowsInsecureFetch(sub);
 
     NSString *fetchErr = nil;
@@ -4804,6 +4996,9 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
     }
     if ([nameFromMeta length] == 0 && [curlHeaders length] > 0) {
         nameFromMeta = [self subscriptionTitleFromMetadataText:curlHeaders];
+    }
+    if ([curlHeaders length] > 0) {
+        userInfoFromMeta = [self subscriptionUserInfoFromMetadataText:curlHeaders];
     }
     if (!data && !allowInsecureFetch && (!fetchErr || [fetchErr hasPrefix:@"vless-core-curl not found"])) {
         NSMutableURLRequest *req = [NSMutableURLRequest requestWithURL:url
@@ -4824,6 +5019,7 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
         } else if ([resp isKindOfClass:[NSHTTPURLResponse class]]) {
             NSDictionary *headers = [(NSHTTPURLResponse *)resp allHeaderFields];
             nameFromMeta = [self subscriptionTitleFromHTTPHeaders:headers];
+            userInfoFromMeta = [self subscriptionUserInfoFromHTTPHeaders:headers];
         }
     }
 
@@ -4837,6 +5033,9 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
 
     if ([nameFromMeta length] == 0) {
         nameFromMeta = [self subscriptionTitleFromData:data];
+    }
+    if ([userInfoFromMeta count] == 0) {
+        userInfoFromMeta = [self subscriptionUserInfoFromData:data];
     }
 
     NSArray *uris = [self parseSubscriptionData:data];
@@ -4853,6 +5052,10 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
 
     NSMutableDictionary *updated = [NSMutableDictionary dictionaryWithDictionary:sub];
     [updated setObject:uris forKey:@"items"];
+    [updated removeObjectForKey:kSubscriptionUserInfoKey];
+    if ([userInfoFromMeta count] > 0) {
+        [updated setObject:userInfoFromMeta forKey:kSubscriptionUserInfoKey];
+    }
 
     NSString *name = [updated objectForKey:@"name"];
     if ([nameFromMeta length] > 0) {
@@ -7005,10 +7208,14 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
     NSDictionary *sub = [_subscriptions objectAtIndex:subIdx];
     if (isHeader) {
         NSArray *items = [self subscriptionItemsAtIndex:subIdx];
-        NSString *url = [sub objectForKey:@"url"];
-        NSString *shownURL = [self maskedLinkText:(url ? url : @"")];
-        NSString *prefix = [NSString stringWithFormat:@"%lu configs •", (unsigned long)[items count]];
-        [self applyDetailPrefix:prefix marqueeTail:shownURL toCell:cell];
+        NSString *prefix = [NSString stringWithFormat:@"%lu config%@",
+                            (unsigned long)[items count],
+                            ([items count] == 1 ? @"" : @"s")];
+        NSString *tail = [self subscriptionDetailTailFromDictionary:sub];
+        if ([tail length] > 0) {
+            prefix = [prefix stringByAppendingString:@" •"];
+        }
+        [self applyDetailPrefix:prefix marqueeTail:tail toCell:cell];
         return;
     }
 
