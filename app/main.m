@@ -1150,6 +1150,7 @@ static NSData *FetchURLViaVlessCoreCurl(NSString *urlString, BOOL allowInsecureF
         argv[argc++] = (char *)"vless-core-curl";
         argv[argc++] = (char *)"--fail";
         argv[argc++] = (char *)"--location";
+        argv[argc++] = (char *)"--compressed";
         argv[argc++] = (char *)"--silent";
         argv[argc++] = (char *)"--show-error";
         argv[argc++] = (char *)"--connect-timeout";
@@ -3727,7 +3728,8 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
     NSRange hash = [uri rangeOfString:@"#" options:NSBackwardsSearch];
     if (hash.location == NSNotFound) return nil;
     NSString *frag = [uri substringFromIndex:(hash.location + 1)];
-    frag = [frag stringByReplacingPercentEscapesUsingEncoding:NSUTF8StringEncoding];
+    NSString *decoded = [frag stringByReplacingPercentEscapesUsingEncoding:NSUTF8StringEncoding];
+    if (decoded) frag = decoded;
     frag = [self safeTrim:frag];
     return [frag length] > 0 ? frag : nil;
 }
@@ -4734,10 +4736,27 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
                           [transport isEqualToString:@"splithttp"];
 
     // Supported tuple #2: [vless/xhttp/tls]
-    if (xhttpTransport && [security isEqualToString:@"tls"]) return nil;
+    if (xhttpTransport && [security isEqualToString:@"tls"]) {
+        NSString *mode = [[[self queryValueForURLString:uri key:@"mode"] lowercaseString]
+                          stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
+        if ([mode length] > 0 &&
+            ![mode isEqualToString:@"auto"] &&
+            ![mode isEqualToString:@"packet-up"]) {
+            return [NSString stringWithFormat:@"unsupported xhttp/tls mode=%@ (expected packet-up)", mode];
+        }
+        return nil;
+    }
 
     // Supported tuple #3: [vless/xhttp/reality]
     if (xhttpTransport && [security isEqualToString:@"reality"]) {
+        NSString *mode = [[[self queryValueForURLString:uri key:@"mode"] lowercaseString]
+                          stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
+        if ([mode length] > 0 &&
+            ![mode isEqualToString:@"auto"] &&
+            ![mode isEqualToString:@"stream-one"]) {
+            return [NSString stringWithFormat:@"unsupported xhttp/reality mode=%@ (expected stream-one)", mode];
+        }
+
         NSString *fp = [self realityFingerprintFromURI:uri];
         if (![self isSupportedRealityFingerprint:fp]) {
             return [NSString stringWithFormat:@"unsupported fp=%@", fp];
@@ -4751,7 +4770,7 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
         return nil;
     }
 
-    return @"supported sets are vless/tcp/reality, vless/tcp/tls, vless/xhttp/tls, vless/xhttp/reality, vless/ws/tls, vless/ws/none, and [socks5]";
+    return @"supported sets are vless/tcp/reality, vless/tcp/tls, vless/xhttp/tls mode=packet-up, vless/xhttp/reality mode=stream-one, vless/ws/tls, vless/ws/none, and [socks5]";
 }
 
 - (BOOL)isSupportedConfigTupleForURI:(NSString *)uri {
@@ -5419,19 +5438,36 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
 - (NSArray *)extractConfigURIsFromText:(NSString *)text {
     if (!text || [text length] == 0) return [NSArray array];
 
+    NSMutableArray *out = [NSMutableArray array];
+    NSMutableArray *fallbackLines = [NSMutableArray array];
+    NSArray *lines = [text componentsSeparatedByCharactersInSet:[NSCharacterSet newlineCharacterSet]];
+    for (NSString *line in lines) {
+        NSString *trimmed = [self safeTrim:line];
+        NSString *lower = [trimmed lowercaseString];
+        if ([lower hasPrefix:@"vless://"] || [lower hasPrefix:@"socks5://"]) {
+            if (![out containsObject:trimmed]) {
+                [out addObject:trimmed];
+            }
+        } else if ([line length] > 0) {
+            [fallbackLines addObject:line];
+        }
+    }
+
+    NSString *fallbackText = [fallbackLines componentsJoinedByString:@"\n"];
+    if ([fallbackText length] == 0) return out;
+
     NSError *reErr = nil;
     NSRegularExpression *re = [NSRegularExpression regularExpressionWithPattern:@"(?:vless://|socks5://)[^\\s\"'<>]+"
                                                                          options:NSRegularExpressionCaseInsensitive
                                                                            error:&reErr];
     if (!re || reErr) {
-        return [NSArray array];
+        return out;
     }
 
-    NSArray *matches = [re matchesInString:text options:0 range:NSMakeRange(0, [text length])];
-    NSMutableArray *out = [NSMutableArray array];
+    NSArray *matches = [re matchesInString:fallbackText options:0 range:NSMakeRange(0, [fallbackText length])];
     for (NSTextCheckingResult *m in matches) {
         if (m.range.location == NSNotFound || m.range.length == 0) continue;
-        NSString *uri = [text substringWithRange:m.range];
+        NSString *uri = [fallbackText substringWithRange:m.range];
 
         while ([uri hasSuffix:@","] || [uri hasSuffix:@";"] || [uri hasSuffix:@")"] || [uri hasSuffix:@"]"]) {
             if ([uri length] <= 1) break;
