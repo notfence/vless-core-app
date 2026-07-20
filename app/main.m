@@ -4,7 +4,7 @@
 #import <CoreMedia/CoreMedia.h>
 #import <CoreVideo/CoreVideo.h>
 #include "happ_crypto.h"
-#include "quirc.h"
+#include <zbar.h>
 
 #include <sys/socket.h>
 #include <sys/types.h>
@@ -2278,7 +2278,7 @@ static UIImage *MakeIconImage(VCIconType type, CGFloat size, BOOL active) {
                           [self rowWithTitle:@"OpenSSL" detail:[NSString stringWithFormat:@"TLS library, version %@, %@", [deps objectForKey:@"openssl"], opensslPatchStatus]],
                           [self rowWithTitle:@"zlib" detail:[NSString stringWithFormat:@"Compression library, version %@", [deps objectForKey:@"zlib"]]],
                           [self rowWithTitle:@"libevent" detail:@"Event loop library used by redsocks."],
-                          [self rowWithTitle:@"quirc" detail:@"QR code recognition library by Daniel Beer, ISC License."],
+                          [self rowWithTitle:@"ZBar" detail:@"QR code recognition library, version 0.23.93, LGPL 2.1 or later."],
                           [self rowWithTitle:@"CA certificates" detail:@"Mozilla CA bundle packaged as cacert.pem."],
                           nil];
 
@@ -2805,24 +2805,135 @@ static UIImage *MakeIconImage(VCIconType type, CGFloat size, BOOL active) {
 @interface QRScanVC : UIViewController <AVCaptureMetadataOutputObjectsDelegate, AVCaptureVideoDataOutputSampleBufferDelegate> {
     id<QRScanVCDelegate> _delegate;
     AVCaptureSession *_captureSession;
+    AVCaptureDevice *_camera;
     AVCaptureMetadataOutput *_metadataOutput;
     AVCaptureVideoDataOutput *_videoOutput;
     dispatch_queue_t _videoQueue;
     AVCaptureVideoPreviewLayer *_previewLayer;
     UILabel *_hintLabel;
+    UIButton *_torchButton;
     UIButton *_cancelButton;
     UILabel *_cancelButtonLabel;
-    struct quirc *_qrDecoder;
+    UIView *_focusIndicator;
+    UITapGestureRecognizer *_focusGesture;
+    zbar_image_scanner_t *_qrScanner;
     int _frameSkipCounter;
     BOOL _didFinish;
     BOOL _metadataCanScanQR;
+    BOOL _torchEnabled;
 }
 @property (nonatomic, assign) id<QRScanVCDelegate> delegate;
+- (void)applyPreferredMetadataTypes;
 @end
 
 @implementation QRScanVC
 
 @synthesize delegate = _delegate;
+
+- (void)setScannerHintText:(NSString *)text {
+    if (![text isKindOfClass:[NSString class]]) text = @"";
+    _hintLabel.text = text;
+}
+
+- (void)updateTorchButtonAppearance {
+    if (!_torchButton) return;
+
+    _torchButton.selected = _torchEnabled;
+    _torchButton.backgroundColor = _torchEnabled
+        ? [UIColor colorWithWhite:0.0f alpha:0.68f]
+        : [UIColor colorWithWhite:0.0f alpha:0.28f];
+    _torchButton.accessibilityValue = _torchEnabled ? @"On" : @"Off";
+}
+
+- (void)setTorchEnabled:(BOOL)enabled {
+    if (!_camera || ![_camera hasTorch] ||
+        ![_camera isTorchModeSupported:(enabled ? AVCaptureTorchModeOn : AVCaptureTorchModeOff)]) {
+        _torchEnabled = NO;
+        [self updateTorchButtonAppearance];
+        return;
+    }
+
+    NSError *error = nil;
+    if (![_camera lockForConfiguration:&error]) return;
+    @try {
+        [_camera setTorchMode:(enabled ? AVCaptureTorchModeOn : AVCaptureTorchModeOff)];
+        _torchEnabled = enabled;
+    }
+    @catch (NSException *exception) {
+        (void)exception;
+        _torchEnabled = NO;
+    }
+    [_camera unlockForConfiguration];
+    [self updateTorchButtonAppearance];
+}
+
+- (void)torchPressed {
+    [self setTorchEnabled:!_torchEnabled];
+}
+
+- (void)configureContinuousCameraFocus {
+    if (!_camera) return;
+
+    NSError *error = nil;
+    if (![_camera lockForConfiguration:&error]) return;
+    if ([_camera isFocusModeSupported:AVCaptureFocusModeContinuousAutoFocus]) {
+        [_camera setFocusMode:AVCaptureFocusModeContinuousAutoFocus];
+    }
+    if ([_camera isExposureModeSupported:AVCaptureExposureModeContinuousAutoExposure]) {
+        [_camera setExposureMode:AVCaptureExposureModeContinuousAutoExposure];
+    }
+    [_camera unlockForConfiguration];
+}
+
+- (void)showFocusIndicatorAtPoint:(CGPoint)point {
+    if (!_focusIndicator) return;
+
+    [NSObject cancelPreviousPerformRequestsWithTarget:self selector:@selector(hideFocusIndicator) object:nil];
+    _focusIndicator.center = point;
+    _focusIndicator.alpha = 1.0f;
+    _focusIndicator.transform = CGAffineTransformMakeScale(1.25f, 1.25f);
+    [UIView animateWithDuration:0.18f animations:^{
+        _focusIndicator.transform = CGAffineTransformIdentity;
+    }];
+    [self performSelector:@selector(hideFocusIndicator) withObject:nil afterDelay:0.8f];
+}
+
+- (void)hideFocusIndicator {
+    [UIView animateWithDuration:0.2f animations:^{
+        _focusIndicator.alpha = 0.0f;
+    }];
+}
+
+- (void)focusTapped:(UITapGestureRecognizer *)gesture {
+    if (!_camera || !_previewLayer || [gesture state] != UIGestureRecognizerStateEnded) return;
+
+    CGPoint viewPoint = [gesture locationInView:self.view];
+    if (CGRectContainsPoint(_hintLabel.frame, viewPoint) ||
+        CGRectContainsPoint(_cancelButton.frame, viewPoint) ||
+        (!_torchButton.hidden && CGRectContainsPoint(_torchButton.frame, viewPoint))) {
+        return;
+    }
+    if (![_camera isFocusPointOfInterestSupported] ||
+        ![_camera isFocusModeSupported:AVCaptureFocusModeAutoFocus]) {
+        return;
+    }
+
+    CGPoint devicePoint = [_previewLayer captureDevicePointOfInterestForPoint:viewPoint];
+    NSError *error = nil;
+    if (![_camera lockForConfiguration:&error]) return;
+    [_camera setFocusPointOfInterest:devicePoint];
+    [_camera setFocusMode:AVCaptureFocusModeAutoFocus];
+    if ([_camera isExposurePointOfInterestSupported] &&
+        [_camera isExposureModeSupported:AVCaptureExposureModeContinuousAutoExposure]) {
+        [_camera setExposurePointOfInterest:devicePoint];
+        [_camera setExposureMode:AVCaptureExposureModeContinuousAutoExposure];
+    }
+    [_camera unlockForConfiguration];
+
+    [self showFocusIndicatorAtPoint:viewPoint];
+    [NSObject cancelPreviousPerformRequestsWithTarget:self selector:@selector(configureContinuousCameraFocus) object:nil];
+    [self performSelector:@selector(configureContinuousCameraFocus) withObject:nil afterDelay:1.2f];
+}
 
 - (AVCaptureVideoOrientation)captureVideoOrientationForCurrentInterfaceOrientation {
     UIInterfaceOrientation ui = CurrentInterfaceOrientation();
@@ -2864,6 +2975,7 @@ static UIImage *MakeIconImage(VCIconType type, CGFloat size, BOOL active) {
     if (![value isKindOfClass:[NSString class]] || [value length] == 0) return;
 
     _didFinish = YES;
+    [self setTorchEnabled:NO];
     if (_captureSession && [_captureSession isRunning]) {
         [_captureSession stopRunning];
     }
@@ -2872,7 +2984,7 @@ static UIImage *MakeIconImage(VCIconType type, CGFloat size, BOOL active) {
     }
 }
 
-- (BOOL)tryDecodeFrameWithQuirc:(CMSampleBufferRef)sampleBuffer decodedText:(NSString **)decodedText {
+- (BOOL)tryDecodeFrameWithZBar:(CMSampleBufferRef)sampleBuffer decodedText:(NSString **)decodedText {
     if (!sampleBuffer || !decodedText) return NO;
 
     CVImageBufferRef imageBuffer = CMSampleBufferGetImageBuffer(sampleBuffer);
@@ -2898,75 +3010,93 @@ static UIImage *MakeIconImage(VCIconType type, CGFloat size, BOOL active) {
         source = (const uint8_t *)CVPixelBufferGetBaseAddress(imageBuffer);
     }
 
-    if (!source || width < 40 || height < 40) {
+    if (!source || width < 40 || height < 40 ||
+        width > UINT_MAX || height > UINT_MAX || height > (SIZE_MAX / width)) {
         CVPixelBufferUnlockBaseAddress(imageBuffer, 0);
         return NO;
     }
 
-    if (!_qrDecoder) {
-        _qrDecoder = quirc_new();
-    }
-    if (!_qrDecoder) {
-        CVPixelBufferUnlockBaseAddress(imageBuffer, 0);
-        return NO;
-    }
-
-    if (quirc_resize(_qrDecoder, (int)width, (int)height) < 0) {
-        CVPixelBufferUnlockBaseAddress(imageBuffer, 0);
-        return NO;
-    }
-
-    uint8_t *dst = quirc_begin(_qrDecoder, NULL, NULL);
-    if (!dst) {
+    size_t imageLength = width * height;
+    uint8_t *luma = (uint8_t *)malloc(imageLength);
+    if (!luma) {
         CVPixelBufferUnlockBaseAddress(imageBuffer, 0);
         return NO;
     }
 
     if (isPlanar) {
         for (size_t y = 0; y < height; y++) {
-            memcpy(dst + (y * width), source + (y * bytesPerRow), width);
+            memcpy(luma + (y * width), source + (y * bytesPerRow), width);
         }
     } else {
         OSType pixelType = CVPixelBufferGetPixelFormatType(imageBuffer);
         if (pixelType == kCVPixelFormatType_32BGRA || pixelType == kCVPixelFormatType_32ARGB) {
             for (size_t y = 0; y < height; y++) {
                 const uint8_t *row = source + (y * bytesPerRow);
-                uint8_t *dstRow = dst + (y * width);
+                uint8_t *dstRow = luma + (y * width);
                 for (size_t x = 0; x < width; x++) {
                     const uint8_t *px = row + (x * 4);
-                    dstRow[x] = px[1];
+                    unsigned int red = (pixelType == kCVPixelFormatType_32BGRA) ? px[2] : px[1];
+                    unsigned int green = (pixelType == kCVPixelFormatType_32BGRA) ? px[1] : px[2];
+                    unsigned int blue = (pixelType == kCVPixelFormatType_32BGRA) ? px[0] : px[3];
+                    dstRow[x] = (uint8_t)((red * 77U + green * 150U + blue * 29U) >> 8);
                 }
             }
         } else {
             for (size_t y = 0; y < height; y++) {
-                memcpy(dst + (y * width), source + (y * bytesPerRow), width);
+                memcpy(luma + (y * width), source + (y * bytesPerRow), width);
             }
         }
     }
 
-    quirc_end(_qrDecoder);
     CVPixelBufferUnlockBaseAddress(imageBuffer, 0);
 
-    int count = quirc_count(_qrDecoder);
-    for (int i = 0; i < count; i++) {
-        struct quirc_code code;
-        struct quirc_data data;
-        quirc_extract(_qrDecoder, i, &code);
-        quirc_decode_error_t err = quirc_decode(&code, &data);
-        if (err != QUIRC_SUCCESS) {
-            quirc_flip(&code);
-            err = quirc_decode(&code, &data);
+    if (!_qrScanner) {
+        _qrScanner = zbar_image_scanner_create();
+        if (_qrScanner) {
+            zbar_image_scanner_set_config(_qrScanner, ZBAR_NONE, ZBAR_CFG_ENABLE, 0);
+            zbar_image_scanner_set_config(_qrScanner, ZBAR_QRCODE, ZBAR_CFG_ENABLE, 1);
         }
-        if (err != QUIRC_SUCCESS) continue;
-        if (data.payload_len <= 0) continue;
+    }
+    if (!_qrScanner) {
+        free(luma);
+        return NO;
+    }
 
-        NSData *payloadData = [NSData dataWithBytes:data.payload length:(NSUInteger)data.payload_len];
-        NSString *text = [[[NSString alloc] initWithData:payloadData encoding:NSUTF8StringEncoding] autorelease];
-        if (!text) {
-            text = [[[NSString alloc] initWithData:payloadData encoding:NSISOLatin1StringEncoding] autorelease];
+    zbar_image_t *image = zbar_image_create();
+    if (!image) {
+        free(luma);
+        return NO;
+    }
+    zbar_image_set_format(image, zbar_fourcc('Y', '8', '0', '0'));
+    zbar_image_set_size(image, (unsigned int)width, (unsigned int)height);
+    zbar_image_set_data(image, luma, imageLength, NULL);
+
+    NSString *text = nil;
+    if (zbar_scan_image(_qrScanner, image) > 0) {
+        const zbar_symbol_t *symbol = zbar_image_first_symbol(image);
+        for (; symbol; symbol = zbar_symbol_next(symbol)) {
+            if (zbar_symbol_get_type(symbol) != ZBAR_QRCODE) continue;
+            const char *payload = zbar_symbol_get_data(symbol);
+            unsigned int payloadLength = zbar_symbol_get_data_length(symbol);
+            if (!payload || payloadLength == 0) continue;
+
+            text = [[[NSString alloc] initWithBytes:payload
+                                             length:(NSUInteger)payloadLength
+                                           encoding:NSUTF8StringEncoding] autorelease];
+            if (!text) {
+                text = [[[NSString alloc] initWithBytes:payload
+                                                 length:(NSUInteger)payloadLength
+                                               encoding:NSISOLatin1StringEncoding] autorelease];
+            }
+            if (text && [text length] > 0) break;
         }
-        if (!text || [text length] == 0) continue;
+    }
 
+    zbar_image_set_data(image, NULL, 0, NULL);
+    zbar_image_destroy(image);
+    free(luma);
+
+    if (text && [text length] > 0) {
         *decodedText = text;
         return YES;
     }
@@ -2980,6 +3110,9 @@ static UIImage *MakeIconImage(VCIconType type, CGFloat size, BOOL active) {
         _hintLabel.text = @"Camera is unavailable on this device";
         return;
     }
+
+    _camera = [camera retain];
+    [self configureContinuousCameraFocus];
 
     NSError *error = nil;
     AVCaptureDeviceInput *input = [AVCaptureDeviceInput deviceInputWithDevice:camera error:&error];
@@ -3030,13 +3163,13 @@ static UIImage *MakeIconImage(VCIconType type, CGFloat size, BOOL active) {
 - (void)applyPreferredMetadataTypes {
     _metadataCanScanQR = NO;
     if (!_metadataOutput) {
-        _hintLabel.text = @"Legacy QR mode: hold camera steady";
+        [self setScannerHintText:@"Scan a QR code"];
         return;
     }
 
     NSArray *availableTypes = [_metadataOutput availableMetadataObjectTypes];
     if (![availableTypes isKindOfClass:[NSArray class]] || [availableTypes count] == 0) {
-        _hintLabel.text = @"Legacy QR mode: hold camera steady";
+        [self setScannerHintText:@"Scan a QR code"];
         return;
     }
 
@@ -3044,7 +3177,7 @@ static UIImage *MakeIconImage(VCIconType type, CGFloat size, BOOL active) {
         if ([availableTypes containsObject:kVCQRMetadataType]) {
             [_metadataOutput setMetadataObjectTypes:[NSArray arrayWithObject:kVCQRMetadataType]];
             _metadataCanScanQR = YES;
-            _hintLabel.text = @"Point camera at a config, HAPP, or subscription QR code";
+            [self setScannerHintText:@"Scan a QR code"];
             return;
         }
         [_metadataOutput setMetadataObjectTypes:availableTypes];
@@ -3053,7 +3186,7 @@ static UIImage *MakeIconImage(VCIconType type, CGFloat size, BOOL active) {
         (void)exception;
     }
 
-    _hintLabel.text = @"Legacy QR mode: hold camera steady";
+    [self setScannerHintText:@"Scan a QR code"];
 }
 
 - (void)viewDidLoad {
@@ -3061,13 +3194,28 @@ static UIImage *MakeIconImage(VCIconType type, CGFloat size, BOOL active) {
     self.view.backgroundColor = [UIColor blackColor];
 
     _hintLabel = [[UILabel alloc] initWithFrame:CGRectZero];
-    _hintLabel.backgroundColor = [UIColor colorWithWhite:0 alpha:0.55];
+    _hintLabel.backgroundColor = [UIColor colorWithWhite:0.0f alpha:0.58f];
     _hintLabel.textColor = [UIColor whiteColor];
     _hintLabel.font = [UIFont boldSystemFontOfSize:16.0];
     _hintLabel.textAlignment = NSTextAlignmentCenter;
-    _hintLabel.numberOfLines = 2;
-    _hintLabel.text = @"Point camera at a config, HAPP, or subscription QR code";
+    _hintLabel.numberOfLines = 1;
+    _hintLabel.layer.cornerRadius = 8.0f;
+    _hintLabel.layer.masksToBounds = YES;
+    [self setScannerHintText:@"Scan a QR code"];
     [self.view addSubview:_hintLabel];
+
+    _torchButton = [UIButton buttonWithType:UIButtonTypeCustom];
+    [_torchButton retain];
+    _torchButton.hidden = YES;
+    _torchButton.accessibilityLabel = @"Flashlight";
+    _torchButton.adjustsImageWhenHighlighted = YES;
+    UIImage *flashlightIcon = LoadBundledIconScaled(@"icon-flashlight", 32.0f);
+    [_torchButton setImage:flashlightIcon forState:UIControlStateNormal];
+    [_torchButton setImage:flashlightIcon forState:UIControlStateSelected];
+    _torchButton.layer.cornerRadius = 22.0f;
+    [_torchButton addTarget:self action:@selector(torchPressed) forControlEvents:UIControlEventTouchUpInside];
+    [self updateTorchButtonAppearance];
+    [self.view addSubview:_torchButton];
 
     _cancelButton = [UIButton buttonWithType:UIButtonTypeCustom];
     [_cancelButton setTitle:@"" forState:UIControlStateNormal];
@@ -3090,7 +3238,23 @@ static UIImage *MakeIconImage(VCIconType type, CGFloat size, BOOL active) {
     _cancelButtonLabel.userInteractionEnabled = NO;
     [_cancelButton addSubview:_cancelButtonLabel];
 
+    _focusIndicator = [[UIView alloc] initWithFrame:CGRectMake(0.0f, 0.0f, 72.0f, 72.0f)];
+    _focusIndicator.userInteractionEnabled = NO;
+    _focusIndicator.backgroundColor = [UIColor clearColor];
+    _focusIndicator.layer.cornerRadius = 8.0f;
+    _focusIndicator.layer.borderWidth = 2.0f;
+    _focusIndicator.layer.borderColor = [UIColor colorWithRed:1.0f green:0.82f blue:0.18f alpha:1.0f].CGColor;
+    _focusIndicator.alpha = 0.0f;
+    [self.view addSubview:_focusIndicator];
+
+    _focusGesture = [[UITapGestureRecognizer alloc] initWithTarget:self action:@selector(focusTapped:)];
+    _focusGesture.cancelsTouchesInView = NO;
+    [self.view addGestureRecognizer:_focusGesture];
+
     [self configureCaptureSession];
+    _torchButton.hidden = !(_captureSession && _camera && [_camera hasTorch] &&
+                            [_camera isTorchModeSupported:AVCaptureTorchModeOn] &&
+                            [_camera isTorchModeSupported:AVCaptureTorchModeOff]);
 }
 
 - (void)viewDidLayoutSubviews {
@@ -3106,7 +3270,9 @@ static UIImage *MakeIconImage(VCIconType type, CGFloat size, BOOL active) {
     if (statusInset > 0.0f && statusInset < 64.0f) {
         top = statusInset + 8.0f;
     }
-    _hintLabel.frame = CGRectMake(pad, top, b.size.width - (pad * 2.0f), 58.0f);
+    CGFloat hintWidth = MIN(190.0f, b.size.width - (pad * 2.0f) - 56.0f);
+    _hintLabel.frame = CGRectMake(floor((b.size.width - hintWidth) * 0.5f), top, hintWidth, 42.0f);
+    _torchButton.frame = CGRectMake(b.size.width - pad - 44.0f, top, 44.0f, 44.0f);
     _cancelButton.frame = CGRectMake(pad, b.size.height - 62.0f - pad, b.size.width - (pad * 2.0f), 62.0f);
     _cancelButtonLabel.frame = _cancelButton.bounds;
 }
@@ -3127,6 +3293,9 @@ static UIImage *MakeIconImage(VCIconType type, CGFloat size, BOOL active) {
 - (void)viewWillDisappear:(BOOL)animated {
     [super viewWillDisappear:animated];
     [NSObject cancelPreviousPerformRequestsWithTarget:self selector:@selector(applyPreferredMetadataTypes) object:nil];
+    [NSObject cancelPreviousPerformRequestsWithTarget:self selector:@selector(configureContinuousCameraFocus) object:nil];
+    [NSObject cancelPreviousPerformRequestsWithTarget:self selector:@selector(hideFocusIndicator) object:nil];
+    [self setTorchEnabled:NO];
     if (_captureSession && [_captureSession isRunning]) {
         [_captureSession stopRunning];
     }
@@ -3134,6 +3303,7 @@ static UIImage *MakeIconImage(VCIconType type, CGFloat size, BOOL active) {
 
 - (void)cancelPressed {
     _didFinish = YES;
+    [self setTorchEnabled:NO];
     if (_captureSession && [_captureSession isRunning]) {
         [_captureSession stopRunning];
     }
@@ -3174,13 +3344,19 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
     _frameSkipCounter++;
     if ((_frameSkipCounter % 3) != 0) return;
 
+    NSAutoreleasePool *pool = [[NSAutoreleasePool alloc] init];
     NSString *decoded = nil;
-    if (![self tryDecodeFrameWithQuirc:sampleBuffer decodedText:&decoded]) {
+    if (![self tryDecodeFrameWithZBar:sampleBuffer decodedText:&decoded]) {
+        [pool drain];
         return;
     }
-    if (![decoded isKindOfClass:[NSString class]] || [decoded length] == 0) return;
+    if (![decoded isKindOfClass:[NSString class]] || [decoded length] == 0) {
+        [pool drain];
+        return;
+    }
 
     NSString *captured = [decoded copy];
+    [pool drain];
     dispatch_async(dispatch_get_main_queue(), ^{
         [self deliverScanResult:captured];
         [captured release];
@@ -3217,6 +3393,8 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
 }
 
 - (void)dealloc {
+    [NSObject cancelPreviousPerformRequestsWithTarget:self];
+    [self setTorchEnabled:NO];
     if (_captureSession && [_captureSession isRunning]) {
         [_captureSession stopRunning];
     }
@@ -3224,16 +3402,20 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
         dispatch_release(_videoQueue);
         _videoQueue = NULL;
     }
-    if (_qrDecoder) {
-        quirc_destroy(_qrDecoder);
-        _qrDecoder = NULL;
+    if (_qrScanner) {
+        zbar_image_scanner_destroy(_qrScanner);
+        _qrScanner = NULL;
     }
     [_captureSession release];
+    [_camera release];
     [_metadataOutput release];
     [_videoOutput release];
     [_previewLayer release];
     [_hintLabel release];
+    [_torchButton release];
     [_cancelButtonLabel release];
+    [_focusIndicator release];
+    [_focusGesture release];
     [super dealloc];
 }
 

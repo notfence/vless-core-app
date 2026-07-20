@@ -31,12 +31,35 @@ OPENSSL_IOS_DIR ?= $(abspath ../vless-core-cli/third_party/openssl-ios6-armv7)
 OPENSSL_IOS_INCLUDE ?= $(OPENSSL_IOS_DIR)/include
 OPENSSL_IOS_CRYPTO_LIB ?= $(OPENSSL_IOS_DIR)/lib/libcrypto.a
 
-APP_SRC := app/main.m happ/happ_crypto.c third_party/quirc/quirc.c third_party/quirc/decode.c third_party/quirc/identify.c third_party/quirc/version_db.c
+ZBAR_DIR := third_party/zbar/zbar
+ZBAR_SRC := \
+	$(ZBAR_DIR)/config.c \
+	$(ZBAR_DIR)/decoder/qr_finder.c \
+	$(ZBAR_DIR)/decoder.c \
+	$(ZBAR_DIR)/error.c \
+	$(ZBAR_DIR)/image.c \
+	$(ZBAR_DIR)/img_scanner.c \
+	$(ZBAR_DIR)/qrcode/bch15_5.c \
+	$(ZBAR_DIR)/qrcode/binarize.c \
+	$(ZBAR_DIR)/qrcode/isaac.c \
+	$(ZBAR_DIR)/qrcode/qrdec.c \
+	$(ZBAR_DIR)/qrcode/qrdectxt.c \
+	$(ZBAR_DIR)/qrcode/rs.c \
+	$(ZBAR_DIR)/qrcode/util.c \
+	$(ZBAR_DIR)/refcnt.c \
+	$(ZBAR_DIR)/scanner.c \
+	$(ZBAR_DIR)/symbol.c
+ZBAR_HEADERS := $(shell find $(ZBAR_DIR) -type f -name '*.h')
+ZBAR_OBJ := $(patsubst $(ZBAR_DIR)/%.c,$(BUILD_DIR)/zbar/%.o,$(ZBAR_SRC))
+ZBAR_LIB := $(BUILD_DIR)/libzbar-qr.a
+
+APP_SRC := app/main.m happ/happ_crypto.c
 DAEMON_SRC := daemon/vpnctld.c daemon/vpnicon_statusbar.c
 BOOTSTRAP_SRC := daemon/vpnctld_bootstrap.c
 
-APP_CFLAGS := -fno-objc-arc -Wall -Wextra -O2 -arch armv7 -miphoneos-version-min=6.0 -isysroot $(IOS_SDK) -Ihapp -Ithird_party/quirc -I$(OPENSSL_IOS_INCLUDE)
-APP_LDFLAGS := -framework UIKit -framework Foundation -framework CoreGraphics -framework QuartzCore -framework AVFoundation -framework CoreMedia -framework CoreVideo $(OPENSSL_IOS_CRYPTO_LIB)
+APP_CFLAGS := -fno-objc-arc -Wall -Wextra -O2 -arch armv7 -miphoneos-version-min=6.0 -isysroot $(IOS_SDK) -Ihapp -I$(ZBAR_DIR) -I$(OPENSSL_IOS_INCLUDE)
+APP_LDFLAGS := -framework UIKit -framework Foundation -framework CoreGraphics -framework QuartzCore -framework AVFoundation -framework CoreMedia -framework CoreVideo -liconv $(OPENSSL_IOS_CRYPTO_LIB)
+ZBAR_CFLAGS := -w -O2 -arch armv7 -miphoneos-version-min=6.0 -isysroot $(IOS_SDK) -I$(ZBAR_DIR)
 
 DAEMON_CFLAGS := -Wall -Wextra -O2 -std=c11 -arch armv7 -miphoneos-version-min=6.0 -isysroot $(IOS_SDK)
 
@@ -75,9 +98,17 @@ check-package-inputs:
 		exit 1; \
 	fi
 
-$(APP_BIN): check-ios-toolchain $(APP_SRC)
+$(BUILD_DIR)/zbar/%.o: $(ZBAR_DIR)/%.c $(ZBAR_HEADERS)
+	mkdir -p $(dir $@)
+	PATH="$(IOS_BIN):$$PATH" $(IOS_RUNTIME_ENV) $(IOS_CC) $(ZBAR_CFLAGS) -c $< -o $@
+
+$(ZBAR_LIB): check-ios-toolchain $(ZBAR_OBJ)
+	$(IOS_AR) rcs $@ $(ZBAR_OBJ)
+	$(IOS_RANLIB) $@
+
+$(APP_BIN): check-ios-toolchain $(APP_SRC) $(ZBAR_LIB)
 	mkdir -p $(BUILD_DIR)
-	PATH="$(IOS_BIN):$$PATH" $(IOS_RUNTIME_ENV) $(IOS_CC) $(APP_CFLAGS) $(APP_SRC) -o $@ $(APP_LDFLAGS)
+	PATH="$(IOS_BIN):$$PATH" $(IOS_RUNTIME_ENV) $(IOS_CC) $(APP_CFLAGS) $(APP_SRC) $(ZBAR_LIB) -o $@ $(APP_LDFLAGS)
 
 $(DAEMON_BIN): check-ios-toolchain $(DAEMON_SRC)
 	mkdir -p $(BUILD_DIR)
@@ -113,6 +144,7 @@ package-root: check-package-inputs $(APP_BIN) $(DAEMON_BIN) $(BOOTSTRAP_BIN)
 	cp app/icons/icon-settings.png $(PKG_ROOT)/Applications/vless-core.app/icon-settings.png
 	cp app/icons/icon-trash.png $(PKG_ROOT)/Applications/vless-core.app/icon-trash.png
 	cp app/icons/icon-ping.png $(PKG_ROOT)/Applications/vless-core.app/icon-ping.png
+	cp app/icons/icon-flashlight.png $(PKG_ROOT)/Applications/vless-core.app/icon-flashlight.png
 	cp app/icons/info.png $(PKG_ROOT)/Applications/vless-core.app/info.png
 	cp $(APP_BIN) $(PKG_ROOT)/Applications/vless-core.app/vless-core
 	cp $(DAEMON_BIN) $(PKG_ROOT)/usr/bin/vpnctld
