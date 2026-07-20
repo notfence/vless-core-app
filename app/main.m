@@ -7793,8 +7793,10 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
 
     CGFloat collapseDistance = kVCMainContentStartY - kVCMainCompactContentStartY;
     CGFloat progress = 0.0f;
-    if (!_showingTerminal && collapseDistance > 0.0f) {
-        progress = VCClampUnit((_tableView.contentOffset.y + collapseDistance) / collapseDistance);
+    if (collapseDistance > 0.0f) {
+        progress = _showingTerminal
+            ? (_phoneConnectionCompact ? 1.0f : 0.0f)
+            : VCClampUnit((_tableView.contentOffset.y + collapseDistance) / collapseDistance);
     }
 
     CGFloat width = self.view.bounds.size.width;
@@ -7825,6 +7827,19 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
     CGFloat statusFontSize = 12.5f - progress;
     if (fabs([_statusLabel.font pointSize] - statusFontSize) > 0.35f) {
         _statusLabel.font = [UIFont systemFontOfSize:statusFontSize];
+    }
+
+    if (_showingTerminal && _logSelector && _logView) {
+        CGFloat logY = kVCMainContentStartY - collapseDistance * progress;
+        CGRect selectorFrame = _logSelector.frame;
+        selectorFrame.origin.y = logY + 2.0f;
+        _logSelector.frame = selectorFrame;
+
+        CGRect logFrame = _logView.frame;
+        logFrame.origin.y = logY + 32.0f;
+        logFrame.size.height = self.view.bounds.size.height - logFrame.origin.y;
+        if (logFrame.size.height < 120.0f) logFrame.size.height = 120.0f;
+        _logView.frame = logFrame;
     }
 
     CGFloat labelAlpha = fabs(progress * 2.0f - 1.0f);
