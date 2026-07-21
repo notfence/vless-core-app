@@ -138,6 +138,13 @@ package-root: check-package-inputs $(APP_BIN) $(DAEMON_BIN) $(BOOTSTRAP_BIN)
 	sed -i "/<key>VCGitCommit<\/key>/{n;s#<string>.*</string>#<string>$$GIT_COMMIT</string>#;}" $(PKG_ROOT)/Applications/vless-core.app/Info.plist
 	cp app/icons/Icon.png $(PKG_ROOT)/Applications/vless-core.app/Icon.png
 	cp app/icons/Icon@2x.png $(PKG_ROOT)/Applications/vless-core.app/Icon@2x.png
+	cp app/icons/Default~iphone.png $(PKG_ROOT)/Applications/vless-core.app/Default~iphone.png
+	cp app/icons/Default@2x~iphone.png $(PKG_ROOT)/Applications/vless-core.app/Default@2x~iphone.png
+	cp app/icons/Default-568h@2x.png $(PKG_ROOT)/Applications/vless-core.app/Default-568h@2x.png
+	cp app/icons/Default-Landscape@2x~ipad.png $(PKG_ROOT)/Applications/vless-core.app/Default-Landscape@2x~ipad.png
+	cp app/icons/Default-Landscape~ipad.png $(PKG_ROOT)/Applications/vless-core.app/Default-Landscape~ipad.png
+	cp app/icons/Default-Portrait@2x~ipad.png $(PKG_ROOT)/Applications/vless-core.app/Default-Portrait@2x~ipad.png
+	cp app/icons/Default-Portrait~ipad.png $(PKG_ROOT)/Applications/vless-core.app/Default-Portrait~ipad.png
 	cp app/icons/icon-refresh.png $(PKG_ROOT)/Applications/vless-core.app/icon-refresh.png
 	cp app/icons/icon-terminal.png $(PKG_ROOT)/Applications/vless-core.app/icon-terminal.png
 	cp app/icons/icon-list.png $(PKG_ROOT)/Applications/vless-core.app/icon-list.png
