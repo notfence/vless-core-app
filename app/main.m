@@ -1957,52 +1957,184 @@ static UIImage *MakeIconImage(VCIconType type, CGFloat size, BOOL active) {
 @interface SettingsNavController : UINavigationController
 @end
 
-@interface FAQVC : UIViewController {
-    UITextView *_textView;
+@interface FAQVC : UIViewController <UITableViewDataSource, UITableViewDelegate> {
+    UITableView *_tableView;
+    NSArray *_sections;
 }
 @end
 
 @implementation FAQVC
 
 - (void)dealloc {
-    [_textView release];
+    [_tableView release];
+    [_sections release];
     [super dealloc];
+}
+
+- (NSDictionary *)question:(NSString *)question answer:(NSString *)answer {
+    return [NSDictionary dictionaryWithObjectsAndKeys:
+            question ? question : @"", @"question",
+            answer ? answer : @"", @"answer",
+            nil];
+}
+
+- (NSDictionary *)sectionWithTitle:(NSString *)title questions:(NSArray *)questions {
+    return [NSDictionary dictionaryWithObjectsAndKeys:
+            title ? title : @"", @"title",
+            questions ? questions : [NSArray array], @"questions",
+            nil];
+}
+
+- (void)buildSections {
+    NSArray *gettingStarted = [NSArray arrayWithObjects:
+        [self question:@"How do I import?"
+                 answer:@"Tap + and choose Import from Clipboard, Import from File, Scan QR Code, or Manual Input. You can import vless:// and socks5:// configurations, HTTP/HTTPS subscription URLs, and happ://add/, happ://crypt4/, or happ://crypt5/ links."],
+        [self question:@"How do I delete or reorder items?"
+                 answer:@"Swipe a standalone configuration or subscription from right to left to delete it. To change the order, tap the list button beside Configurations or Subscriptions, drag the rows, then tap the checkmark to finish."],
+        [self question:@"Do I need to respring after installation?"
+                 answer:@"No. With the current package, wait for uicache to finish and for the installer to show “Installation done! You can now exit the installer.” A respring is only a fallback if the icon is still missing after installation has fully completed."],
+        nil];
+
+    NSArray *subscriptions = [NSArray arrayWithObjects:
+        [self question:@"Where are the subscription details?"
+                 answer:@"Tap the info button beside a subscription. The details page shows its source, provider description, configuration count, traffic, and expiry when the provider supplies that data. You can also update or delete that subscription there."],
+        [self question:@"Why wasn't my subscription added?"
+                 answer:@"The URL must return at least one parseable VLESS or SOCKS5 entry. Import can fail when the provider is unavailable, returns an empty or HTML response, has a certificate problem, or uses an unsupported format. The import alert shows a more specific reason when one is available."],
+        [self question:@"What does auto-update do?"
+                 answer:@"When enabled, subscriptions refresh once after a fresh app launch. It does not interrupt an active VPN connection. Use the refresh button to update all subscriptions manually, or open a subscription's details and choose Update Now to refresh only that one."],
+        nil];
+
+    NSArray *connections = [NSArray arrayWithObjects:
+        [self question:@"Why can't I connect?"
+                 answer:@"Make sure a configuration is selected, then check the message shown after pressing Connect. If the protocol text is red, the link contains an unsupported option. Otherwise, verify the server parameters, confirm that the server is online, and check both logs for the exact failure."],
+        [self question:@"What can the app connect to?"
+                 answer:@"Supported configurations:\n"
+                         @"• VLESS TCP with TLS or Reality; flow may be omitted or set to xtls-rprx-vision\n"
+                         @"• VLESS XHTTP with TLS or Reality; modes auto, packet-up, stream-one, and stream-up\n"
+                         @"• VLESS WebSocket with TLS or no security\n"
+                         @"• SOCKS5\n"
+                         @"Supported fingerprints are chrome, firefox, edge, random, randomized, and qq."],
+        [self question:@"Why is the protocol text red?"
+                 answer:@"Red text means the transport, security type, mode, flow, or fingerprint is not supported. The app keeps the entry visible so you can identify it, but blocks the connection to avoid a broken tunnel. Press Connect to see the unsupported option."],
+        [self question:@"Does closing the app stop the VPN?"
+                 answer:@"No. The connection belongs to the vpnctld background daemon and remains active after the app is closed. Reopen the app to manage it, or press Disconnect to stop it. After a full app relaunch, the on-screen timer may restart at 00:00:00 even though the tunnel stayed connected."],
+        nil];
+
+    NSArray *troubleshooting = [NSArray arrayWithObjects:
+        [self question:@"Where can I find the logs?"
+                 answer:@"Tap the terminal button on the main screen. The vpnctld log covers daemon and device-routing work; the vless-core log covers the selected proxy transport and server connection. The logs update live, and the trash button clears them."],
+        [self question:@"What does Stealth mode hide?"
+                 answer:@"Stealth mode masks configuration and subscription links in the interface. It does not change the connection and does not encrypt stored links or redact technical logs. Review logs before sharing them."],
+        nil];
+
+    NSArray *compatibility = [NSArray arrayWithObject:
+        [self question:@"Which devices are supported?"
+                 answer:@"A jailbreak is required. The package targets 32-bit armv7 devices and requires iOS 6 - iOS 10. It is tested on iOS 6.1.3 and iOS 10.3.3; other device and iOS combinations are not guaranteed. 64-bit devices are not supported."]];
+
+    NSArray *newSections = [[NSArray alloc] initWithObjects:
+        [self sectionWithTitle:@"Getting started" questions:gettingStarted],
+        [self sectionWithTitle:@"Subscriptions" questions:subscriptions],
+        [self sectionWithTitle:@"Connections" questions:connections],
+        [self sectionWithTitle:@"Privacy and troubleshooting" questions:troubleshooting],
+        [self sectionWithTitle:@"Compatibility" questions:compatibility],
+        nil];
+    [_sections release];
+    _sections = newSections;
 }
 
 - (void)viewDidLoad {
     [super viewDidLoad];
     self.title = @"FAQ";
     self.view.backgroundColor = VCBackgroundColor();
+    [self buildSections];
 
-    _textView = [[UITextView alloc] initWithFrame:self.view.bounds];
-    _textView.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
-    _textView.editable = NO;
-    _textView.backgroundColor = [UIColor clearColor];
-    _textView.textColor = VCPrimaryTextColor();
-    _textView.indicatorStyle = VCAppearanceIsDark() ? UIScrollViewIndicatorStyleWhite
-                                                     : UIScrollViewIndicatorStyleDefault;
-    _textView.font = [UIFont systemFontOfSize:15.0f];
-    _textView.alwaysBounceVertical = YES;
-    _textView.text =
-        @"Q: Why can't I connect?\n"
-        @"A: Most failures come from an unsupported configuration tuple, wrong server parameters, or a server that is offline. "
-        @"This app currently allows [vless/tcp/reality] or [vless/tcp/tls] with omitted flow or flow=xtls-rprx-vision and fp=chrome/firefox/edge/random/randomized/qq, [vless/xhttp/tls], [vless/xhttp/reality], [vless/ws/tls], [vless/ws/none], or [socks5]. "
-        @"Recheck the link, server details, and network reachability.\n\n"
-        @"Q: How can I delete my config/subscription?\n"
-        @"A: Just swipe on it from right to the left.\n\n"
-        @"Q: Why isn't the subscription added?\n"
-        @"A: The app accepts direct vless:// or socks5:// links, happ://add/, happ://crypt4/ and happ://crypt5/ links, or http(s) subscription URLs that return valid config entries. "
-        @"If your provider blocks requests, redirects heavily, or returns an empty list, import will fail.\n\n"
-        @"Q: Which protocols are supported?\n"
-        @"A: VLESS and SOCKS5 links are supported. For now, supported sets are vless tcp+reality with omitted flow or xtls-rprx-vision, vless tcp+tls with omitted flow or xtls-rprx-vision, vless xhttp+tls, vless xhttp+reality, vless ws+tls, vless ws+none, and [socks5]. "
-        @"Other tuples are blocked on purpose to prevent broken connections.\n\n"
-        @"Q: Why are some protocol tuples marked in red?\n"
-        @"A: Red means the tuple or an option such as flow/fp is not supported by the app right now. "
-        @"This warning is shown to help you avoid failed connection attempts.\n\n"
-        @"Q: Up to which iOS version is the app supported?\n"
-        @"A: This package targets legacy 32-bit iOS devices (minimum iOS 6.0). "
-        @"It should work up to iOS 10. 64-bit unsupported";
-    [self.view addSubview:_textView];
+    _tableView = [[UITableView alloc] initWithFrame:self.view.bounds style:UITableViewStyleGrouped];
+    _tableView.dataSource = self;
+    _tableView.delegate = self;
+    _tableView.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
+    VCAppearanceApplyTable(_tableView);
+    [self.view addSubview:_tableView];
+}
+
+- (NSDictionary *)questionAtIndexPath:(NSIndexPath *)indexPath {
+    NSDictionary *section = [_sections objectAtIndex:indexPath.section];
+    return [[section objectForKey:@"questions"] objectAtIndex:indexPath.row];
+}
+
+- (NSInteger)numberOfSectionsInTableView:(UITableView *)tableView {
+    (void)tableView;
+    return [_sections count];
+}
+
+- (NSInteger)tableView:(UITableView *)tableView numberOfRowsInSection:(NSInteger)section {
+    (void)tableView;
+    return [[[_sections objectAtIndex:section] objectForKey:@"questions"] count];
+}
+
+- (NSString *)tableView:(UITableView *)tableView titleForHeaderInSection:(NSInteger)section {
+    (void)tableView;
+    return [[_sections objectAtIndex:section] objectForKey:@"title"];
+}
+
+- (CGFloat)tableView:(UITableView *)tableView heightForRowAtIndexPath:(NSIndexPath *)indexPath {
+    NSDictionary *item = [self questionAtIndexPath:indexPath];
+    NSString *answer = [item objectForKey:@"answer"];
+    CGFloat width = tableView.bounds.size.width - 52.0f;
+    CGSize answerSize = [answer sizeWithFont:[UIFont systemFontOfSize:13.0f]
+                           constrainedToSize:CGSizeMake(width, 2000.0f)
+                               lineBreakMode:NSLineBreakByWordWrapping];
+    CGFloat height = 31.0f + answerSize.height + 17.0f;
+    return (height < 64.0f) ? 64.0f : height;
+}
+
+- (UITableViewCell *)tableView:(UITableView *)tableView cellForRowAtIndexPath:(NSIndexPath *)indexPath {
+    static NSString *kFAQCellId = @"FAQCell";
+    UITableViewCell *cell = [tableView dequeueReusableCellWithIdentifier:kFAQCellId];
+    if (!cell) {
+        cell = [[[UITableViewCell alloc] initWithStyle:UITableViewCellStyleSubtitle reuseIdentifier:kFAQCellId] autorelease];
+        cell.selectionStyle = UITableViewCellSelectionStyleNone;
+        cell.textLabel.font = [UIFont boldSystemFontOfSize:15.0f];
+        cell.detailTextLabel.font = [UIFont systemFontOfSize:13.0f];
+        cell.detailTextLabel.numberOfLines = 0;
+        cell.detailTextLabel.lineBreakMode = NSLineBreakByWordWrapping;
+    }
+
+    NSDictionary *item = [self questionAtIndexPath:indexPath];
+    cell.textLabel.text = [item objectForKey:@"question"];
+    cell.detailTextLabel.text = [item objectForKey:@"answer"];
+    VCAppearanceApplyCell(cell);
+    return cell;
+}
+
+- (void)tableView:(UITableView *)tableView willDisplayCell:(UITableViewCell *)cell forRowAtIndexPath:(NSIndexPath *)indexPath {
+    (void)tableView;
+    (void)indexPath;
+    VCAppearanceApplyCell(cell);
+}
+
+- (void)tableView:(UITableView *)tableView willDisplayHeaderView:(UIView *)view forSection:(NSInteger)section {
+    (void)tableView;
+    (void)section;
+    VCAppearanceApplyHeaderView(view);
+    VCAppearanceScheduleVisibleTableHeadersRefresh(tableView);
+}
+
+- (BOOL)shouldAutorotateToInterfaceOrientation:(UIInterfaceOrientation)interfaceOrientation {
+    if (IsPadDevice()) {
+        return UIInterfaceOrientationIsPortrait(interfaceOrientation) || UIInterfaceOrientationIsLandscape(interfaceOrientation);
+    }
+    return interfaceOrientation == UIInterfaceOrientationPortrait;
+}
+
+- (BOOL)shouldAutorotate {
+    return IsPadDevice();
+}
+
+- (NSUInteger)supportedInterfaceOrientations {
+    if (IsPadDevice()) {
+        return UIInterfaceOrientationMaskAllButUpsideDown;
+    }
+    return UIInterfaceOrientationMaskPortrait;
 }
 
 @end
@@ -5029,8 +5161,10 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
                           stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
         if ([mode length] > 0 &&
             ![mode isEqualToString:@"auto"] &&
-            ![mode isEqualToString:@"packet-up"]) {
-            return [NSString stringWithFormat:@"unsupported xhttp/tls mode=%@ (expected packet-up)", mode];
+            ![mode isEqualToString:@"packet-up"] &&
+            ![mode isEqualToString:@"stream-one"] &&
+            ![mode isEqualToString:@"stream-up"]) {
+            return [NSString stringWithFormat:@"unsupported xhttp/tls mode=%@", mode];
         }
         return nil;
     }
@@ -5041,8 +5175,10 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
                           stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
         if ([mode length] > 0 &&
             ![mode isEqualToString:@"auto"] &&
-            ![mode isEqualToString:@"stream-one"]) {
-            return [NSString stringWithFormat:@"unsupported xhttp/reality mode=%@ (expected stream-one)", mode];
+            ![mode isEqualToString:@"packet-up"] &&
+            ![mode isEqualToString:@"stream-one"] &&
+            ![mode isEqualToString:@"stream-up"]) {
+            return [NSString stringWithFormat:@"unsupported xhttp/reality mode=%@", mode];
         }
 
         NSString *fp = [self realityFingerprintFromURI:uri];
@@ -5058,7 +5194,7 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
         return nil;
     }
 
-    return @"supported sets are vless/tcp/reality, vless/tcp/tls, vless/xhttp/tls mode=packet-up, vless/xhttp/reality mode=stream-one, vless/ws/tls, vless/ws/none, and [socks5]";
+    return @"supported sets are vless/tcp/reality, vless/tcp/tls, vless/xhttp/tls and vless/xhttp/reality with auto, packet-up, stream-one, or stream-up mode, vless/ws/tls, vless/ws/none, and [socks5]";
 }
 
 - (BOOL)isSupportedConfigTupleForURI:(NSString *)uri {
