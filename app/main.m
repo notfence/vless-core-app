@@ -2009,8 +2009,8 @@ static UIImage *MakeIconImage(VCIconType type, CGFloat size, BOOL active) {
                  answer:@"Make sure a configuration is selected, then check the message shown after pressing Connect. If the protocol text is red, the link contains an unsupported option. Otherwise, verify the server parameters, confirm that the server is online, and check both logs for the exact failure."],
         [self question:@"What can the app connect to?"
                  answer:@"Supported configurations:\n"
-                         @"• VLESS TCP with TLS or Reality; flow may be omitted or set to xtls-rprx-vision\n"
-                         @"• VLESS XHTTP with TLS or Reality; modes auto, packet-up, stream-one, and stream-up\n"
+                         @"• VLESS TCP with no security, TLS, or Reality; with TLS/Reality, flow may be omitted or set to xtls-rprx-vision\n"
+                         @"• VLESS XHTTP with no security, TLS, or Reality; modes auto, packet-up, stream-one, and stream-up\n"
                          @"• VLESS WebSocket with TLS or no security\n"
                          @"• SOCKS5\n"
                          @"Supported fingerprints are chrome, firefox, edge, random, randomized, and qq."],
@@ -5135,6 +5135,14 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
         return @"protocol must be vless or socks5";
     }
 
+    if ([transport isEqualToString:@"tcp"] && [security isEqualToString:@"none"]) {
+        NSString *flow = [self realityFlowFromURI:uri];
+        if ([flow length] > 0) {
+            return [NSString stringWithFormat:@"unsupported flow=%@ without security", flow];
+        }
+        return nil;
+    }
+
     // Supported tuple #1: [vless/tcp/reality] and [vless/tcp/tls]
     BOOL vision = [transport isEqualToString:@"tcp"] &&
                   ([security isEqualToString:@"reality"] || [security isEqualToString:@"tls"]);
@@ -5154,6 +5162,19 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
 
     BOOL xhttpTransport = [transport isEqualToString:@"xhttp"] ||
                           [transport isEqualToString:@"splithttp"];
+
+    if (xhttpTransport && [security isEqualToString:@"none"]) {
+        NSString *mode = [[[self queryValueForURLString:uri key:@"mode"] lowercaseString]
+                          stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
+        if ([mode length] > 0 &&
+            ![mode isEqualToString:@"auto"] &&
+            ![mode isEqualToString:@"packet-up"] &&
+            ![mode isEqualToString:@"stream-one"] &&
+            ![mode isEqualToString:@"stream-up"]) {
+            return [NSString stringWithFormat:@"unsupported xhttp/none mode=%@", mode];
+        }
+        return nil;
+    }
 
     // Supported tuple #2: [vless/xhttp/tls]
     if (xhttpTransport && [security isEqualToString:@"tls"]) {
@@ -5194,7 +5215,7 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
         return nil;
     }
 
-    return @"supported sets are vless/tcp/reality, vless/tcp/tls, vless/xhttp/tls and vless/xhttp/reality with auto, packet-up, stream-one, or stream-up mode, vless/ws/tls, vless/ws/none, and [socks5]";
+    return @"supported sets are vless/tcp/none, vless/tcp/reality, vless/tcp/tls, vless/xhttp/none, vless/xhttp/tls and vless/xhttp/reality with auto, packet-up, stream-one, or stream-up mode, vless/ws/tls, vless/ws/none, and [socks5]";
 }
 
 - (BOOL)isSupportedConfigTupleForURI:(NSString *)uri {
@@ -6034,9 +6055,9 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
     if ([security length] == 0) security = @"none";
 
     BOOL tcpSupported = [network isEqualToString:@"tcp"] &&
-                        ([security isEqualToString:@"tls"] || [security isEqualToString:@"reality"]);
+                        ([security isEqualToString:@"none"] || [security isEqualToString:@"tls"] || [security isEqualToString:@"reality"]);
     BOOL xhttpSupported = [network isEqualToString:@"xhttp"] &&
-                          ([security isEqualToString:@"tls"] || [security isEqualToString:@"reality"]);
+                          ([security isEqualToString:@"none"] || [security isEqualToString:@"tls"] || [security isEqualToString:@"reality"]);
     BOOL wsSupported = [network isEqualToString:@"ws"] &&
                        ([security isEqualToString:@"tls"] || [security isEqualToString:@"none"]);
     if (!tcpSupported && !xhttpSupported && !wsSupported) return nil;
@@ -6047,6 +6068,7 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
 
     NSString *flow = [self safeTrim:[self happJSONStringValue:[user objectForKey:@"flow"]]];
     if (tcpSupported && [flow length] > 0) {
+        if ([security isEqualToString:@"none"]) return nil;
         if (![flow isEqualToString:@"xtls-rprx-vision"]) return nil;
         [self addHappURIQueryValue:flow key:@"flow" toParts:query];
     }
