@@ -2011,6 +2011,7 @@ static UIImage *MakeIconImage(VCIconType type, CGFloat size, BOOL active) {
                  answer:@"Supported configurations:\n"
                          @"• VLESS TCP with no security, TLS, or Reality; with TLS/Reality, flow may be omitted or set to xtls-rprx-vision\n"
                          @"• VLESS XHTTP with no security, TLS, or Reality; modes auto, packet-up, stream-one, and stream-up\n"
+                         @"• VLESS gRPC with no security, TLS, or Reality; single-stream and multi modes\n"
                          @"• VLESS WebSocket with TLS or no security\n"
                          @"• SOCKS5\n"
                          @"Supported fingerprints are chrome, firefox, edge, random, randomized, and qq."],
@@ -5209,13 +5210,31 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
         return nil;
     }
 
+    BOOL grpcTransport = [transport isEqualToString:@"grpc"];
+    if (grpcTransport &&
+        ([security isEqualToString:@"none"] || [security isEqualToString:@"tls"] || [security isEqualToString:@"reality"])) {
+        NSString *mode = [[[self queryValueForURLString:uri key:@"mode"] lowercaseString]
+                          stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
+        if ([mode length] > 0 && ![mode isEqualToString:@"auto"] &&
+            ![mode isEqualToString:@"gun"] && ![mode isEqualToString:@"multi"]) {
+            return [NSString stringWithFormat:@"unsupported grpc mode=%@", mode];
+        }
+        if ([security isEqualToString:@"reality"]) {
+            NSString *fp = [self realityFingerprintFromURI:uri];
+            if (![self isSupportedRealityFingerprint:fp]) {
+                return [NSString stringWithFormat:@"unsupported fp=%@", fp];
+            }
+        }
+        return nil;
+    }
+
     // Supported tuple #4: [vless/ws/tls] and [vless/ws/none]
     if (([transport isEqualToString:@"ws"] || [transport isEqualToString:@"websocket"]) &&
         ([security isEqualToString:@"tls"] || [security isEqualToString:@"none"])) {
         return nil;
     }
 
-    return @"supported sets are vless/tcp/none, vless/tcp/reality, vless/tcp/tls, vless/xhttp/none, vless/xhttp/tls and vless/xhttp/reality with auto, packet-up, stream-one, or stream-up mode, vless/ws/tls, vless/ws/none, and [socks5]";
+    return @"supported sets are vless/tcp/none, vless/tcp/reality, vless/tcp/tls, vless/xhttp/none, vless/xhttp/tls and vless/xhttp/reality with auto, packet-up, stream-one, or stream-up mode, vless/grpc/none, vless/grpc/tls, vless/grpc/reality, vless/ws/tls, vless/ws/none, and [socks5]";
 }
 
 - (BOOL)isSupportedConfigTupleForURI:(NSString *)uri {
@@ -6060,7 +6079,9 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
                           ([security isEqualToString:@"none"] || [security isEqualToString:@"tls"] || [security isEqualToString:@"reality"]);
     BOOL wsSupported = [network isEqualToString:@"ws"] &&
                        ([security isEqualToString:@"tls"] || [security isEqualToString:@"none"]);
-    if (!tcpSupported && !xhttpSupported && !wsSupported) return nil;
+    BOOL grpcSupported = [network isEqualToString:@"grpc"] &&
+                         ([security isEqualToString:@"none"] || [security isEqualToString:@"tls"] || [security isEqualToString:@"reality"]);
+    if (!tcpSupported && !xhttpSupported && !wsSupported && !grpcSupported) return nil;
 
     NSMutableArray *query = [NSMutableArray arrayWithObjects:@"encryption=none", nil];
     [self addHappURIQueryValue:network key:@"type" toParts:query];
@@ -6128,6 +6149,21 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
         if ([host length] == 0) host = [self safeTrim:[self happJSONStringValue:[headers objectForKey:@"host"]]];
         [self addHappURIQueryValue:([path length] > 0 ? path : @"/") key:@"path" toParts:query];
         [self addHappURIQueryValue:host key:@"host" toParts:query];
+    } else if (grpcSupported) {
+        NSDictionary *grpc = [self happJSONDictionaryValue:[stream objectForKey:@"grpcSettings"]];
+        id multiMode = [grpc objectForKey:@"multiMode"];
+        if (!multiMode) multiMode = [grpc objectForKey:@"multi_mode"];
+        if ([multiMode respondsToSelector:@selector(boolValue)] && [multiMode boolValue]) {
+            [self addHappURIQueryValue:@"multi" key:@"mode" toParts:query];
+        }
+
+        NSString *serviceName = [self safeTrim:[self happJSONStringValue:[grpc objectForKey:@"serviceName"]]];
+        if ([serviceName length] == 0) {
+            serviceName = [self safeTrim:[self happJSONStringValue:[grpc objectForKey:@"service_name"]]];
+        }
+        NSString *authority = [self safeTrim:[self happJSONStringValue:[grpc objectForKey:@"authority"]]];
+        [self addHappURIQueryValue:serviceName key:@"serviceName" toParts:query];
+        [self addHappURIQueryValue:authority key:@"authority" toParts:query];
     }
 
     NSString *authorityHost = address;

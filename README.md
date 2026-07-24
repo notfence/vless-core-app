@@ -1,28 +1,17 @@
 # vless-core-app
 
-`vless-core-app` is an iOS 6.x app + root daemon for full-device VLESS/SOCKS5 routing.
+`vless-core-app` is an iOS 6–10 app + root daemon for full-device VLESS/SOCKS5 routing.
 
-**Jailbreak required**
+## Compatibility
 
-## Tested Device/OS
+- iOS 6.x through iOS 10.x
+- All compatible 32-bit devices
+- ARMv7 only; 64-bit ARM devices are not supported
+- Jailbreak required
 
-### Tested by Me
+The app, daemon, bundled core, and helper binaries are all built for ARMv7 with iOS 6.0 as the minimum deployment target.
 
-| Device | OS | Status |
-| --- | --- | --- |
-| iPhone 4s | iOS 6.1.3 | Works fine |
-| iPad 4 | iOS 10.3.3 | Works fine |
-
-### Tested by Others
-
-| Device | OS | Status |
-| --- | --- | --- |
-| iPad 2 | iOS 6.1.3 | Works fine |
-| iPhone 4s | iOS 6.1.3 | Works fine |
-
-see [Issues](https://github.com/notfence/vless-core-app/issues) page for current bug list
-
-**<u>Compatibility with other iOS versions/devices is not guaranteed!</u>**
+See the [Issues](https://github.com/notfence/vless-core-app/issues) page for the current bug list.
 
 ## Install on iOS
 
@@ -68,6 +57,9 @@ Bundled core supports:
 - `VLESS + XHTTP + Reality`
 - `VLESS + XHTTP + TLS`
 - `VLESS + XHTTP` (no security)
+- `VLESS + gRPC + Reality`
+- `VLESS + gRPC + TLS`
+- `VLESS + gRPC` (no security)
 - `VLESS + WebSocket + TLS`
 - `VLESS + WebSocket`
 - `SOCKS5`
