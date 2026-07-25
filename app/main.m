@@ -1789,6 +1789,15 @@ static UIImage *MakeIconImage(VCIconType type, CGFloat size, BOOL active) {
     return img;
 }
 
+static UIView *VCCreateDisclosureAccessoryView(void) {
+    UIView *view = [[[UIView alloc] initWithFrame:CGRectMake(0.0f, 0.0f, 20.0f, 20.0f)] autorelease];
+    UIImageView *imageView = [[[UIImageView alloc] initWithFrame:CGRectMake(2.0f, 2.0f, 16.0f, 16.0f)] autorelease];
+    imageView.image = TintImageWithColor(MakeIconImage(VCIconTypeChevronRight, 16.0f, NO),
+                                         VCSecondaryTextColor());
+    [view addSubview:imageView];
+    return view;
+}
+
 @interface VCMarqueeLabel : UIView {
     UILabel *_label;
     NSString *_text;
@@ -2838,7 +2847,8 @@ static NSInteger const kRoutingRuleActionSheetTagBase = 6200;
                                [rule objectForKey:@"value"]];
         cell.detailTextLabel.text = [self displayNameForType:type];
         cell.textLabel.textColor = [self colorForAction:action];
-        cell.accessoryType = UITableViewCellAccessoryDisclosureIndicator;
+        cell.accessoryType = UITableViewCellAccessoryNone;
+        cell.accessoryView = VCCreateDisclosureAccessoryView();
     } else {
         cell.textLabel.text = @"Add Rule";
         cell.detailTextLabel.text = @"Domain, IP/CIDR or port";
@@ -3378,8 +3388,8 @@ commitEditingStyle:(UITableViewCellEditingStyle)editingStyle
             cell = [[[UITableViewCell alloc] initWithStyle:UITableViewCellStyleSubtitle reuseIdentifier:kRoutingCellId] autorelease];
         }
         cell.selectionStyle = UITableViewCellSelectionStyleBlue;
-        cell.accessoryView = nil;
-        cell.accessoryType = UITableViewCellAccessoryDisclosureIndicator;
+        cell.accessoryType = UITableViewCellAccessoryNone;
+        cell.accessoryView = VCCreateDisclosureAccessoryView();
         [self applySettingsMarqueesToCell:cell
                                     title:@"Routing"
                                    detail:@"Proxy, Direct and Block rules"];
@@ -3410,7 +3420,8 @@ commitEditingStyle:(UITableViewCellEditingStyle)editingStyle
             cell = [[[UITableViewCell alloc] initWithStyle:UITableViewCellStyleSubtitle reuseIdentifier:kAboutCellId] autorelease];
         }
         cell.selectionStyle = UITableViewCellSelectionStyleBlue;
-        cell.accessoryType = UITableViewCellAccessoryDisclosureIndicator;
+        cell.accessoryType = UITableViewCellAccessoryNone;
+        cell.accessoryView = VCCreateDisclosureAccessoryView();
         [self applySettingsMarqueesToCell:cell
                                     title:@"About vless-core"
                                    detail:@"Version and core binary info"];
@@ -3424,7 +3435,8 @@ commitEditingStyle:(UITableViewCellEditingStyle)editingStyle
             cell = [[[UITableViewCell alloc] initWithStyle:UITableViewCellStyleSubtitle reuseIdentifier:kCreditsCellId] autorelease];
         }
         cell.selectionStyle = UITableViewCellSelectionStyleBlue;
-        cell.accessoryType = UITableViewCellAccessoryDisclosureIndicator;
+        cell.accessoryType = UITableViewCellAccessoryNone;
+        cell.accessoryView = VCCreateDisclosureAccessoryView();
         [self applySettingsMarqueesToCell:cell
                                     title:@"Credits"
                                    detail:@"Dependencies and special thanks"];
@@ -3438,7 +3450,8 @@ commitEditingStyle:(UITableViewCellEditingStyle)editingStyle
             cell = [[[UITableViewCell alloc] initWithStyle:UITableViewCellStyleSubtitle reuseIdentifier:kFAQCellId] autorelease];
         }
         cell.selectionStyle = UITableViewCellSelectionStyleBlue;
-        cell.accessoryType = UITableViewCellAccessoryDisclosureIndicator;
+        cell.accessoryType = UITableViewCellAccessoryNone;
+        cell.accessoryView = VCCreateDisclosureAccessoryView();
         [self applySettingsMarqueesToCell:cell
                                     title:@"FAQ"
                                    detail:@"Common questions and quick answers"];
@@ -3451,7 +3464,8 @@ commitEditingStyle:(UITableViewCellEditingStyle)editingStyle
         cell = [[[UITableViewCell alloc] initWithStyle:UITableViewCellStyleSubtitle reuseIdentifier:kGitHubCellId] autorelease];
     }
     cell.selectionStyle = UITableViewCellSelectionStyleBlue;
-    cell.accessoryType = UITableViewCellAccessoryDisclosureIndicator;
+    cell.accessoryType = UITableViewCellAccessoryNone;
+    cell.accessoryView = VCCreateDisclosureAccessoryView();
     [self applySettingsMarqueesToCell:cell
                                 title:@"Project on GitHub"
                                detail:@"github.com/notfence/vless-core-app"];
