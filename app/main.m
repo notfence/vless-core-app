@@ -32,6 +32,10 @@ static NSString *const kDefaultsSubsKey = @"vlesscore.subscriptions";
 static NSString *const kDefaultsAutoUpdateSubsKey = @"vlesscore.auto_update_subs";
 static NSString *const kDefaultsStealthModeKey = @"vlesscore.stealth_mode";
 static NSString *const kDefaultsDarkThemeKey = @"vlesscore.dark_theme";
+static NSString *const kDefaultsRoutingEnabledKey = @"vlesscore.routing.enabled";
+static NSString *const kDefaultsRoutingDefaultKey = @"vlesscore.routing.default";
+static NSString *const kDefaultsRoutingBypassLANKey = @"vlesscore.routing.bypass_lan";
+static NSString *const kDefaultsRoutingRulesKey = @"vlesscore.routing.rules";
 static NSString *const kDefaultsSubHWIDKey = @"vlesscore.subscription_hwid";
 static NSString *const kSubscriptionAllowInsecureFetchKey = @"allow_insecure_fetch";
 static NSString *const kSubscriptionHappSourceKey = @"happ_source";
@@ -456,6 +460,57 @@ static NSString *SendCommand(NSString *cmdLine) {
         last_errno = ECONNREFUSED;
     }
     return [NSString stringWithFormat:@"daemon offline (%s)", strerror(last_errno)];
+}
+
+static NSString *RoutingPolicyText(void) {
+    NSUserDefaults *ud = [NSUserDefaults standardUserDefaults];
+    BOOL enabled = [ud boolForKey:kDefaultsRoutingEnabledKey];
+    BOOL bypassLAN = [ud objectForKey:kDefaultsRoutingBypassLANKey] == nil
+        ? YES
+        : [ud boolForKey:kDefaultsRoutingBypassLANKey];
+
+    NSString *defaultAction = [[ud stringForKey:kDefaultsRoutingDefaultKey] lowercaseString];
+    if (![defaultAction isEqualToString:@"proxy"] &&
+        ![defaultAction isEqualToString:@"direct"] &&
+        ![defaultAction isEqualToString:@"block"]) {
+        defaultAction = @"proxy";
+    }
+
+    NSMutableString *policy = [NSMutableString stringWithFormat:@"%d;%@;%d",
+                               enabled ? 1 : 0,
+                               defaultAction,
+                               bypassLAN ? 1 : 0];
+    NSArray *rules = [ud arrayForKey:kDefaultsRoutingRulesKey];
+    NSUInteger count = 0;
+    for (id storedRule in rules) {
+        if (count >= 24) break;
+        if (![storedRule isKindOfClass:[NSDictionary class]]) continue;
+        NSDictionary *rule = (NSDictionary *)storedRule;
+        NSString *action = [[[rule objectForKey:@"action"] description] lowercaseString];
+        NSString *type = [[[rule objectForKey:@"type"] description] lowercaseString];
+        NSString *value = [[[[rule objectForKey:@"value"] description]
+                            stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]]
+                           lowercaseString];
+        BOOL validAction = [action isEqualToString:@"proxy"] ||
+                           [action isEqualToString:@"direct"] ||
+                           [action isEqualToString:@"block"];
+        BOOL validType = [type isEqualToString:@"domain"] ||
+                         [type isEqualToString:@"suffix"] ||
+                         [type isEqualToString:@"cidr"] ||
+                         [type isEqualToString:@"port"];
+        if (!validAction || !validType || [value length] == 0 ||
+            [value length] > 128 ||
+            [value rangeOfCharacterFromSet:[NSCharacterSet characterSetWithCharactersInString:@";,\r\n\t "]].location != NSNotFound) {
+            continue;
+        }
+        [policy appendFormat:@";%@,%@,%@", action, type, value];
+        count++;
+    }
+    return policy;
+}
+
+static NSString *SyncRoutingPolicyToDaemon(void) {
+    return SendCommand([NSString stringWithFormat:@"ROUTING\t%@\n", RoutingPolicyText()]);
 }
 
 static int ConnectLatencyMs(const char *host, uint16_t port, int timeout_ms, int *latency_ms) {
@@ -1532,6 +1587,11 @@ static void VCAppearanceRefreshVisibleTableHeaders(UITableView *tableView) {
             VCAppearanceApplyHeaderView(header);
             [header setNeedsDisplay];
         }
+        UIView *footer = [tableView footerViewForSection:section];
+        if (footer) {
+            VCAppearanceApplyHeaderView(footer);
+            [footer setNeedsDisplay];
+        }
     }
 }
 
@@ -1957,6 +2017,16 @@ static UIImage *MakeIconImage(VCIconType type, CGFloat size, BOOL active) {
 @interface SettingsNavController : UINavigationController
 @end
 
+@interface RoutingVC : UIViewController <UITableViewDataSource, UITableViewDelegate, UIActionSheetDelegate, UIAlertViewDelegate> {
+    UITableView *_tableView;
+    UISwitch *_enabledSwitch;
+    UISwitch *_bypassLANSwitch;
+    NSMutableArray *_rules;
+    NSString *_pendingAction;
+    NSString *_pendingType;
+}
+@end
+
 @interface FAQVC : UIViewController <UITableViewDataSource, UITableViewDelegate> {
     UITableView *_tableView;
     NSArray *_sections;
@@ -2017,6 +2087,8 @@ static UIImage *MakeIconImage(VCIconType type, CGFloat size, BOOL active) {
                          @"Supported fingerprints are chrome, firefox, edge, random, randomized, and qq."],
         [self question:@"Why is the protocol text red?"
                  answer:@"Red text means the transport, security type, mode, flow, or fingerprint is not supported. The app keeps the entry visible so you can identify it, but blocks the connection to avoid a broken tunnel. Press Connect to see the unsupported option."],
+        [self question:@"How does routing work?"
+                 answer:@"Open Settings → Routing. Enable it, choose the default Proxy, Direct, or Block action, then add ordered domain, IP/CIDR, or port rules. The first matching rule wins after the optional local-network bypass. Reconnect the VPN after changing the policy; existing connections are left untouched."],
         [self question:@"Does closing the app stop the VPN?"
                  answer:@"No. The connection belongs to the vpnctld background daemon and remains active after the app is closed. Reopen the app to manage it, or press Disconnect to stop it. After a full app relaunch, the on-screen timer may restart at 00:00:00 even though the tunnel stayed connected."],
         nil];
@@ -2524,6 +2596,544 @@ static UIImage *MakeIconImage(VCIconType type, CGFloat size, BOOL active) {
 
 @end
 
+static NSInteger const kRoutingAddActionSheetTag = 6101;
+static NSInteger const kRoutingAddTypeSheetTag = 6102;
+static NSInteger const kRoutingValueAlertTag = 6103;
+static NSInteger const kRoutingRuleActionSheetTagBase = 6200;
+
+@implementation RoutingVC
+
+- (NSString *)defaultAction {
+    NSString *value = [[[NSUserDefaults standardUserDefaults] stringForKey:kDefaultsRoutingDefaultKey] lowercaseString];
+    if (![value isEqualToString:@"proxy"] &&
+        ![value isEqualToString:@"direct"] &&
+        ![value isEqualToString:@"block"]) {
+        return @"proxy";
+    }
+    return value;
+}
+
+- (BOOL)bypassLAN {
+    NSUserDefaults *ud = [NSUserDefaults standardUserDefaults];
+    return [ud objectForKey:kDefaultsRoutingBypassLANKey] == nil
+        ? YES
+        : [ud boolForKey:kDefaultsRoutingBypassLANKey];
+}
+
+- (void)saveRules {
+    NSUserDefaults *ud = [NSUserDefaults standardUserDefaults];
+    [ud setObject:_rules forKey:kDefaultsRoutingRulesKey];
+    [ud synchronize];
+}
+
+- (void)enabledChanged:(UISwitch *)sender {
+    NSUserDefaults *ud = [NSUserDefaults standardUserDefaults];
+    [ud setBool:[sender isOn] forKey:kDefaultsRoutingEnabledKey];
+    [ud synchronize];
+    [_tableView reloadData];
+}
+
+- (void)bypassLANChanged:(UISwitch *)sender {
+    NSUserDefaults *ud = [NSUserDefaults standardUserDefaults];
+    [ud setBool:[sender isOn] forKey:kDefaultsRoutingBypassLANKey];
+    [ud synchronize];
+}
+
+- (void)setDefaultAction:(NSString *)action {
+    NSUserDefaults *ud = [NSUserDefaults standardUserDefaults];
+    [ud setObject:action forKey:kDefaultsRoutingDefaultKey];
+    [ud synchronize];
+    [_tableView reloadSections:[NSIndexSet indexSetWithIndex:1]
+              withRowAnimation:UITableViewRowAnimationNone];
+}
+
+- (NSString *)displayNameForAction:(NSString *)action {
+    if ([action isEqualToString:@"direct"]) return @"Direct";
+    if ([action isEqualToString:@"block"]) return @"Block";
+    return @"Proxy";
+}
+
+- (NSString *)displayNameForType:(NSString *)type {
+    if ([type isEqualToString:@"domain"]) return @"Domain";
+    if ([type isEqualToString:@"suffix"]) return @"Domain suffix";
+    if ([type isEqualToString:@"cidr"]) return @"IP / CIDR";
+    return @"Port";
+}
+
+- (UIColor *)colorForAction:(NSString *)action {
+    if ([action isEqualToString:@"direct"]) return VCSuccessColor();
+    if ([action isEqualToString:@"block"]) return VCErrorColor();
+    return VCAccentColor();
+}
+
+- (void)viewDidLoad {
+    [super viewDidLoad];
+    self.title = @"Routing";
+    self.view.backgroundColor = VCBackgroundColor();
+
+    NSArray *saved = [[NSUserDefaults standardUserDefaults] arrayForKey:kDefaultsRoutingRulesKey];
+    _rules = saved ? [[NSMutableArray alloc] initWithArray:saved copyItems:YES]
+                   : [[NSMutableArray alloc] init];
+
+    _enabledSwitch = [[UISwitch alloc] initWithFrame:CGRectZero];
+    [_enabledSwitch setOn:[[NSUserDefaults standardUserDefaults] boolForKey:kDefaultsRoutingEnabledKey] animated:NO];
+    [_enabledSwitch addTarget:self action:@selector(enabledChanged:) forControlEvents:UIControlEventValueChanged];
+
+    _bypassLANSwitch = [[UISwitch alloc] initWithFrame:CGRectZero];
+    [_bypassLANSwitch setOn:[self bypassLAN] animated:NO];
+    [_bypassLANSwitch addTarget:self action:@selector(bypassLANChanged:) forControlEvents:UIControlEventValueChanged];
+
+    _tableView = [[UITableView alloc] initWithFrame:self.view.bounds style:UITableViewStyleGrouped];
+    _tableView.dataSource = self;
+    _tableView.delegate = self;
+    _tableView.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
+    VCAppearanceApplyTable(_tableView);
+    [self.view addSubview:_tableView];
+
+    self.navigationItem.rightBarButtonItem = self.editButtonItem;
+}
+
+- (void)viewWillAppear:(BOOL)animated {
+    [super viewWillAppear:animated];
+    self.view.backgroundColor = VCBackgroundColor();
+    VCAppearanceApplyNavigationBar(self.navigationController.navigationBar);
+    VCAppearanceApplyStatusBar();
+    VCAppearanceApplyTable(_tableView);
+    _enabledSwitch.onTintColor = VCAccentColor();
+    _bypassLANSwitch.onTintColor = VCAccentColor();
+    [_tableView reloadData];
+    VCAppearanceScheduleVisibleTableHeadersRefresh(_tableView);
+}
+
+- (void)setEditing:(BOOL)editing animated:(BOOL)animated {
+    [super setEditing:editing animated:animated];
+    [_tableView setEditing:editing animated:animated];
+}
+
+- (NSInteger)numberOfSectionsInTableView:(UITableView *)tableView {
+    (void)tableView;
+    return 4;
+}
+
+- (NSInteger)tableView:(UITableView *)tableView numberOfRowsInSection:(NSInteger)section {
+    (void)tableView;
+    if (section == 0 || section == 2) return 1;
+    if (section == 1) return 3;
+    return (NSInteger)[_rules count] + 1;
+}
+
+- (NSString *)tableView:(UITableView *)tableView titleForHeaderInSection:(NSInteger)section {
+    (void)tableView;
+    if (section == 0) return @"Routing";
+    if (section == 1) return @"Default action";
+    if (section == 2) return @"Local network";
+    return @"Rules — first match wins";
+}
+
+- (UIView *)tableView:(UITableView *)tableView viewForHeaderInSection:(NSInteger)section {
+    UIView *header = [[[UIView alloc] initWithFrame:
+                       CGRectMake(0.0f, 0.0f, tableView.bounds.size.width, 32.0f)] autorelease];
+    header.backgroundColor = [UIColor clearColor];
+
+    UILabel *label = [[[UILabel alloc] initWithFrame:
+                       CGRectMake(18.0f, 0.0f, tableView.bounds.size.width - 36.0f, 32.0f)] autorelease];
+    label.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
+    label.backgroundColor = [UIColor clearColor];
+    label.font = [UIFont boldSystemFontOfSize:17.0f];
+    label.text = [self tableView:tableView titleForHeaderInSection:section];
+    [header addSubview:label];
+    VCAppearanceApplyHeaderView(header);
+    return header;
+}
+
+- (NSString *)tableView:(UITableView *)tableView titleForFooterInSection:(NSInteger)section {
+    (void)tableView;
+    if (section == 0) {
+        return @"When disabled, all supported traffic uses the selected proxy.";
+    }
+    if (section == 2) {
+        return @"Keeps private, link-local and carrier-grade NAT addresses outside the proxy.";
+    }
+    if (section == 3) {
+        return @"Reconnect the VPN to apply routing changes.";
+    }
+    return nil;
+}
+
+- (CGFloat)tableView:(UITableView *)tableView heightForFooterInSection:(NSInteger)section {
+    NSString *text = [self tableView:tableView titleForFooterInSection:section];
+    if (!text) return 0.01f;
+
+    CGFloat width = MAX(1.0f, tableView.bounds.size.width - 36.0f);
+    CGSize size = [text sizeWithFont:[UIFont systemFontOfSize:14.0f]
+                   constrainedToSize:CGSizeMake(width, 1000.0f)
+                       lineBreakMode:NSLineBreakByWordWrapping];
+    return ceilf(size.height) + 14.0f;
+}
+
+- (UIView *)tableView:(UITableView *)tableView viewForFooterInSection:(NSInteger)section {
+    NSString *text = [self tableView:tableView titleForFooterInSection:section];
+    if (!text) return nil;
+
+    CGFloat height = [self tableView:tableView heightForFooterInSection:section];
+    UIView *footer = [[[UIView alloc] initWithFrame:
+                       CGRectMake(0.0f, 0.0f, tableView.bounds.size.width, height)] autorelease];
+    footer.backgroundColor = [UIColor clearColor];
+
+    UILabel *label = [[[UILabel alloc] initWithFrame:
+                       CGRectMake(18.0f, 4.0f, tableView.bounds.size.width - 36.0f, height - 8.0f)] autorelease];
+    label.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
+    label.backgroundColor = [UIColor clearColor];
+    label.font = [UIFont systemFontOfSize:14.0f];
+    label.numberOfLines = 0;
+    label.lineBreakMode = NSLineBreakByWordWrapping;
+    label.textColor = VCSecondaryTextColor();
+    label.text = text;
+    [footer addSubview:label];
+    VCAppearanceApplyHeaderView(footer);
+    return footer;
+}
+
+- (UITableViewCell *)tableView:(UITableView *)tableView cellForRowAtIndexPath:(NSIndexPath *)indexPath {
+    static NSString *cellID = @"RoutingCell";
+    UITableViewCell *cell = [tableView dequeueReusableCellWithIdentifier:cellID];
+    if (!cell) {
+        cell = [[[UITableViewCell alloc] initWithStyle:UITableViewCellStyleSubtitle reuseIdentifier:cellID] autorelease];
+    }
+    cell.accessoryView = nil;
+    cell.accessoryType = UITableViewCellAccessoryNone;
+    cell.selectionStyle = UITableViewCellSelectionStyleBlue;
+    cell.textLabel.textColor = VCPrimaryTextColor();
+    cell.detailTextLabel.textColor = VCSecondaryTextColor();
+    cell.detailTextLabel.text = nil;
+    VCAppearanceApplyCell(cell);
+
+    if (indexPath.section == 0) {
+        cell.textLabel.text = @"Enable routing";
+        cell.detailTextLabel.text = @"Apply ordered Proxy, Direct and Block rules";
+        cell.accessoryView = _enabledSwitch;
+        cell.selectionStyle = UITableViewCellSelectionStyleNone;
+    } else if (indexPath.section == 1) {
+        NSArray *actions = [NSArray arrayWithObjects:@"proxy", @"direct", @"block", nil];
+        NSString *action = [actions objectAtIndex:indexPath.row];
+        cell.textLabel.text = [self displayNameForAction:action];
+        cell.detailTextLabel.text = indexPath.row == 0
+            ? @"Use the selected configuration"
+            : (indexPath.row == 1 ? @"Connect without the proxy" : @"Reject the connection");
+        cell.textLabel.textColor = [self colorForAction:action];
+        cell.accessoryType = [[self defaultAction] isEqualToString:action]
+            ? UITableViewCellAccessoryCheckmark
+            : UITableViewCellAccessoryNone;
+    } else if (indexPath.section == 2) {
+        cell.textLabel.text = @"Bypass local networks";
+        cell.detailTextLabel.text = @"LAN, link-local and CGNAT";
+        cell.accessoryView = _bypassLANSwitch;
+        cell.selectionStyle = UITableViewCellSelectionStyleNone;
+    } else if (indexPath.row < (NSInteger)[_rules count]) {
+        NSDictionary *rule = [_rules objectAtIndex:indexPath.row];
+        NSString *action = [rule objectForKey:@"action"];
+        NSString *type = [rule objectForKey:@"type"];
+        cell.textLabel.text = [NSString stringWithFormat:@"%@ · %@",
+                               [self displayNameForAction:action],
+                               [rule objectForKey:@"value"]];
+        cell.detailTextLabel.text = [self displayNameForType:type];
+        cell.textLabel.textColor = [self colorForAction:action];
+        cell.accessoryType = UITableViewCellAccessoryDisclosureIndicator;
+    } else {
+        cell.textLabel.text = @"Add Rule";
+        cell.detailTextLabel.text = @"Domain, IP/CIDR or port";
+        cell.textLabel.textColor = VCAccentColor();
+    }
+    return cell;
+}
+
+- (void)tableView:(UITableView *)tableView willDisplayCell:(UITableViewCell *)cell forRowAtIndexPath:(NSIndexPath *)indexPath {
+    (void)tableView;
+    (void)indexPath;
+    cell.backgroundColor = VCCellBackgroundColor();
+}
+
+- (void)tableView:(UITableView *)tableView willDisplayHeaderView:(UIView *)view forSection:(NSInteger)section {
+    (void)tableView;
+    (void)section;
+    VCAppearanceApplyHeaderView(view);
+    VCAppearanceScheduleVisibleTableHeadersRefresh(tableView);
+}
+
+- (void)tableView:(UITableView *)tableView willDisplayFooterView:(UIView *)view forSection:(NSInteger)section {
+    (void)tableView;
+    (void)section;
+    VCAppearanceApplyHeaderView(view);
+    VCAppearanceScheduleVisibleTableHeadersRefresh(tableView);
+}
+
+- (BOOL)tableView:(UITableView *)tableView canEditRowAtIndexPath:(NSIndexPath *)indexPath {
+    (void)tableView;
+    return indexPath.section == 3 && indexPath.row < (NSInteger)[_rules count];
+}
+
+- (BOOL)tableView:(UITableView *)tableView canMoveRowAtIndexPath:(NSIndexPath *)indexPath {
+    (void)tableView;
+    return indexPath.section == 3 && indexPath.row < (NSInteger)[_rules count];
+}
+
+- (NSIndexPath *)tableView:(UITableView *)tableView
+targetIndexPathForMoveFromRowAtIndexPath:(NSIndexPath *)sourceIndexPath
+       toProposedIndexPath:(NSIndexPath *)proposedDestinationIndexPath {
+    (void)tableView;
+    (void)sourceIndexPath;
+    if (proposedDestinationIndexPath.section != 3) {
+        return [NSIndexPath indexPathForRow:0 inSection:3];
+    }
+    NSInteger last = (NSInteger)[_rules count] - 1;
+    if (proposedDestinationIndexPath.row > last) {
+        return [NSIndexPath indexPathForRow:last inSection:3];
+    }
+    return proposedDestinationIndexPath;
+}
+
+- (void)tableView:(UITableView *)tableView
+moveRowAtIndexPath:(NSIndexPath *)sourceIndexPath
+       toIndexPath:(NSIndexPath *)destinationIndexPath {
+    (void)tableView;
+    NSDictionary *rule = [[_rules objectAtIndex:sourceIndexPath.row] retain];
+    [_rules removeObjectAtIndex:sourceIndexPath.row];
+    [_rules insertObject:rule atIndex:destinationIndexPath.row];
+    [rule release];
+    [self saveRules];
+}
+
+- (void)tableView:(UITableView *)tableView
+commitEditingStyle:(UITableViewCellEditingStyle)editingStyle
+ forRowAtIndexPath:(NSIndexPath *)indexPath {
+    if (editingStyle != UITableViewCellEditingStyleDelete ||
+        indexPath.section != 3 ||
+        indexPath.row >= (NSInteger)[_rules count]) return;
+    [_rules removeObjectAtIndex:indexPath.row];
+    [self saveRules];
+    [tableView deleteRowsAtIndexPaths:[NSArray arrayWithObject:indexPath]
+                     withRowAnimation:UITableViewRowAnimationAutomatic];
+}
+
+- (void)showRuleTypeSheet {
+    UIActionSheet *sheet = [[[UIActionSheet alloc] initWithTitle:@"Match"
+                                                         delegate:self
+                                                cancelButtonTitle:@"Cancel"
+                                           destructiveButtonTitle:nil
+                                                otherButtonTitles:@"Exact Domain", @"Domain Suffix", @"IP or CIDR", @"Port or Range", nil] autorelease];
+    sheet.tag = kRoutingAddTypeSheetTag;
+    [sheet showInView:self.view];
+}
+
+- (void)showRuleValuePrompt {
+    NSString *title = [self displayNameForType:_pendingType];
+    NSString *message = nil;
+    if ([_pendingType isEqualToString:@"domain"]) message = @"Example: api.example.com";
+    else if ([_pendingType isEqualToString:@"suffix"]) message = @"Example: example.com";
+    else if ([_pendingType isEqualToString:@"cidr"]) message = @"Example: 203.0.113.0/24";
+    else message = @"Example: 80 or 8000-8999";
+
+    UIAlertView *alert = [[[UIAlertView alloc] initWithTitle:title
+                                                     message:message
+                                                    delegate:self
+                                           cancelButtonTitle:@"Cancel"
+                                           otherButtonTitles:@"Add", nil] autorelease];
+    alert.tag = kRoutingValueAlertTag;
+    alert.alertViewStyle = UIAlertViewStylePlainTextInput;
+    [[alert textFieldAtIndex:0] setAutocapitalizationType:UITextAutocapitalizationTypeNone];
+    [[alert textFieldAtIndex:0] setAutocorrectionType:UITextAutocorrectionTypeNo];
+    [alert show];
+}
+
+- (NSString *)normalizedRuleValue:(NSString *)input type:(NSString *)type {
+    NSString *value = [[[input stringByTrimmingCharactersInSet:
+                         [NSCharacterSet whitespaceAndNewlineCharacterSet]] lowercaseString] copy];
+    if ([value length] == 0 || [value length] > 128 ||
+        [value rangeOfCharacterFromSet:
+         [NSCharacterSet characterSetWithCharactersInString:@";,\r\n\t "]].location != NSNotFound) {
+        [value release];
+        return nil;
+    }
+
+    BOOL valid = NO;
+    if ([type isEqualToString:@"domain"] || [type isEqualToString:@"suffix"]) {
+        NSCharacterSet *bad = [[NSCharacterSet characterSetWithCharactersInString:
+                                @"abcdefghijklmnopqrstuvwxyz0123456789-_."] invertedSet];
+        valid = [value rangeOfCharacterFromSet:bad].location == NSNotFound &&
+                ![value hasPrefix:@"."] && ![value hasSuffix:@"."] &&
+                [value rangeOfString:@".."].location == NSNotFound;
+    } else if ([type isEqualToString:@"cidr"]) {
+        NSArray *parts = [value componentsSeparatedByString:@"/"];
+        if ([parts count] == 1 || [parts count] == 2) {
+            NSString *address = [parts objectAtIndex:0];
+            unsigned char bytes[16];
+            BOOL is4 = inet_pton(AF_INET, [address UTF8String], bytes) == 1;
+            BOOL is6 = inet_pton(AF_INET6, [address UTF8String], bytes) == 1;
+            valid = is4 || is6;
+            if (valid && [parts count] == 2) {
+                NSString *prefixText = [parts objectAtIndex:1];
+                NSInteger prefix = [prefixText integerValue];
+                valid = [prefixText length] > 0 &&
+                        prefix >= 0 && prefix <= (is4 ? 32 : 128) &&
+                        [[NSString stringWithFormat:@"%ld", (long)prefix] isEqualToString:prefixText];
+            }
+        }
+    } else if ([type isEqualToString:@"port"]) {
+        NSArray *parts = [value componentsSeparatedByString:@"-"];
+        if ([parts count] == 1 || [parts count] == 2) {
+            NSString *firstText = [parts objectAtIndex:0];
+            NSString *lastText = [parts count] == 2 ? [parts objectAtIndex:1] : firstText;
+            NSCharacterSet *nonDigits = [[NSCharacterSet decimalDigitCharacterSet] invertedSet];
+            if ([firstText length] > 0 && [lastText length] > 0 &&
+                [firstText rangeOfCharacterFromSet:nonDigits].location == NSNotFound &&
+                [lastText rangeOfCharacterFromSet:nonDigits].location == NSNotFound) {
+                NSInteger first = [firstText integerValue];
+                NSInteger last = [lastText integerValue];
+                valid = first > 0 && first <= 65535 &&
+                        last >= first && last <= 65535;
+            }
+        }
+    }
+
+    if (!valid) {
+        [value release];
+        return nil;
+    }
+    return [value autorelease];
+}
+
+- (void)tableView:(UITableView *)tableView didSelectRowAtIndexPath:(NSIndexPath *)indexPath {
+    [tableView deselectRowAtIndexPath:indexPath animated:YES];
+    if (indexPath.section == 1) {
+        NSArray *actions = [NSArray arrayWithObjects:@"proxy", @"direct", @"block", nil];
+        [self setDefaultAction:[actions objectAtIndex:indexPath.row]];
+        return;
+    }
+    if (indexPath.section != 3) return;
+
+    if (indexPath.row == (NSInteger)[_rules count]) {
+        if ([_rules count] >= 24) {
+            UIAlertView *alert = [[[UIAlertView alloc] initWithTitle:@"Rule Limit"
+                                                             message:@"A maximum of 24 routing rules is supported."
+                                                            delegate:nil
+                                                   cancelButtonTitle:@"OK"
+                                                   otherButtonTitles:nil] autorelease];
+            [alert show];
+            return;
+        }
+        UIActionSheet *sheet = [[[UIActionSheet alloc] initWithTitle:@"Action"
+                                                             delegate:self
+                                                    cancelButtonTitle:@"Cancel"
+                                               destructiveButtonTitle:nil
+                                                    otherButtonTitles:@"Proxy", @"Direct", @"Block", nil] autorelease];
+        sheet.tag = kRoutingAddActionSheetTag;
+        [sheet showInView:self.view];
+        return;
+    }
+
+    NSDictionary *rule = [_rules objectAtIndex:indexPath.row];
+    UIActionSheet *sheet = [[[UIActionSheet alloc] initWithTitle:
+                             [NSString stringWithFormat:@"%@ · %@",
+                              [self displayNameForType:[rule objectForKey:@"type"]],
+                              [rule objectForKey:@"value"]]
+                                                         delegate:self
+                                                cancelButtonTitle:@"Cancel"
+                                           destructiveButtonTitle:@"Delete"
+                                                otherButtonTitles:@"Use Proxy", @"Use Direct", @"Use Block", nil] autorelease];
+    sheet.tag = kRoutingRuleActionSheetTagBase + indexPath.row;
+    [sheet showInView:self.view];
+}
+
+- (void)actionSheet:(UIActionSheet *)actionSheet clickedButtonAtIndex:(NSInteger)buttonIndex {
+    if (buttonIndex == actionSheet.cancelButtonIndex) return;
+
+    if (actionSheet.tag == kRoutingAddActionSheetTag) {
+        NSArray *actions = [NSArray arrayWithObjects:@"proxy", @"direct", @"block", nil];
+        if (buttonIndex < 0 || buttonIndex >= (NSInteger)[actions count]) return;
+        [_pendingAction release];
+        _pendingAction = [[actions objectAtIndex:buttonIndex] copy];
+        [self showRuleTypeSheet];
+        return;
+    }
+    if (actionSheet.tag == kRoutingAddTypeSheetTag) {
+        NSArray *types = [NSArray arrayWithObjects:@"domain", @"suffix", @"cidr", @"port", nil];
+        if (buttonIndex < 0 || buttonIndex >= (NSInteger)[types count]) return;
+        [_pendingType release];
+        _pendingType = [[types objectAtIndex:buttonIndex] copy];
+        [self showRuleValuePrompt];
+        return;
+    }
+    if (actionSheet.tag >= kRoutingRuleActionSheetTagBase) {
+        NSInteger index = actionSheet.tag - kRoutingRuleActionSheetTagBase;
+        if (index < 0 || index >= (NSInteger)[_rules count]) return;
+        if (buttonIndex == actionSheet.destructiveButtonIndex) {
+            [_rules removeObjectAtIndex:index];
+        } else {
+            NSArray *actions = [NSArray arrayWithObjects:@"proxy", @"direct", @"block", nil];
+            NSInteger actionIndex = buttonIndex - 1;
+            if (actionIndex < 0 || actionIndex >= (NSInteger)[actions count]) return;
+            NSMutableDictionary *updated = [NSMutableDictionary dictionaryWithDictionary:
+                                             [_rules objectAtIndex:index]];
+            [updated setObject:[actions objectAtIndex:actionIndex] forKey:@"action"];
+            [_rules replaceObjectAtIndex:index withObject:updated];
+        }
+        [self saveRules];
+        [_tableView reloadSections:[NSIndexSet indexSetWithIndex:3]
+                  withRowAnimation:UITableViewRowAnimationAutomatic];
+    }
+}
+
+- (void)alertView:(UIAlertView *)alertView clickedButtonAtIndex:(NSInteger)buttonIndex {
+    if (alertView.tag != kRoutingValueAlertTag || buttonIndex == alertView.cancelButtonIndex) return;
+    NSString *value = [self normalizedRuleValue:[[alertView textFieldAtIndex:0] text]
+                                           type:_pendingType];
+    if (!value) {
+        UIAlertView *error = [[[UIAlertView alloc] initWithTitle:@"Invalid Rule"
+                                                         message:@"Check the value and try again."
+                                                        delegate:nil
+                                               cancelButtonTitle:@"OK"
+                                               otherButtonTitles:nil] autorelease];
+        [error show];
+        return;
+    }
+    NSDictionary *rule = [NSDictionary dictionaryWithObjectsAndKeys:
+                          (_pendingAction ? _pendingAction : @"proxy"), @"action",
+                          (_pendingType ? _pendingType : @"domain"), @"type",
+                          value, @"value",
+                          nil];
+    [_rules addObject:rule];
+    [self saveRules];
+    [_tableView reloadSections:[NSIndexSet indexSetWithIndex:3]
+              withRowAnimation:UITableViewRowAnimationAutomatic];
+}
+
+- (BOOL)shouldAutorotateToInterfaceOrientation:(UIInterfaceOrientation)interfaceOrientation {
+    return IsPadDevice() ? (UIInterfaceOrientationIsPortrait(interfaceOrientation) ||
+                            UIInterfaceOrientationIsLandscape(interfaceOrientation))
+                         : interfaceOrientation == UIInterfaceOrientationPortrait;
+}
+
+- (BOOL)shouldAutorotate {
+    return IsPadDevice();
+}
+
+- (NSUInteger)supportedInterfaceOrientations {
+    return IsPadDevice() ? UIInterfaceOrientationMaskAllButUpsideDown
+                         : UIInterfaceOrientationMaskPortrait;
+}
+
+- (void)dealloc {
+    [_tableView release];
+    [_enabledSwitch release];
+    [_bypassLANSwitch release];
+    [_rules release];
+    [_pendingAction release];
+    [_pendingType release];
+    [super dealloc];
+}
+
+@end
+
 @implementation SettingsVC
 @synthesize autoUpdate = _autoUpdate;
 @synthesize stealthMode = _stealthMode;
@@ -2589,19 +3199,21 @@ static UIImage *MakeIconImage(VCIconType type, CGFloat size, BOOL active) {
 
 - (NSInteger)numberOfSectionsInTableView:(UITableView *)tableView {
     (void)tableView;
-    return 3;
+    return 4;
 }
 
 - (NSInteger)tableView:(UITableView *)tableView numberOfRowsInSection:(NSInteger)section {
     (void)tableView;
-    if (section == 0 || section == 1) return 2;
+    if (section == 0 || section == 2) return 2;
+    if (section == 1) return 1;
     return 4;
 }
 
 - (NSString *)tableView:(UITableView *)tableView titleForHeaderInSection:(NSInteger)section {
     (void)tableView;
     if (section == 0) return @"Subscriptions";
-    if (section == 1) return @"Appearance";
+    if (section == 1) return @"Network";
+    if (section == 2) return @"Appearance";
     return @"About";
 }
 
@@ -2674,21 +3286,24 @@ static UIImage *MakeIconImage(VCIconType type, CGFloat size, BOOL active) {
         return @"Stealth mode";
     }
     if (indexPath.section == 1 && indexPath.row == 0) {
-        return @"Light";
-    }
-    if (indexPath.section == 1 && indexPath.row == 1) {
-        return @"Dark";
+        return @"Routing";
     }
     if (indexPath.section == 2 && indexPath.row == 0) {
-        return @"About vless-core";
+        return @"Light";
     }
     if (indexPath.section == 2 && indexPath.row == 1) {
+        return @"Dark";
+    }
+    if (indexPath.section == 3 && indexPath.row == 0) {
+        return @"About vless-core";
+    }
+    if (indexPath.section == 3 && indexPath.row == 1) {
         return @"Credits";
     }
-    if (indexPath.section == 2 && indexPath.row == 2) {
+    if (indexPath.section == 3 && indexPath.row == 2) {
         return @"FAQ";
     }
-    if (indexPath.section == 2 && indexPath.row == 3) {
+    if (indexPath.section == 3 && indexPath.row == 3) {
         return @"Project on GitHub";
     }
     return @"";
@@ -2702,21 +3317,24 @@ static UIImage *MakeIconImage(VCIconType type, CGFloat size, BOOL active) {
         return @"Hide links in configs and subscriptions";
     }
     if (indexPath.section == 1 && indexPath.row == 0) {
-        return @"Use the light color scheme";
-    }
-    if (indexPath.section == 1 && indexPath.row == 1) {
-        return @"Use the dark color scheme";
+        return @"Proxy, Direct and Block rules";
     }
     if (indexPath.section == 2 && indexPath.row == 0) {
-        return @"Version and core binary info";
+        return @"Use the light color scheme";
     }
     if (indexPath.section == 2 && indexPath.row == 1) {
+        return @"Use the dark color scheme";
+    }
+    if (indexPath.section == 3 && indexPath.row == 0) {
+        return @"Version and core binary info";
+    }
+    if (indexPath.section == 3 && indexPath.row == 1) {
         return @"Dependencies and special thanks";
     }
-    if (indexPath.section == 2 && indexPath.row == 2) {
+    if (indexPath.section == 3 && indexPath.row == 2) {
         return @"Common questions and quick answers";
     }
-    if (indexPath.section == 2 && indexPath.row == 3) {
+    if (indexPath.section == 3 && indexPath.row == 3) {
         return @"github.com/notfence/vless-core-app";
     }
     return @"";
@@ -2754,6 +3372,21 @@ static UIImage *MakeIconImage(VCIconType type, CGFloat size, BOOL active) {
     }
 
     if (indexPath.section == 1) {
+        static NSString *kRoutingCellId = @"SettingsRoutingCell";
+        UITableViewCell *cell = [tableView dequeueReusableCellWithIdentifier:kRoutingCellId];
+        if (!cell) {
+            cell = [[[UITableViewCell alloc] initWithStyle:UITableViewCellStyleSubtitle reuseIdentifier:kRoutingCellId] autorelease];
+        }
+        cell.selectionStyle = UITableViewCellSelectionStyleBlue;
+        cell.accessoryView = nil;
+        cell.accessoryType = UITableViewCellAccessoryDisclosureIndicator;
+        [self applySettingsMarqueesToCell:cell
+                                    title:@"Routing"
+                                   detail:@"Proxy, Direct and Block rules"];
+        return cell;
+    }
+
+    if (indexPath.section == 2) {
         static NSString *kThemeCellId = @"SettingsThemeCell";
         UITableViewCell *cell = [tableView dequeueReusableCellWithIdentifier:kThemeCellId];
         if (!cell) {
@@ -2770,7 +3403,7 @@ static UIImage *MakeIconImage(VCIconType type, CGFloat size, BOOL active) {
         return cell;
     }
 
-    if (indexPath.section == 2 && indexPath.row == 0) {
+    if (indexPath.section == 3 && indexPath.row == 0) {
         static NSString *kAboutCellId = @"SettingsAboutCell";
         UITableViewCell *cell = [tableView dequeueReusableCellWithIdentifier:kAboutCellId];
         if (!cell) {
@@ -2784,7 +3417,7 @@ static UIImage *MakeIconImage(VCIconType type, CGFloat size, BOOL active) {
         return cell;
     }
 
-    if (indexPath.section == 2 && indexPath.row == 1) {
+    if (indexPath.section == 3 && indexPath.row == 1) {
         static NSString *kCreditsCellId = @"SettingsCreditsCell";
         UITableViewCell *cell = [tableView dequeueReusableCellWithIdentifier:kCreditsCellId];
         if (!cell) {
@@ -2798,7 +3431,7 @@ static UIImage *MakeIconImage(VCIconType type, CGFloat size, BOOL active) {
         return cell;
     }
 
-    if (indexPath.section == 2 && indexPath.row == 2) {
+    if (indexPath.section == 3 && indexPath.row == 2) {
         static NSString *kFAQCellId = @"SettingsFAQCell";
         UITableViewCell *cell = [tableView dequeueReusableCellWithIdentifier:kFAQCellId];
         if (!cell) {
@@ -2841,6 +3474,9 @@ static UIImage *MakeIconImage(VCIconType type, CGFloat size, BOOL active) {
 
 - (void)tableView:(UITableView *)tableView didSelectRowAtIndexPath:(NSIndexPath *)indexPath {
     if (indexPath.section == 1) {
+        RoutingVC *routing = [[[RoutingVC alloc] init] autorelease];
+        [self.navigationController pushViewController:routing animated:YES];
+    } else if (indexPath.section == 2) {
         BOOL dark = (indexPath.row == 1);
         if (_darkTheme != dark) {
             _darkTheme = dark;
@@ -2850,7 +3486,7 @@ static UIImage *MakeIconImage(VCIconType type, CGFloat size, BOOL active) {
             }
             [self applyTheme];
         }
-    } else if (indexPath.section == 2) {
+    } else if (indexPath.section == 3) {
         if (indexPath.row == 0) {
             AboutVC *about = [[[AboutVC alloc] init] autorelease];
             [self.navigationController pushViewController:about animated:YES];
@@ -5718,6 +6354,11 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
     [self stopUptimeTimer];
     [self updateConnectButton];
 
+    NSString *routingResp = [self sanitizeDaemonText:SyncRoutingPolicyToDaemon()];
+    if (![routingResp hasPrefix:@"OK"]) {
+        [self showStatus:[NSString stringWithFormat:@"%@ (routing sync failed: %@)", reason, routingResp] ok:NO];
+        return;
+    }
     NSString *cmd = [NSString stringWithFormat:@"CONNECT\t0\t%@\n", uri];
     NSString *resp = [self sanitizeDaemonText:SendCommand(cmd)];
     if ([resp hasPrefix:@"OK"]) {
@@ -7810,6 +8451,14 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
         return;
     }
 
+    NSString *routingResp = [self sanitizeDaemonText:SyncRoutingPolicyToDaemon()];
+    if (![routingResp hasPrefix:@"OK"]) {
+        _connected = NO;
+        [self stopUptimeTimer];
+        [self updateConnectButton];
+        [self showStatus:[NSString stringWithFormat:@"Reconnect failed (routing): %@", routingResp] ok:NO];
+        return;
+    }
     NSString *cmd = [NSString stringWithFormat:@"CONNECT\t0\t%@\n", newURI];
     NSString *connResp = [self sanitizeDaemonText:SendCommand(cmd)];
     if ([connResp hasPrefix:@"OK"]) {
@@ -7841,6 +8490,11 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
             return;
         }
 
+        NSString *routingResp = [self sanitizeDaemonText:SyncRoutingPolicyToDaemon()];
+        if (![routingResp hasPrefix:@"OK"]) {
+            [self showStatus:[NSString stringWithFormat:@"Routing sync failed: %@", routingResp] ok:NO];
+            return;
+        }
         NSString *cmd = [NSString stringWithFormat:@"CONNECT\t0\t%@\n", uri];
         NSString *resp = [self sanitizeDaemonText:SendCommand(cmd)];
         if ([resp hasPrefix:@"OK"]) {

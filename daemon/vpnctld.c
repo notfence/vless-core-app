@@ -1,6 +1,7 @@
 #define _POSIX_C_SOURCE 200809L
 
 #include <arpa/inet.h>
+#include <ctype.h>
 #include <errno.h>
 #include <netdb.h>
 #include <net/if.h>
@@ -34,6 +35,11 @@ typedef enum {
 } vpn_mode_t;
 
 typedef struct {
+    char ip[INET_ADDRSTRLEN];
+    unsigned int references;
+} route_bypass_entry_t;
+
+typedef struct {
     int connected;
     int socks_port;
     int redir_port;
@@ -45,16 +51,19 @@ typedef struct {
     int pf_enabled_before;
     char server_ip[64];
     char server_ips[512];
+    char routing[8192];
+    int routing_bypass_lan;
+    route_bypass_entry_t route_bypass[256];
 } vpn_state_t;
 
 static vpn_state_t g;
 static const char *kDaemonPortPath = "/var/run/vpnctld.port";
-static const char *kDNSCachePath = "/var/run/vlesscore-dns-cache.txt";
 static const int kDaemonPortDefault = 9093;
 static const int kDaemonPortMax = 9113;
 static const int kConnectResolveTimeoutMs = 8000;
 static volatile sig_atomic_t g_terminate = 0;
 static int g_listen_fd = -1;
+static int g_control_port = 0;
 static int g_vpn_icon_publisher_logged = 0;
 
 static void stop_pid(pid_t *p);
@@ -702,6 +711,117 @@ static int ip_list_append(char *list, size_t list_cap, const char *ip) {
     return 0;
 }
 
+static int routing_payload_valid(const char *text, int *bypass_lan_out) {
+    if (!text || !*text || strlen(text) >= sizeof(g.routing)) return 0;
+    for (const unsigned char *p = (const unsigned char *)text; *p; p++) {
+        if (!(isalnum(*p) || *p == ';' || *p == ',' || *p == '.' ||
+              *p == ':' || *p == '/' || *p == '-' || *p == '_')) {
+            return 0;
+        }
+    }
+
+    const char *first = strchr(text, ';');
+    const char *second = first ? strchr(first + 1, ';') : NULL;
+    const char *third = second ? strchr(second + 1, ';') : NULL;
+    if (!first || !second || first != text + 1 ||
+        (text[0] != '0' && text[0] != '1') ||
+        second == first + 1 || second[1] == '\0') {
+        return 0;
+    }
+    size_t action_len = (size_t)(second - first - 1);
+    if (!((action_len == 5 && strncmp(first + 1, "proxy", 5) == 0) ||
+          (action_len == 6 && strncmp(first + 1, "direct", 6) == 0) ||
+          (action_len == 5 && strncmp(first + 1, "block", 5) == 0))) {
+        return 0;
+    }
+    size_t lan_len = third ? (size_t)(third - second - 1) : strlen(second + 1);
+    if (lan_len != 1 || (second[1] != '0' && second[1] != '1')) {
+        return 0;
+    }
+    if (bypass_lan_out) *bypass_lan_out = second[1] == '1';
+    return 1;
+}
+
+static int ipv4_is_permanent_bypass(const char *ip) {
+    struct in_addr address;
+    if (inet_pton(AF_INET, ip, &address) != 1) return 0;
+    uint32_t value = ntohl(address.s_addr);
+
+    if ((value >> 24) == 127 ||
+        (value & 0xf0000000U) == 0xe0000000U ||
+        value == 0xffffffffU ||
+        ip_list_contains(g.server_ips, ip)) {
+        return 1;
+    }
+    if (!g.routing_bypass_lan) return 0;
+    return (value & 0xff000000U) == 0x0a000000U ||
+           (value & 0xffc00000U) == 0x64400000U ||
+           (value & 0xffff0000U) == 0xa9fe0000U ||
+           (value & 0xfff00000U) == 0xac100000U ||
+           (value & 0xffff0000U) == 0xc0a80000U;
+}
+
+static int pf_table_change(const char *operation, const char *ip) {
+    const char *pfctl = find_pfctl_bin();
+    if (!pfctl) return -1;
+    char *argv[] = {
+        (char *)pfctl,
+        "-t",
+        "vlesscore_bypass",
+        "-T",
+        (char *)operation,
+        (char *)ip,
+        NULL,
+    };
+    return run_argv(argv);
+}
+
+static int route_direct_reference(const char *ip, int add) {
+    struct in_addr address;
+    if (!g.connected || inet_pton(AF_INET, ip, &address) != 1) {
+        return -1;
+    }
+    if (ipv4_is_permanent_bypass(ip)) {
+        return 0;
+    }
+
+    route_bypass_entry_t *free_entry = NULL;
+    for (size_t i = 0; i < sizeof(g.route_bypass) / sizeof(g.route_bypass[0]); i++) {
+        route_bypass_entry_t *entry = &g.route_bypass[i];
+        if (entry->ip[0] == '\0') {
+            if (!free_entry) free_entry = entry;
+            continue;
+        }
+        if (strcmp(entry->ip, ip) != 0) continue;
+
+        if (add) {
+            entry->references++;
+            log_msg("routing direct bypass retained ip=%s refs=%u", ip, entry->references);
+            return 0;
+        }
+        if (entry->references > 1) {
+            entry->references--;
+            log_msg("routing direct bypass released ip=%s refs=%u", ip, entry->references);
+            return 0;
+        }
+        if (pf_table_change("delete", ip) != 0) {
+            return -1;
+        }
+        memset(entry, 0, sizeof(*entry));
+        log_msg("routing direct bypass removed ip=%s", ip);
+        return 0;
+    }
+
+    if (!add) return 0;
+    if (!free_entry || pf_table_change("add", ip) != 0) {
+        return -1;
+    }
+    snprintf(free_entry->ip, sizeof(free_entry->ip), "%s", ip);
+    free_entry->references = 1;
+    log_msg("routing direct bypass added ip=%s", ip);
+    return 0;
+}
+
 static long long now_ms(void) {
     struct timeval tv;
     gettimeofday(&tv, NULL);
@@ -1014,7 +1134,9 @@ static int spawn_core(const char *uri, int port, pid_t *pid_out) {
     if (!core_bin) return -2;
 
     char port_str[16];
+    char control_port_str[16];
     snprintf(port_str, sizeof(port_str), "%d", port);
+    snprintf(control_port_str, sizeof(control_port_str), "%d", g_control_port);
 
     char *argv[] = {
         (char *)core_bin,
@@ -1022,6 +1144,10 @@ static int spawn_core(const char *uri, int port, pid_t *pid_out) {
         (char *)uri,
         "--listen-port",
         port_str,
+        "--routing",
+        g.routing,
+        "--route-control-port",
+        control_port_str,
         NULL,
     };
 
@@ -1281,126 +1407,6 @@ static int dns_proxy_query_tcp(int socks_port, int *upstream_fd, const unsigned 
     return -1;
 }
 
-static int dns_read_u16(const unsigned char *buf, size_t len, size_t pos, uint16_t *out) {
-    if (!buf || !out || pos + 2 > len) return -1;
-    *out = (uint16_t)(((uint16_t)buf[pos] << 8) | (uint16_t)buf[pos + 1]);
-    return 0;
-}
-
-static int dns_read_u32(const unsigned char *buf, size_t len, size_t pos, uint32_t *out) {
-    if (!buf || !out || pos + 4 > len) return -1;
-    *out = ((uint32_t)buf[pos] << 24) | ((uint32_t)buf[pos + 1] << 16) | ((uint32_t)buf[pos + 2] << 8) | (uint32_t)buf[pos + 3];
-    return 0;
-}
-
-static int dns_skip_name(const unsigned char *msg, size_t len, size_t *pos) {
-    if (!msg || !pos || *pos >= len) return -1;
-
-    while (*pos < len) {
-        unsigned char c = msg[*pos];
-        if (c == 0) {
-            (*pos)++;
-            return 0;
-        }
-        if ((c & 0xc0) == 0xc0) {
-            if (*pos + 2 > len) return -1;
-            *pos += 2;
-            return 0;
-        }
-        if ((c & 0xc0) != 0) return -1;
-        *pos += (size_t)c + 1;
-    }
-
-    return -1;
-}
-
-static int dns_query_name(const unsigned char *query, size_t len, char *out, size_t out_cap) {
-    if (!query || len < 13 || !out || out_cap == 0) return -1;
-
-    size_t pos = 12;
-    size_t off = 0;
-    out[0] = '\0';
-
-    while (pos < len) {
-        unsigned char lab_len = query[pos++];
-        if (lab_len == 0) {
-            if (off == 0) return -1;
-            out[off] = '\0';
-            return 0;
-        }
-        if ((lab_len & 0xc0) != 0 || lab_len > 63 || pos + lab_len > len) return -1;
-        if (off != 0) {
-            if (off + 1 >= out_cap) return -1;
-            out[off++] = '.';
-        }
-        if (off + lab_len >= out_cap) return -1;
-        for (unsigned int i = 0; i < lab_len; i++) {
-            unsigned char ch = query[pos + i];
-            if (ch <= 0x20 || ch >= 0x7f || ch == '\t') return -1;
-            out[off++] = (char)ch;
-        }
-        pos += lab_len;
-    }
-
-    return -1;
-}
-
-static void dns_cache_append_mapping(const char *ip, const char *name) {
-    if (!ip || !*ip || !name || !*name) return;
-
-    int fd = open(kDNSCachePath, O_WRONLY | O_CREAT | O_APPEND, 0644);
-    if (fd < 0) return;
-
-    char line[512];
-    int n = snprintf(line, sizeof(line), "%s\t%s\n", ip, name);
-    if (n > 0 && (size_t)n < sizeof(line)) {
-        (void)write(fd, line, (size_t)n);
-    }
-    close(fd);
-}
-
-static void dns_cache_store_a_answers(const unsigned char *query, size_t query_len, const unsigned char *reply, size_t reply_len) {
-    char name[256];
-    if (dns_query_name(query, query_len, name, sizeof(name)) != 0) return;
-    if (!reply || reply_len < 12) return;
-
-    uint16_t qdcount = 0;
-    uint16_t ancount = 0;
-    if (dns_read_u16(reply, reply_len, 4, &qdcount) != 0 || dns_read_u16(reply, reply_len, 6, &ancount) != 0) return;
-
-    size_t pos = 12;
-    for (uint16_t i = 0; i < qdcount; i++) {
-        if (dns_skip_name(reply, reply_len, &pos) != 0 || pos + 4 > reply_len) return;
-        pos += 4;
-    }
-
-    for (uint16_t i = 0; i < ancount; i++) {
-        if (dns_skip_name(reply, reply_len, &pos) != 0 || pos + 10 > reply_len) return;
-
-        uint16_t type = 0;
-        uint16_t klass = 0;
-        uint16_t rdlen = 0;
-        uint32_t ttl = 0;
-        if (dns_read_u16(reply, reply_len, pos, &type) != 0 ||
-            dns_read_u16(reply, reply_len, pos + 2, &klass) != 0 ||
-            dns_read_u32(reply, reply_len, pos + 4, &ttl) != 0 ||
-            dns_read_u16(reply, reply_len, pos + 8, &rdlen) != 0) {
-            return;
-        }
-        (void)ttl;
-        pos += 10;
-        if (pos + rdlen > reply_len) return;
-
-        if (type == 1 && klass == 1 && rdlen == 4) {
-            char ip[64];
-            if (inet_ntop(AF_INET, reply + pos, ip, (socklen_t)sizeof(ip)) != NULL) {
-                dns_cache_append_mapping(ip, name);
-            }
-        }
-        pos += rdlen;
-    }
-}
-
 typedef struct {
     int udp_fd;
     int socks_port;
@@ -1441,7 +1447,6 @@ static void *dns_proxy_worker_loop(void *opaque) {
         }
         upstream_last_used_ms = now_ms();
 
-        dns_cache_store_a_answers(query, (size_t)n, reply, reply_len);
         if (sendto(worker->udp_fd, reply, reply_len, 0, (struct sockaddr *)&peer, peer_len) < 0) {
             log_msg("dns proxy worker=%d reply failed errno=%d", worker->index, errno);
         }
@@ -1501,8 +1506,6 @@ static int spawn_dns_proxy(int socks_port, int *dns_port_out, pid_t *pid_out) {
         if (udp_fd >= 0) close(udp_fd);
         return -1;
     }
-
-    truncate_log_file(kDNSCachePath);
 
     pid_t pid = fork();
     if (pid < 0) {
@@ -1637,6 +1640,17 @@ static const char *pf_rule_mode_name(pf_rule_mode_t mode) {
     }
 }
 
+static int write_pf_bypass_table(FILE *fp, const char *server_ips) {
+    if (fprintf(fp, "table <vlesscore_bypass> persist { 127.0.0.0/8, ") < 0) {
+        return -1;
+    }
+    if (g.routing_bypass_lan &&
+        fprintf(fp, "10.0.0.0/8, 100.64.0.0/10, 169.254.0.0/16, 172.16.0.0/12, 192.168.0.0/16, ") < 0) {
+        return -1;
+    }
+    return fprintf(fp, "224.0.0.0/4, 255.255.255.255/32, %s }\n", server_ips) < 0 ? -1 : 0;
+}
+
 static int write_pf_conf(const char *server_ips, char ifnames[][32], size_t if_count, int redir_port, int dns_port, pf_rule_mode_t mode) {
     FILE *fp = fopen("/var/run/vlesscore-pf.conf", "w");
     if (!fp) return -1;
@@ -1647,9 +1661,7 @@ static int write_pf_conf(const char *server_ips, char ifnames[][32], size_t if_c
     }
 
     if (mode == PF_RULE_ROUTE_TO_LO0) {
-        if (fprintf(fp,
-            "table <vlesscore_bypass> persist { 127.0.0.0/8, 10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16, 224.0.0.0/4, 255.255.255.255/32, %s }\n",
-            server_ips) < 0) {
+        if (write_pf_bypass_table(fp, server_ips) != 0) {
             fclose(fp);
             return -1;
         }
@@ -1697,9 +1709,7 @@ static int write_pf_conf(const char *server_ips, char ifnames[][32], size_t if_c
             return -1;
         }
     } else if (mode == PF_RULE_ROUTE_TO_LO0_NOGW) {
-        if (fprintf(fp,
-            "table <vlesscore_bypass> persist { 127.0.0.0/8, 10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16, 224.0.0.0/4, 255.255.255.255/32, %s }\n",
-            server_ips) < 0) {
+        if (write_pf_bypass_table(fp, server_ips) != 0) {
             fclose(fp);
             return -1;
         }
@@ -1747,10 +1757,8 @@ static int write_pf_conf(const char *server_ips, char ifnames[][32], size_t if_c
             return -1;
         }
     } else if (mode == PF_RULE_DIVERT_TO) {
-        if (fprintf(fp,
-            "set skip on lo0\n"
-            "table <vlesscore_bypass> persist { 127.0.0.0/8, 10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16, 224.0.0.0/4, 255.255.255.255/32, %s }\n",
-            server_ips) < 0) {
+        if (fprintf(fp, "set skip on lo0\n") < 0 ||
+            write_pf_bypass_table(fp, server_ips) != 0) {
             fclose(fp);
             return -1;
         }
@@ -1775,10 +1783,8 @@ static int write_pf_conf(const char *server_ips, char ifnames[][32], size_t if_c
             return -1;
         }
     } else if (mode == PF_RULE_DIVERT_TO_OLD) {
-        if (fprintf(fp,
-            "set skip on lo0\n"
-            "table <vlesscore_bypass> persist { 127.0.0.0/8, 10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16, 224.0.0.0/4, 255.255.255.255/32, %s }\n",
-            server_ips) < 0) {
+        if (fprintf(fp, "set skip on lo0\n") < 0 ||
+            write_pf_bypass_table(fp, server_ips) != 0) {
             fclose(fp);
             return -1;
         }
@@ -1803,10 +1809,8 @@ static int write_pf_conf(const char *server_ips, char ifnames[][32], size_t if_c
             return -1;
         }
     } else if (mode == PF_RULE_RDR_TO) {
-        if (fprintf(fp,
-            "set skip on lo0\n"
-            "table <vlesscore_bypass> persist { 127.0.0.0/8, 10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16, 224.0.0.0/4, 255.255.255.255/32, %s }\n",
-            server_ips) < 0) {
+        if (fprintf(fp, "set skip on lo0\n") < 0 ||
+            write_pf_bypass_table(fp, server_ips) != 0) {
             fclose(fp);
             return -1;
         }
@@ -1831,10 +1835,8 @@ static int write_pf_conf(const char *server_ips, char ifnames[][32], size_t if_c
             return -1;
         }
     } else if (mode == PF_RULE_RDR_TO_OLD) {
-        if (fprintf(fp,
-            "set skip on lo0\n"
-            "table <vlesscore_bypass> persist { 127.0.0.0/8, 10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16, 224.0.0.0/4, 255.255.255.255/32, %s }\n",
-            server_ips) < 0) {
+        if (fprintf(fp, "set skip on lo0\n") < 0 ||
+            write_pf_bypass_table(fp, server_ips) != 0) {
             fclose(fp);
             return -1;
         }
@@ -1859,10 +1861,8 @@ static int write_pf_conf(const char *server_ips, char ifnames[][32], size_t if_c
             return -1;
         }
     } else {
-        if (fprintf(fp,
-            "set skip on lo0\n"
-            "table <vlesscore_bypass> persist { 127.0.0.0/8, 10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16, 224.0.0.0/4, 255.255.255.255/32, %s }\n",
-            server_ips) < 0) {
+        if (fprintf(fp, "set skip on lo0\n") < 0 ||
+            write_pf_bypass_table(fp, server_ips) != 0) {
             fclose(fp);
             return -1;
         }
@@ -2096,6 +2096,10 @@ static void clear_pf_rules(void) {
 }
 
 static void disconnect_all(void) {
+    char routing[sizeof(g.routing)];
+    snprintf(routing, sizeof(routing), "%s", g.routing);
+    int routing_bypass_lan = g.routing_bypass_lan;
+
     if (g.mode == MODE_PF) {
         clear_pf_rules();
     }
@@ -2105,9 +2109,10 @@ static void disconnect_all(void) {
     stop_pid(&g.core_pid);
 
     unlink("/var/run/vlesscore-redsocks.conf");
-    unlink(kDNSCachePath);
 
     memset(&g, 0, sizeof(g));
+    snprintf(g.routing, sizeof(g.routing), "%s", routing);
+    g.routing_bypass_lan = routing_bypass_lan;
     update_vpn_icon_state(0);
 }
 
@@ -2205,7 +2210,7 @@ static int connect_all(const char *uri, int requested_port, char *msg, size_t ms
 }
 
 static void handle_client(int cfd) {
-    char buf[4096];
+    char buf[sizeof(g.routing) + 32];
     ssize_t n = read(cfd, buf, sizeof(buf) - 1);
     if (n <= 0) {
         return;
@@ -2242,6 +2247,31 @@ static void handle_client(int cfd) {
     } else if (strncmp(buf, "CLEAR_LOGS", 10) == 0) {
         clear_logs();
         snprintf(reply, sizeof(reply), "OK logs cleared\n");
+    } else if (strncmp(buf, "ROUTING\t", 8) == 0) {
+        char *routing = buf + 8;
+        char *nl = strchr(routing, '\n');
+        if (nl) *nl = '\0';
+        int bypass_lan = 1;
+        if (!routing_payload_valid(routing, &bypass_lan)) {
+            snprintf(reply, sizeof(reply), "ERR invalid routing policy\n");
+        } else {
+            snprintf(g.routing, sizeof(g.routing), "%s", routing);
+            g.routing_bypass_lan = bypass_lan;
+            log_msg("routing policy saved enabled=%c bypass_lan=%s",
+                    routing[0], bypass_lan ? "yes" : "no");
+            snprintf(reply, sizeof(reply), "OK routing saved\n");
+        }
+    } else if (strncmp(buf, "ROUTE_DIRECT_ADD\t", 17) == 0 ||
+               strncmp(buf, "ROUTE_DIRECT_REMOVE\t", 20) == 0) {
+        int add = strncmp(buf, "ROUTE_DIRECT_ADD\t", 17) == 0;
+        char *ip = buf + (add ? 17 : 20);
+        char *nl = strchr(ip, '\n');
+        if (nl) *nl = '\0';
+        if (route_direct_reference(ip, add) == 0) {
+            snprintf(reply, sizeof(reply), "OK\n");
+        } else {
+            snprintf(reply, sizeof(reply), "ERR route bypass update failed\n");
+        }
     } else if (strncmp(buf, "CONNECT\t", 8) == 0) {
         char *p = buf + 8;
         char *tab = strchr(p, '\t');
@@ -2280,6 +2310,8 @@ int main(void) {
 
     signal(SIGPIPE, SIG_IGN);
     memset(&g, 0, sizeof(g));
+    snprintf(g.routing, sizeof(g.routing), "0;proxy;1");
+    g.routing_bypass_lan = 1;
     update_vpn_icon_state(0);
 
     int lfd = -1;
@@ -2295,6 +2327,7 @@ int main(void) {
         return 1;
     }
     g_listen_fd = lfd;
+    g_control_port = bound_port;
 
     if (bound_port != kDaemonPortDefault) {
         log_msg("daemon API moved to fallback port=%d", bound_port);
