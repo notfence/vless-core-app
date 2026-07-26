@@ -53,12 +53,13 @@ ZBAR_HEADERS := $(shell find $(ZBAR_DIR) -type f -name '*.h')
 ZBAR_OBJ := $(patsubst $(ZBAR_DIR)/%.c,$(BUILD_DIR)/zbar/%.o,$(ZBAR_SRC))
 ZBAR_LIB := $(BUILD_DIR)/libzbar-qr.a
 
-APP_SRC := app/main.m happ/happ_crypto.c
+APP_SRC := app/main.m integrations/happ/happ_crypto.c integrations/karing/karing_backup.m
+APP_HEADERS := integrations/happ/happ_crypto.h integrations/karing/karing_backup.h
 DAEMON_SRC := daemon/vpnctld.c daemon/vpnicon_statusbar.c
 BOOTSTRAP_SRC := daemon/vpnctld_bootstrap.c
 
-APP_CFLAGS := -fno-objc-arc -Wall -Wextra -O2 -arch armv7 -miphoneos-version-min=6.0 -isysroot $(IOS_SDK) -Ihapp -I$(ZBAR_DIR) -I$(OPENSSL_IOS_INCLUDE)
-APP_LDFLAGS := -framework UIKit -framework Foundation -framework CoreGraphics -framework QuartzCore -framework AVFoundation -framework CoreMedia -framework CoreVideo -liconv $(OPENSSL_IOS_CRYPTO_LIB)
+APP_CFLAGS := -fno-objc-arc -Wall -Wextra -O2 -arch armv7 -miphoneos-version-min=6.0 -isysroot $(IOS_SDK) -Iintegrations/happ -Iintegrations/karing -I$(ZBAR_DIR) -I$(OPENSSL_IOS_INCLUDE)
+APP_LDFLAGS := -framework UIKit -framework Foundation -framework CoreGraphics -framework QuartzCore -framework AVFoundation -framework CoreMedia -framework CoreVideo -liconv -lz $(OPENSSL_IOS_CRYPTO_LIB)
 ZBAR_CFLAGS := -w -O2 -arch armv7 -miphoneos-version-min=6.0 -isysroot $(IOS_SDK) -I$(ZBAR_DIR)
 
 DAEMON_CFLAGS := -Wall -Wextra -O2 -std=c11 -arch armv7 -miphoneos-version-min=6.0 -isysroot $(IOS_SDK)
@@ -106,7 +107,7 @@ $(ZBAR_LIB): check-ios-toolchain $(ZBAR_OBJ)
 	$(IOS_AR) rcs $@ $(ZBAR_OBJ)
 	$(IOS_RANLIB) $@
 
-$(APP_BIN): check-ios-toolchain $(APP_SRC) $(ZBAR_LIB)
+$(APP_BIN): check-ios-toolchain $(APP_SRC) $(APP_HEADERS) $(ZBAR_LIB)
 	mkdir -p $(BUILD_DIR)
 	PATH="$(IOS_BIN):$$PATH" $(IOS_RUNTIME_ENV) $(IOS_CC) $(APP_CFLAGS) $(APP_SRC) $(ZBAR_LIB) -o $@ $(APP_LDFLAGS)
 

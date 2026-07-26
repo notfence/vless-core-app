@@ -4,6 +4,7 @@
 #import <CoreMedia/CoreMedia.h>
 #import <CoreVideo/CoreVideo.h>
 #include "happ_crypto.h"
+#include "karing_backup.h"
 #include <zbar.h>
 
 #include <sys/socket.h>
@@ -2067,7 +2068,7 @@ static UIView *VCCreateDisclosureAccessoryView(void) {
 - (void)buildSections {
     NSArray *gettingStarted = [NSArray arrayWithObjects:
         [self question:@"How do I import?"
-                 answer:@"Tap + and choose Import from Clipboard, Import from File, Scan QR Code, or Manual Input. You can import vless:// and socks5:// configurations, HTTP/HTTPS subscription URLs, and happ://add/, happ://crypt4/, or happ://crypt5/ links."],
+                 answer:@"Tap + and choose Import from Clipboard, Import from File, Scan QR Code, or Manual Input. You can import vless:// and socks5:// configurations, HTTP/HTTPS subscription URLs, happ:// links, and Karing backup ZIP files or LAN Send QR codes."],
         [self question:@"How do I delete or reorder items?"
                  answer:@"Swipe a standalone configuration or subscription from right to left to delete it. To change the order, tap the list button beside Configurations or Subscriptions, drag the rows, then tap the checkmark to finish."],
         [self question:@"Do I need to respring after installation?"
@@ -4782,6 +4783,7 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
 - (void)restoreMainTableAfterStructuralTransitionCompact:(BOOL)compact
                                           preservedOffset:(CGFloat)preservedOffset;
 - (void)refreshVisibleSubscriptionHeaderAccessories;
+- (void)importFileAtURL:(NSURL *)url;
 - (void)updateMainSectionHeaderButton:(UIButton *)button section:(NSInteger)section animated:(BOOL)animated;
 - (void)updateMainSectionHeaderView:(UIView *)header section:(NSInteger)section animated:(BOOL)animated;
 - (void)updateStickyMainSectionHeader;
@@ -7620,6 +7622,18 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
                               allowInsecureFetch:(BOOL)allowInsecureFetch
                                      startStatus:(NSString *)startStatus
                               importedPrefixPart:(NSString *)importedPrefixPart {
+    [self startBackgroundSubscriptionImportForURLs:urlStrings
+                               allowInsecureFetch:allowInsecureFetch
+                                      startStatus:startStatus
+                               importedPrefixPart:importedPrefixPart
+                      fallbackSubscriptionsByURL:nil];
+}
+
+- (void)startBackgroundSubscriptionImportForURLs:(NSArray *)urlStrings
+                              allowInsecureFetch:(BOOL)allowInsecureFetch
+                                     startStatus:(NSString *)startStatus
+                              importedPrefixPart:(NSString *)importedPrefixPart
+                     fallbackSubscriptionsByURL:(NSDictionary *)fallbackSubscriptionsByURL {
     NSMutableArray *cleanURLs = [NSMutableArray array];
     for (id obj in urlStrings) {
         if (![obj isKindOfClass:[NSString class]]) continue;
@@ -7648,6 +7662,7 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
 
     NSArray *urlsToImport = [[NSArray alloc] initWithArray:cleanURLs];
     NSString *prefixPart = [importedPrefixPart copy];
+    NSDictionary *fallbackSubscriptions = [fallbackSubscriptionsByURL copy];
 
     dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_DEFAULT, 0), ^{
         NSAutoreleasePool *pool = [[NSAutoreleasePool alloc] init];
@@ -7656,6 +7671,7 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
         NSMutableArray *insecureURLs = [[NSMutableArray alloc] init];
         NSMutableArray *failureTexts = [[NSMutableArray alloc] init];
         NSUInteger failedCount = 0;
+        NSUInteger fallbackCount = 0;
 
         for (NSString *urlString in urlsToImport) {
             BOOL happAddSource = [self isHappAddLink:urlString];
@@ -7681,6 +7697,9 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
                 [importedSubs addObject:updated];
             } else if (!allowInsecureFetch && insecureRetryAvailable) {
                 [insecureURLs addObject:urlString];
+            } else if ([[fallbackSubscriptions objectForKey:subscriptionURL] isKindOfClass:[NSDictionary class]]) {
+                [importedSubs addObject:[fallbackSubscriptions objectForKey:subscriptionURL]];
+                fallbackCount++;
             } else {
                 failedCount++;
                 [failureTexts addObject:[self shortImportFailureTextForURL:urlString errorText:errorText]];
@@ -7729,6 +7748,11 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
                           status,
                           [self subscriptionImportCountText:failedCount]];
             }
+            if (fallbackCount > 0) {
+                status = [NSString stringWithFormat:@"%@ (%lu restored from backup cache)",
+                          status,
+                          (unsigned long)fallbackCount];
+            }
             if ([insecureURLs count] > 0) {
                 status = [NSString stringWithFormat:@"%@; %@ require insecure mode",
                           status,
@@ -7757,6 +7781,7 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
             [failureTexts release];
             [urlsToImport release];
             [prefixPart release];
+            [fallbackSubscriptions release];
         });
 
         [pool drain];
@@ -7989,6 +8014,17 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
         return;
     }
 
+    NSString *karingError = nil;
+    NSDictionary *karingDescriptor = VCKaringLANDownloadDescriptor(text, &karingError);
+    if ([karingDescriptor isKindOfClass:[NSDictionary class]]) {
+        [self receiveKaringBackupWithDescriptor:karingDescriptor];
+        return;
+    }
+    if ([karingError length] > 0) {
+        [self showStatus:karingError ok:NO];
+        return;
+    }
+
     if ([self isHappEncryptedLink:text]) {
         [self importHappEncryptedLink:text];
         return;
@@ -8160,7 +8196,211 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
         return;
     }
 
-    [self showStatus:@"Unsupported import format (use vless://, socks5://, happ://add/, crypt4/ or crypt5/, or http(s) subscription)" ok:NO];
+    [self showStatus:@"Unsupported import format (use vless://, socks5://, happ://, karing://sync-download/, or an HTTP(S) subscription)" ok:NO];
+}
+
+- (void)importKaringSubscriptionEntries:(NSArray *)entries {
+    if (![entries isKindOfClass:[NSArray class]] || [entries count] == 0) {
+        [self showStatus:@"The Karing backup has no supported subscriptions" ok:NO];
+        return;
+    }
+
+    NSMutableArray *urls = [NSMutableArray array];
+    NSMutableDictionary *cachedSubscriptions = [NSMutableDictionary dictionary];
+    NSUInteger duplicateCount = 0;
+    for (id value in entries) {
+        if (![value isKindOfClass:[NSDictionary class]]) continue;
+        NSString *url = [self safeTrim:[value objectForKey:@"url"]];
+        if (![self isSubscriptionURL:url] || [urls containsObject:url]) continue;
+        if ([self existingSubscriptionIndexForURL:url] >= 0) {
+            duplicateCount++;
+            continue;
+        }
+        [urls addObject:url];
+
+        NSArray *storedItems = [value objectForKey:@"items"];
+        NSMutableArray *supportedItems = [NSMutableArray array];
+        if ([storedItems isKindOfClass:[NSArray class]]) {
+            for (id item in storedItems) {
+                if (![item isKindOfClass:[NSString class]]) continue;
+                if ([self isSupportedConfigTupleForURI:item] && ![supportedItems containsObject:item]) {
+                    [supportedItems addObject:item];
+                }
+            }
+        }
+        if ([supportedItems count] > 0) {
+            NSMutableDictionary *subscription =
+                [NSMutableDictionary dictionaryWithDictionary:
+                 [self subscriptionDictionaryForURL:url allowInsecureFetch:NO]];
+            [subscription setObject:supportedItems forKey:@"items"];
+            [cachedSubscriptions setObject:subscription forKey:url];
+        }
+    }
+
+    if ([urls count] == 0) {
+        [self showStatus:(duplicateCount > 0
+                          ? @"All Karing subscriptions already exist"
+                          : @"The Karing backup has no supported subscriptions")
+                     ok:(duplicateCount > 0)];
+        return;
+    }
+
+    [self startBackgroundSubscriptionImportForURLs:urls
+                               allowInsecureFetch:NO
+                                      startStatus:@"Importing Karing subscriptions..."
+                               importedPrefixPart:nil
+                      fallbackSubscriptionsByURL:cachedSubscriptions];
+}
+
+- (void)importKaringBackupData:(NSData *)data {
+    if (![data isKindOfClass:[NSData class]] || [data length] == 0) {
+        [self showStatus:@"Unable to read the Karing backup" ok:NO];
+        return;
+    }
+    if (_launchAutoUpdateInProgress) {
+        [self showStatus:@"Subscriptions update is already running" ok:YES];
+        return;
+    }
+
+    _launchAutoUpdateInProgress = YES;
+    [self showStatus:@"Reading Karing backup..." ok:YES];
+    NSData *copiedData = [data copy];
+    dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_DEFAULT, 0), ^{
+        NSAutoreleasePool *pool = [[NSAutoreleasePool alloc] init];
+        NSString *errorText = nil;
+        NSArray *entries = VCKaringSubscriptionsFromBackupData(copiedData, &errorText);
+        NSArray *copiedEntries = [entries copy];
+        NSString *copiedError = [errorText copy];
+
+        dispatch_async(dispatch_get_main_queue(), ^{
+            _launchAutoUpdateInProgress = NO;
+            if ([copiedEntries isKindOfClass:[NSArray class]]) {
+                [self importKaringSubscriptionEntries:copiedEntries];
+            } else {
+                [self showStatus:([copiedError length] > 0
+                                  ? copiedError
+                                  : @"Unable to read the Karing backup")
+                             ok:NO];
+            }
+            [copiedEntries release];
+            [copiedError release];
+            [copiedData release];
+        });
+        [pool drain];
+    });
+}
+
+- (void)receiveKaringBackupWithDescriptor:(NSDictionary *)descriptor {
+    NSArray *hosts = [descriptor objectForKey:@"hosts"];
+    NSInteger port = [[descriptor objectForKey:@"port"] integerValue];
+    if (![hosts isKindOfClass:[NSArray class]] || [hosts count] == 0 ||
+        port < 1 || port > 65535) {
+        [self showStatus:@"Invalid Karing LAN sync address" ok:NO];
+        return;
+    }
+    if (_launchAutoUpdateInProgress) {
+        [self showStatus:@"Subscriptions update is already running" ok:YES];
+        return;
+    }
+
+    _launchAutoUpdateInProgress = YES;
+    [self showStatus:@"Receiving Karing backup..." ok:YES];
+    NSDictionary *copiedDescriptor = [descriptor copy];
+    dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_DEFAULT, 0), ^{
+        NSAutoreleasePool *pool = [[NSAutoreleasePool alloc] init];
+        NSArray *downloadHosts = [copiedDescriptor objectForKey:@"hosts"];
+        NSInteger downloadPort = [[copiedDescriptor objectForKey:@"port"] integerValue];
+        NSArray *entries = nil;
+        NSString *lastError = nil;
+
+        for (NSString *host in downloadHosts) {
+            NSString *routeAdd = [NSString stringWithFormat:@"ROUTE_DIRECT_ADD\t%@\n", host];
+            NSString *routeRemove = [NSString stringWithFormat:@"ROUTE_DIRECT_REMOVE\t%@\n", host];
+            (void)SendCommand(routeAdd);
+
+            NSString *baseURLText = [NSString stringWithFormat:@"http://%@:%ld",
+                                     host, (long)downloadPort];
+            NSMutableURLRequest *probe =
+                [NSMutableURLRequest requestWithURL:
+                 [NSURL URLWithString:[baseURLText stringByAppendingString:@"/"]]
+                                       cachePolicy:NSURLRequestReloadIgnoringLocalCacheData
+                                   timeoutInterval:3.0];
+            [probe setValue:@"close" forHTTPHeaderField:@"Connection"];
+
+            NSURLResponse *response = nil;
+            NSError *requestError = nil;
+            (void)[NSURLConnection sendSynchronousRequest:probe
+                                         returningResponse:&response
+                                                     error:&requestError];
+            NSInteger probeStatus = 0;
+            if ([response isKindOfClass:[NSHTTPURLResponse class]]) {
+                probeStatus = [(NSHTTPURLResponse *)response statusCode];
+            }
+            if (requestError || (probeStatus != 200 && probeStatus != 404)) {
+                lastError = requestError
+                    ? [requestError localizedDescription]
+                    : [NSString stringWithFormat:@"Karing probe returned HTTP %ld",
+                       (long)probeStatus];
+                (void)SendCommand(routeRemove);
+                continue;
+            }
+
+            NSMutableURLRequest *request =
+                [NSMutableURLRequest requestWithURL:
+                 [NSURL URLWithString:[baseURLText stringByAppendingString:@"/sync-download"]]
+                                       cachePolicy:NSURLRequestReloadIgnoringLocalCacheData
+                                   timeoutInterval:20.0];
+            [request setValue:@"close" forHTTPHeaderField:@"Connection"];
+            response = nil;
+            requestError = nil;
+            NSData *data = [NSURLConnection sendSynchronousRequest:request
+                                                 returningResponse:&response
+                                                             error:&requestError];
+            (void)SendCommand(routeRemove);
+
+            NSInteger statusCode = 0;
+            if ([response isKindOfClass:[NSHTTPURLResponse class]]) {
+                statusCode = [(NSHTTPURLResponse *)response statusCode];
+            }
+            if (requestError || !data || [data length] == 0 || statusCode != 200) {
+                if (requestError) {
+                    lastError = [requestError localizedDescription];
+                } else if (statusCode != 0) {
+                    lastError = [NSString stringWithFormat:@"Karing returned HTTP %ld", (long)statusCode];
+                } else {
+                    lastError = @"Karing returned an empty response";
+                }
+                continue;
+            }
+            if ([data length] > 32U * 1024U * 1024U) {
+                lastError = @"The Karing backup is too large";
+                continue;
+            }
+
+            NSString *parseError = nil;
+            entries = VCKaringSubscriptionsFromBackupData(data, &parseError);
+            if ([entries isKindOfClass:[NSArray class]]) break;
+            lastError = parseError;
+        }
+
+        NSArray *copiedEntries = [entries copy];
+        NSString *copiedError = [lastError copy];
+        dispatch_async(dispatch_get_main_queue(), ^{
+            _launchAutoUpdateInProgress = NO;
+            if ([copiedEntries isKindOfClass:[NSArray class]]) {
+                [self importKaringSubscriptionEntries:copiedEntries];
+            } else {
+                NSString *message = ([copiedError length] > 0)
+                    ? [NSString stringWithFormat:@"Karing sync failed: %@", copiedError]
+                    : @"Karing sync failed: no LAN address responded";
+                [self showStatus:message ok:NO];
+            }
+            [copiedEntries release];
+            [copiedError release];
+            [copiedDescriptor release];
+        });
+        [pool drain];
+    });
 }
 
 - (NSString *)decodeImportTextData:(NSData *)data {
@@ -8197,7 +8437,7 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
     BOOL isDir = NO;
     BOOL exists = [[NSFileManager defaultManager] fileExistsAtPath:path isDirectory:&isDir];
     if (exists && isDir) {
-        [self showStatus:@"Text file not found" ok:NO];
+        [self showStatus:@"Import file not found" ok:NO];
         return;
     }
 
@@ -8218,10 +8458,15 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
     }
     if (!data || [data length] == 0) {
         if (!exists) {
-            [self showStatus:@"Text file not found" ok:NO];
+            [self showStatus:@"Import file not found" ok:NO];
             return;
         }
-        [self showStatus:@"Failed to read text file" ok:NO];
+        [self showStatus:@"Failed to read import file" ok:NO];
+        return;
+    }
+
+    if (VCKaringBackupDataLooksLikeZip(data)) {
+        [self importKaringBackupData:data];
         return;
     }
 
@@ -8232,6 +8477,19 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
     }
 
     [self importTextEntry:text];
+}
+
+- (void)importFileAtURL:(NSURL *)url {
+    if (![url isKindOfClass:[NSURL class]] || ![url isFileURL]) {
+        [self showStatus:@"Unsupported import file URL" ok:NO];
+        return;
+    }
+    NSString *path = [url path];
+    if (![path isKindOfClass:[NSString class]] || [path length] == 0) {
+        [self showStatus:@"Import file path is empty" ok:NO];
+        return;
+    }
+    [self importTextFileAtPath:path];
 }
 
 - (BOOL)isDirectoryPath:(NSString *)path {
@@ -10398,7 +10656,7 @@ moveRowAtIndexPath:(NSIndexPath *)sourceIndexPath
             av.tag = VCAlertTagImportManual;
 
             UITextField *tf = [av textFieldAtIndex:0];
-            tf.placeholder = @"vless://..., happ://add/..., or https://...";
+            tf.placeholder = @"vless://..., or https://..., happ://add/...";
             tf.clearButtonMode = UITextFieldViewModeWhileEditing;
             tf.keyboardType = UIKeyboardTypeURL;
             tf.autocapitalizationType = UITextAutocapitalizationTypeNone;
@@ -10446,9 +10704,22 @@ moveRowAtIndexPath:(NSIndexPath *)sourceIndexPath
 - (void)qrScanVC:(UIViewController *)vc didScanText:(NSString *)text {
     (void)vc;
     NSString *payload = [[self safeTrim:text] copy];
+    NSString *karingError = nil;
+    NSDictionary *karingDescriptor = VCKaringLANDownloadDescriptor(payload, &karingError);
     [self dismissViewControllerAnimated:YES completion:^{
         if (![payload isKindOfClass:[NSString class]] || [payload length] == 0) {
             [self showStatus:@"QR code does not contain import data" ok:NO];
+            [payload release];
+            return;
+        }
+
+        if ([karingDescriptor isKindOfClass:[NSDictionary class]]) {
+            [self receiveKaringBackupWithDescriptor:karingDescriptor];
+            [payload release];
+            return;
+        }
+        if ([karingError length] > 0) {
+            [self showStatus:karingError ok:NO];
             [payload release];
             return;
         }
@@ -10533,9 +10804,16 @@ moveRowAtIndexPath:(NSIndexPath *)sourceIndexPath
 @implementation AppDelegate
 @synthesize window = _window;
 
+- (BOOL)openImportURL:(NSURL *)url {
+    if (![url isKindOfClass:[NSURL class]] || ![url isFileURL]) return NO;
+    UIViewController *root = _window.rootViewController;
+    if (![root isKindOfClass:[MainVC class]]) return NO;
+    [(MainVC *)root importFileAtURL:url];
+    return YES;
+}
+
 - (BOOL)application:(UIApplication *)application didFinishLaunchingWithOptions:(NSDictionary *)launchOptions {
     (void)application;
-    (void)launchOptions;
 
     ClearLogsViaDaemon();
     VCAppearanceApplyStatusBar();
@@ -10544,7 +10822,35 @@ moveRowAtIndexPath:(NSIndexPath *)sourceIndexPath
     MainVC *vc = [[[MainVC alloc] init] autorelease];
     _window.rootViewController = vc;
     [_window makeKeyAndVisible];
+
+    NSURL *launchURL = [launchOptions objectForKey:UIApplicationLaunchOptionsURLKey];
+    if ([launchURL isFileURL]) {
+        [self performSelector:@selector(openImportURL:) withObject:launchURL afterDelay:0.15];
+    }
     return YES;
+}
+
+- (BOOL)application:(UIApplication *)application handleOpenURL:(NSURL *)url {
+    (void)application;
+    return [self openImportURL:url];
+}
+
+- (BOOL)application:(UIApplication *)application
+             openURL:(NSURL *)url
+   sourceApplication:(NSString *)sourceApplication
+          annotation:(id)annotation {
+    (void)application;
+    (void)sourceApplication;
+    (void)annotation;
+    return [self openImportURL:url];
+}
+
+- (BOOL)application:(UIApplication *)application
+             openURL:(NSURL *)url
+             options:(NSDictionary *)options {
+    (void)application;
+    (void)options;
+    return [self openImportURL:url];
 }
 
 - (NSUInteger)application:(UIApplication *)application supportedInterfaceOrientationsForWindow:(UIWindow *)window {
