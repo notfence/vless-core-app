@@ -31,6 +31,7 @@ extern char **environ;
 static NSString *const kDefaultsConfigsKey = @"vlesscore.configs";
 static NSString *const kDefaultsSubsKey = @"vlesscore.subscriptions";
 static NSString *const kDefaultsAutoUpdateSubsKey = @"vlesscore.auto_update_subs";
+static NSString *const kDefaultsPreserveCustomSubscriptionNamesKey = @"vlesscore.preserve_custom_subscription_names";
 static NSString *const kDefaultsStealthModeKey = @"vlesscore.stealth_mode";
 static NSString *const kDefaultsDarkThemeKey = @"vlesscore.dark_theme";
 static NSString *const kDefaultsRoutingEnabledKey = @"vlesscore.routing.enabled";
@@ -54,6 +55,7 @@ static NSString *const kSubscriptionWebPageURLKey = @"web_page_url";
 static NSString *const kSubscriptionUpdateIntervalKey = @"update_interval_hours";
 static NSString *const kSubscriptionRefillDateKey = @"refill_date";
 static NSString *const kSubscriptionLastUpdatedKey = @"last_updated";
+static NSString *const kSubscriptionCustomNameKey = @"custom_name";
 static const char *kDaemonPortPath = "/var/run/vpnctld.port";
 static const int kDaemonDefaultPort = 9093;
 static const int kDaemonPortMax = 9113;
@@ -164,6 +166,7 @@ typedef NS_ENUM(NSInteger, VCActionSheetTag) {
 };
 
 static NSInteger const kVCSubscriptionDeleteAlertTag = 3101;
+static NSInteger const kVCSubscriptionRenameAlertTag = 3102;
 
 typedef NS_ENUM(NSInteger, VCIconType) {
     VCIconTypeAdd = 1,
@@ -2005,6 +2008,7 @@ static UIView *VCCreateDisclosureAccessoryView(void) {
 @class SettingsVC;
 @protocol SettingsVCDelegate <NSObject>
 - (void)settingsVC:(SettingsVC *)vc didChangeAutoUpdate:(BOOL)enabled;
+- (void)settingsVC:(SettingsVC *)vc didChangePreserveCustomSubscriptionNames:(BOOL)enabled;
 - (void)settingsVC:(SettingsVC *)vc didChangeStealthMode:(BOOL)enabled;
 - (void)settingsVC:(SettingsVC *)vc didChangeDarkTheme:(BOOL)enabled;
 @end
@@ -2012,13 +2016,16 @@ static UIView *VCCreateDisclosureAccessoryView(void) {
 @interface SettingsVC : UIViewController <UITableViewDataSource, UITableViewDelegate> {
     UITableView *_tableView;
     UISwitch *_autoUpdateSwitch;
+    UISwitch *_preserveCustomNamesSwitch;
     UISwitch *_stealthSwitch;
     BOOL _autoUpdate;
+    BOOL _preserveCustomNames;
     BOOL _stealthMode;
     BOOL _darkTheme;
     id<SettingsVCDelegate> _delegate;
 }
 @property (nonatomic, assign) BOOL autoUpdate;
+@property (nonatomic, assign) BOOL preserveCustomNames;
 @property (nonatomic, assign) BOOL stealthMode;
 @property (nonatomic, assign) BOOL darkTheme;
 @property (nonatomic, assign) id<SettingsVCDelegate> delegate;
@@ -3147,6 +3154,7 @@ commitEditingStyle:(UITableViewCellEditingStyle)editingStyle
 
 @implementation SettingsVC
 @synthesize autoUpdate = _autoUpdate;
+@synthesize preserveCustomNames = _preserveCustomNames;
 @synthesize stealthMode = _stealthMode;
 @synthesize darkTheme = _darkTheme;
 @synthesize delegate = _delegate;
@@ -3159,6 +3167,13 @@ commitEditingStyle:(UITableViewCellEditingStyle)editingStyle
     _autoUpdate = [sw isOn];
     if ([_delegate respondsToSelector:@selector(settingsVC:didChangeAutoUpdate:)]) {
         [_delegate settingsVC:self didChangeAutoUpdate:_autoUpdate];
+    }
+}
+
+- (void)preserveCustomNamesSwitchChanged:(UISwitch *)sw {
+    _preserveCustomNames = [sw isOn];
+    if ([_delegate respondsToSelector:@selector(settingsVC:didChangePreserveCustomSubscriptionNames:)]) {
+        [_delegate settingsVC:self didChangePreserveCustomSubscriptionNames:_preserveCustomNames];
     }
 }
 
@@ -3175,6 +3190,7 @@ commitEditingStyle:(UITableViewCellEditingStyle)editingStyle
     VCAppearanceApplyStatusBar();
     VCAppearanceApplyTable(_tableView);
     _autoUpdateSwitch.onTintColor = VCAccentColor();
+    _preserveCustomNamesSwitch.onTintColor = VCAccentColor();
     _stealthSwitch.onTintColor = VCAccentColor();
     [_tableView reloadData];
     VCAppearanceRefreshVisibleTableHeaders(_tableView);
@@ -3201,6 +3217,12 @@ commitEditingStyle:(UITableViewCellEditingStyle)editingStyle
     [_autoUpdateSwitch setOn:_autoUpdate animated:NO];
     [_autoUpdateSwitch addTarget:self action:@selector(autoUpdateSwitchChanged:) forControlEvents:UIControlEventValueChanged];
 
+    _preserveCustomNamesSwitch = [[UISwitch alloc] initWithFrame:CGRectZero];
+    [_preserveCustomNamesSwitch setOn:_preserveCustomNames animated:NO];
+    [_preserveCustomNamesSwitch addTarget:self
+                                   action:@selector(preserveCustomNamesSwitchChanged:)
+                         forControlEvents:UIControlEventValueChanged];
+
     _stealthSwitch = [[UISwitch alloc] initWithFrame:CGRectZero];
     [_stealthSwitch setOn:_stealthMode animated:NO];
     [_stealthSwitch addTarget:self action:@selector(stealthSwitchChanged:) forControlEvents:UIControlEventValueChanged];
@@ -3215,7 +3237,8 @@ commitEditingStyle:(UITableViewCellEditingStyle)editingStyle
 
 - (NSInteger)tableView:(UITableView *)tableView numberOfRowsInSection:(NSInteger)section {
     (void)tableView;
-    if (section == 0 || section == 2) return 2;
+    if (section == 0) return 3;
+    if (section == 2) return 2;
     if (section == 1) return 1;
     return 4;
 }
@@ -3294,6 +3317,9 @@ commitEditingStyle:(UITableViewCellEditingStyle)editingStyle
         return @"Auto-update subscriptions";
     }
     if (indexPath.section == 0 && indexPath.row == 1) {
+        return @"Preserve custom names";
+    }
+    if (indexPath.section == 0 && indexPath.row == 2) {
         return @"Stealth mode";
     }
     if (indexPath.section == 1 && indexPath.row == 0) {
@@ -3325,6 +3351,9 @@ commitEditingStyle:(UITableViewCellEditingStyle)editingStyle
         return @"Refresh subscriptions on app open";
     }
     if (indexPath.section == 0 && indexPath.row == 1) {
+        return @"Keep renamed subscriptions after updates";
+    }
+    if (indexPath.section == 0 && indexPath.row == 2) {
         return @"Hide links in configs and subscriptions";
     }
     if (indexPath.section == 1 && indexPath.row == 0) {
@@ -3368,6 +3397,22 @@ commitEditingStyle:(UITableViewCellEditingStyle)editingStyle
     }
 
     if (indexPath.section == 0 && indexPath.row == 1) {
+        static NSString *kPreserveCustomNamesCellId = @"SettingsPreserveCustomNamesCell";
+        UITableViewCell *cell = [tableView dequeueReusableCellWithIdentifier:kPreserveCustomNamesCellId];
+        if (!cell) {
+            cell = [[[UITableViewCell alloc] initWithStyle:UITableViewCellStyleSubtitle
+                                           reuseIdentifier:kPreserveCustomNamesCellId] autorelease];
+        }
+        cell.selectionStyle = UITableViewCellSelectionStyleNone;
+        [_preserveCustomNamesSwitch setOn:_preserveCustomNames animated:NO];
+        cell.accessoryView = _preserveCustomNamesSwitch;
+        [self applySettingsMarqueesToCell:cell
+                                    title:@"Preserve custom names"
+                                   detail:@"Keep renamed subscriptions after updates"];
+        return cell;
+    }
+
+    if (indexPath.section == 0 && indexPath.row == 2) {
         static NSString *kStealthCellId = @"SettingsStealthCell";
         UITableViewCell *cell = [tableView dequeueReusableCellWithIdentifier:kStealthCellId];
         if (!cell) {
@@ -3553,6 +3598,7 @@ commitEditingStyle:(UITableViewCellEditingStyle)editingStyle
 - (void)dealloc {
     [_tableView release];
     [_autoUpdateSwitch release];
+    [_preserveCustomNamesSwitch release];
     [_stealthSwitch release];
     [super dealloc];
 }
@@ -4280,6 +4326,7 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
 @protocol SubscriptionInfoVCDelegate <NSObject>
 - (void)subscriptionInfoVCRequestedRefresh:(SubscriptionInfoVC *)vc atIndex:(NSInteger)index;
 - (void)subscriptionInfoVCRequestedDelete:(SubscriptionInfoVC *)vc atIndex:(NSInteger)index;
+- (void)subscriptionInfoVC:(SubscriptionInfoVC *)vc requestedRenameTo:(NSString *)name atIndex:(NSInteger)index;
 @end
 
 @interface SubscriptionInfoVC : UIViewController <UITableViewDataSource, UITableViewDelegate, UIAlertViewDelegate> {
@@ -4473,6 +4520,7 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
     [newSections addObject:[self sectionWithTitle:@"Provider" rows:providerRows]];
 
     NSArray *actions = [NSArray arrayWithObjects:
+                        [self rowWithTitle:@"Rename Subscription" detail:nil action:@"rename"],
                         [self rowWithTitle:(_refreshing ? @"Updating..." : @"Update Now") detail:nil action:@"refresh"],
                         [self rowWithTitle:@"Delete Subscription" detail:nil action:@"delete"],
                         nil];
@@ -4610,7 +4658,7 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
     NSDictionary *row = [self rowForIndexPath:indexPath];
     NSString *action = [row objectForKey:@"action"];
     if ([action isEqualToString:@"delete"]) cell.textLabel.textColor = VCErrorColor();
-    else if ([action isEqualToString:@"refresh"]) cell.textLabel.textColor = VCAccentColor();
+    else if ([action length] > 0) cell.textLabel.textColor = VCAccentColor();
 }
 
 - (void)tableView:(UITableView *)tableView willDisplayHeaderView:(UIView *)view forSection:(NSInteger)section {
@@ -4626,7 +4674,23 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
     [tableView deselectRowAtIndexPath:indexPath animated:YES];
     if (_refreshing || !action) return;
 
-    if ([action isEqualToString:@"refresh"]) {
+    if ([action isEqualToString:@"rename"]) {
+        NSString *name = [_subscription objectForKey:@"name"];
+        if (![name isKindOfClass:[NSString class]]) name = @"";
+
+        UIAlertView *alert = [[[UIAlertView alloc] initWithTitle:@"Rename Subscription"
+                                                        message:nil
+                                                       delegate:self
+                                              cancelButtonTitle:@"Cancel"
+                                              otherButtonTitles:@"Save", nil] autorelease];
+        alert.tag = kVCSubscriptionRenameAlertTag;
+        alert.alertViewStyle = UIAlertViewStylePlainTextInput;
+        UITextField *nameField = [alert textFieldAtIndex:0];
+        nameField.text = name;
+        nameField.placeholder = @"Subscription name";
+        nameField.clearButtonMode = UITextFieldViewModeWhileEditing;
+        [alert show];
+    } else if ([action isEqualToString:@"refresh"]) {
         _refreshing = YES;
         [self buildSections];
         [_tableView reloadData];
@@ -4647,9 +4711,27 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
 }
 
 - (void)alertView:(UIAlertView *)alertView clickedButtonAtIndex:(NSInteger)buttonIndex {
-    if (alertView.tag != kVCSubscriptionDeleteAlertTag || buttonIndex == alertView.cancelButtonIndex) return;
-    if ([_delegate respondsToSelector:@selector(subscriptionInfoVCRequestedDelete:atIndex:)]) {
-        [_delegate subscriptionInfoVCRequestedDelete:self atIndex:_subscriptionIndex];
+    if (buttonIndex == alertView.cancelButtonIndex) return;
+
+    if (alertView.tag == kVCSubscriptionRenameAlertTag) {
+        NSString *name = [[alertView textFieldAtIndex:0] text];
+        name = [name stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
+        if ([name length] == 0) {
+            UIAlertView *error = [[[UIAlertView alloc] initWithTitle:@"Invalid Name"
+                                                            message:@"Subscription name cannot be empty."
+                                                           delegate:nil
+                                                  cancelButtonTitle:@"OK"
+                                                  otherButtonTitles:nil] autorelease];
+            [error show];
+            return;
+        }
+        if ([_delegate respondsToSelector:@selector(subscriptionInfoVC:requestedRenameTo:atIndex:)]) {
+            [_delegate subscriptionInfoVC:self requestedRenameTo:name atIndex:_subscriptionIndex];
+        }
+    } else if (alertView.tag == kVCSubscriptionDeleteAlertTag) {
+        if ([_delegate respondsToSelector:@selector(subscriptionInfoVCRequestedDelete:atIndex:)]) {
+            [_delegate subscriptionInfoVCRequestedDelete:self atIndex:_subscriptionIndex];
+        }
     }
 }
 
@@ -4747,6 +4829,7 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
     BOOL _connected;
     BOOL _showingTerminal;
     BOOL _autoUpdateSubscriptions;
+    BOOL _preserveCustomSubscriptionNames;
     BOOL _stealthModeEnabled;
     BOOL _darkThemeEnabled;
     BOOL _statusOK;
@@ -5441,6 +5524,7 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
     [ud setObject:_configs forKey:kDefaultsConfigsKey];
     [ud setObject:_subscriptions forKey:kDefaultsSubsKey];
     [ud setBool:_autoUpdateSubscriptions forKey:kDefaultsAutoUpdateSubsKey];
+    [ud setBool:_preserveCustomSubscriptionNames forKey:kDefaultsPreserveCustomSubscriptionNamesKey];
     [ud setBool:_stealthModeEnabled forKey:kDefaultsStealthModeKey];
     [ud setBool:_darkThemeEnabled forKey:kDefaultsDarkThemeKey];
     [ud synchronize];
@@ -5469,6 +5553,8 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
     } else {
         _autoUpdateSubscriptions = [ud boolForKey:kDefaultsAutoUpdateSubsKey];
     }
+
+    _preserveCustomSubscriptionNames = [ud boolForKey:kDefaultsPreserveCustomSubscriptionNamesKey];
 
     if ([ud objectForKey:kDefaultsStealthModeKey] == nil) {
         _stealthModeEnabled = NO;
@@ -7061,13 +7147,19 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
                        forKey:kSubscriptionLastUpdatedKey];
     [updated setObject:storedMetadata forKey:kSubscriptionMetadataKey];
 
-    NSString *name = [updated objectForKey:@"name"];
-    if ([nameFromMeta length] > 0) {
+    NSString *customName = [sub objectForKey:kSubscriptionCustomNameKey];
+    BOOL hasCustomName = [customName isKindOfClass:[NSString class]] && [customName length] > 0;
+    if (_preserveCustomSubscriptionNames && hasCustomName) {
+        [updated setObject:customName forKey:@"name"];
+    } else if ([nameFromMeta length] > 0) {
+        [updated removeObjectForKey:kSubscriptionCustomNameKey];
         [updated setObject:nameFromMeta forKey:@"name"];
     } else {
+        [updated removeObjectForKey:kSubscriptionCustomNameKey];
+        NSString *name = [updated objectForKey:@"name"];
         BOOL missing = (![name isKindOfClass:[NSString class]] || [name length] == 0);
         BOOL legacyHost = ([name isKindOfClass:[NSString class]] && [name isEqualToString:hostName]);
-        if (missing || legacyHost) {
+        if (hasCustomName || missing || legacyHost) {
             [updated setObject:nameFromURL forKey:@"name"];
         }
     }
@@ -7121,6 +7213,18 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
         if (![oldURL isKindOfClass:[NSString class]]) oldURL = @"";
         if (![curURL isKindOfClass:[NSString class]]) curURL = @"";
         if (![oldURL isEqualToString:curURL]) return NO;
+
+        NSString *oldName = [oldSub objectForKey:@"name"];
+        NSString *curName = [curSub objectForKey:@"name"];
+        if (![oldName isKindOfClass:[NSString class]]) oldName = @"";
+        if (![curName isKindOfClass:[NSString class]]) curName = @"";
+        if (![oldName isEqualToString:curName]) return NO;
+
+        NSString *oldCustomName = [oldSub objectForKey:kSubscriptionCustomNameKey];
+        NSString *curCustomName = [curSub objectForKey:kSubscriptionCustomNameKey];
+        if (![oldCustomName isKindOfClass:[NSString class]]) oldCustomName = @"";
+        if (![curCustomName isKindOfClass:[NSString class]]) curCustomName = @"";
+        if (![oldCustomName isEqualToString:curCustomName]) return NO;
     }
     return YES;
 }
@@ -7328,6 +7432,15 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
     [self saveData];
     [self showStatus:_autoUpdateSubscriptions ? @"Auto-update subscriptions: ON"
                                            : @"Auto-update subscriptions: OFF"
+                 ok:YES];
+}
+
+- (void)settingsVC:(SettingsVC *)vc didChangePreserveCustomSubscriptionNames:(BOOL)enabled {
+    (void)vc;
+    _preserveCustomSubscriptionNames = enabled;
+    [self saveData];
+    [self showStatus:_preserveCustomSubscriptionNames ? @"Preserve custom names: ON"
+                                                      : @"Preserve custom names: OFF"
                  ok:YES];
 }
 
@@ -8818,6 +8931,7 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
     }
     SettingsVC *settings = [[[SettingsVC alloc] init] autorelease];
     settings.autoUpdate = _autoUpdateSubscriptions;
+    settings.preserveCustomNames = _preserveCustomSubscriptionNames;
     settings.stealthMode = _stealthModeEnabled;
     settings.darkTheme = _darkThemeEnabled;
     settings.delegate = self;
@@ -8913,6 +9027,23 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
         });
         [pool drain];
     });
+}
+
+- (void)subscriptionInfoVC:(SubscriptionInfoVC *)vc requestedRenameTo:(NSString *)name atIndex:(NSInteger)index {
+    if (index < 0 || index >= (NSInteger)[_subscriptions count]) return;
+
+    NSString *trimmed = [name stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
+    if ([trimmed length] == 0) return;
+
+    NSMutableDictionary *updated = [NSMutableDictionary dictionaryWithDictionary:[_subscriptions objectAtIndex:index]];
+    [updated setObject:trimmed forKey:@"name"];
+    [updated setObject:trimmed forKey:kSubscriptionCustomNameKey];
+    [_subscriptions replaceObjectAtIndex:index withObject:updated];
+
+    [self saveData];
+    [self reloadMainTableDataAfterExternalChange];
+    [vc reloadWithSubscription:updated];
+    [self showStatus:@"Subscription renamed" ok:YES];
 }
 
 - (BOOL)deleteSubscriptionAtIndex:(NSInteger)subIdx {
