@@ -34,6 +34,10 @@ static NSString *const kDefaultsAutoUpdateSubsKey = @"vlesscore.auto_update_subs
 static NSString *const kDefaultsPreserveCustomSubscriptionNamesKey = @"vlesscore.preserve_custom_subscription_names";
 static NSString *const kDefaultsStealthModeKey = @"vlesscore.stealth_mode";
 static NSString *const kDefaultsDarkThemeKey = @"vlesscore.dark_theme";
+static NSString *const kDefaultsAutomaticUpdateChecksKey = @"vlesscore.update.automatic";
+static NSString *const kDefaultsLastUpdateCheckKey = @"vlesscore.update.last_check";
+static NSString *const kDefaultsLatestVersionKey = @"vlesscore.update.latest_version";
+static NSString *const kDefaultsLatestReleaseURLKey = @"vlesscore.update.latest_release_url";
 static NSString *const kDefaultsRoutingEnabledKey = @"vlesscore.routing.enabled";
 static NSString *const kDefaultsRoutingDefaultKey = @"vlesscore.routing.default";
 static NSString *const kDefaultsRoutingBypassLANKey = @"vlesscore.routing.bypass_lan";
@@ -56,6 +60,9 @@ static NSString *const kSubscriptionUpdateIntervalKey = @"update_interval_hours"
 static NSString *const kSubscriptionRefillDateKey = @"refill_date";
 static NSString *const kSubscriptionLastUpdatedKey = @"last_updated";
 static NSString *const kSubscriptionCustomNameKey = @"custom_name";
+static NSString *const kUpdateAPIURL = @"https://api.github.com/repos/notfence/vless-core-app/releases/latest";
+static NSString *const kUpdateReleasesURL = @"https://github.com/notfence/vless-core-app/releases";
+static const NSTimeInterval kAutomaticUpdateCheckInterval = 24.0 * 60.0 * 60.0;
 static const char *kDaemonPortPath = "/var/run/vpnctld.port";
 static const int kDaemonDefaultPort = 9093;
 static const int kDaemonPortMax = 9113;
@@ -158,6 +165,7 @@ static UIInterfaceOrientation CurrentInterfaceOrientation(void) {
 typedef NS_ENUM(NSInteger, VCAlertTag) {
     VCAlertTagImportManual = 1001,
     VCAlertTagImportInsecureSubscription = 1002,
+    VCAlertTagUpdateAvailable = 1003,
 };
 
 typedef NS_ENUM(NSInteger, VCActionSheetTag) {
@@ -167,6 +175,7 @@ typedef NS_ENUM(NSInteger, VCActionSheetTag) {
 
 static NSInteger const kVCSubscriptionDeleteAlertTag = 3101;
 static NSInteger const kVCSubscriptionRenameAlertTag = 3102;
+static NSInteger const kVCSettingsUpdateAlertTag = 3103;
 
 typedef NS_ENUM(NSInteger, VCIconType) {
     VCIconTypeAdd = 1,
@@ -1111,7 +1120,14 @@ static BOOL SubscriptionDataLooksLikeHTML(NSData *data) {
            [lower rangeOfString:@"<body"].location != NSNotFound;
 }
 
-static NSData *FetchURLViaVlessCoreCurl(NSString *urlString, BOOL allowInsecureFetch, BOOL useHappHeaders, NSString **errOut, NSString **headersOut, int *exitCodeOut) {
+static NSData *FetchURLViaVlessCoreCurl(NSString *urlString,
+                                       BOOL allowInsecureFetch,
+                                       BOOL useHappHeaders,
+                                       BOOL sendSubscriptionHWID,
+                                       NSString *userAgent,
+                                       NSString **errOut,
+                                       NSString **headersOut,
+                                       int *exitCodeOut) {
     const char *curl_path = "/usr/bin/vless-core-curl";
     const char *ca_bundle_path = "/usr/share/vless-core/cacert.pem";
 
@@ -1134,8 +1150,9 @@ static NSData *FetchURLViaVlessCoreCurl(NSString *urlString, BOOL allowInsecureF
         if (errOut) *errOut = @"Invalid subscription URL";
         return nil;
     }
+    const char *user_agent_c = ([userAgent length] > 0) ? [userAgent UTF8String] : NULL;
 
-    NSString *hwid = TrimSimpleString(SubscriptionHWID());
+    NSString *hwid = sendSubscriptionHWID ? TrimSimpleString(SubscriptionHWID()) : nil;
     char hwid_header[256];
     memset(hwid_header, 0, sizeof(hwid_header));
     const char *hwid_c = [hwid UTF8String];
@@ -1219,7 +1236,7 @@ static NSData *FetchURLViaVlessCoreCurl(NSString *urlString, BOOL allowInsecureF
         close(out_fd);
         close(err_fd);
 
-        char *argv[44];
+        char *argv[48];
         int argc = 0;
         argv[argc++] = (char *)"vless-core-curl";
         argv[argc++] = (char *)"--fail";
@@ -1257,13 +1274,16 @@ static NSData *FetchURLViaVlessCoreCurl(NSString *urlString, BOOL allowInsecureF
                 argv[argc++] = (char *)"-H";
                 argv[argc++] = happ_model_header;
             }
+        } else if (user_agent_c && *user_agent_c) {
+            argv[argc++] = (char *)"--user-agent";
+            argv[argc++] = (char *)user_agent_c;
         }
 
         if (allowInsecureFetch) {
             argv[argc++] = (char *)"--insecure";
         }
 
-        if (hwid_header[0] != '\0') {
+        if (sendSubscriptionHWID && hwid_header[0] != '\0') {
             argv[argc++] = (char *)"-H";
             argv[argc++] = hwid_header;
         }
@@ -1348,6 +1368,200 @@ static NSData *FetchURLViaVlessCoreCurl(NSString *urlString, BOOL allowInsecureF
     }
 
     return body;
+}
+
+static NSArray *VCNumericVersionComponents(NSString *version) {
+    NSString *trimmed = TrimSimpleString(version);
+    if ([trimmed length] == 0) return [NSArray array];
+
+    NSMutableArray *components = [NSMutableArray array];
+    NSCharacterSet *digits = [NSCharacterSet decimalDigitCharacterSet];
+    NSUInteger index = 0;
+    while (index < [trimmed length]) {
+        while (index < [trimmed length] && ![digits characterIsMember:[trimmed characterAtIndex:index]]) {
+            index++;
+        }
+        if (index >= [trimmed length]) break;
+
+        NSUInteger start = index;
+        while (index < [trimmed length] && [digits characterIsMember:[trimmed characterAtIndex:index]]) {
+            index++;
+        }
+        [components addObject:[NSNumber numberWithLongLong:[[trimmed substringWithRange:NSMakeRange(start, index - start)] longLongValue]]];
+    }
+    return components;
+}
+
+static NSString *VCNormalizedReleaseVersion(NSString *version) {
+    NSString *trimmed = TrimSimpleString(version);
+    if ([trimmed length] > 1) {
+        unichar first = [trimmed characterAtIndex:0];
+        unichar second = [trimmed characterAtIndex:1];
+        if ((first == 'v' || first == 'V') && second >= '0' && second <= '9') {
+            return [trimmed substringFromIndex:1];
+        }
+    }
+    return trimmed;
+}
+
+static NSComparisonResult VCCompareVersions(NSString *left, NSString *right) {
+    NSArray *leftParts = VCNumericVersionComponents(left);
+    NSArray *rightParts = VCNumericVersionComponents(right);
+    NSUInteger count = MAX([leftParts count], [rightParts count]);
+
+    for (NSUInteger i = 0; i < count; i++) {
+        long long leftValue = (i < [leftParts count]) ? [[leftParts objectAtIndex:i] longLongValue] : 0;
+        long long rightValue = (i < [rightParts count]) ? [[rightParts objectAtIndex:i] longLongValue] : 0;
+        if (leftValue < rightValue) return NSOrderedAscending;
+        if (leftValue > rightValue) return NSOrderedDescending;
+    }
+    return NSOrderedSame;
+}
+
+static NSDictionary *VCPerformUpdateCheck(void) {
+    NSString *userAgent = [NSString stringWithFormat:@"vless-core-app/%@", AppShortVersion()];
+    NSString *fetchError = nil;
+    NSData *data = FetchURLViaVlessCoreCurl(kUpdateAPIURL,
+                                            NO,
+                                            NO,
+                                            NO,
+                                            userAgent,
+                                            &fetchError,
+                                            NULL,
+                                            NULL);
+    if (!data) {
+        NSString *message = ([fetchError length] > 0) ? fetchError : @"Unable to reach GitHub";
+        return [NSDictionary dictionaryWithObjectsAndKeys:
+                @"error", @"status",
+                message, @"error",
+                nil];
+    }
+
+    NSError *jsonError = nil;
+    id json = [NSJSONSerialization JSONObjectWithData:data options:0 error:&jsonError];
+    if (![json isKindOfClass:[NSDictionary class]]) {
+        NSString *message = jsonError ? [jsonError localizedDescription] : @"Invalid update response";
+        return [NSDictionary dictionaryWithObjectsAndKeys:
+                @"error", @"status",
+                message, @"error",
+                nil];
+    }
+
+    NSString *tag = [(NSDictionary *)json objectForKey:@"tag_name"];
+    NSString *releaseURL = [(NSDictionary *)json objectForKey:@"html_url"];
+    if (![tag isKindOfClass:[NSString class]] || [VCNumericVersionComponents(tag) count] == 0) {
+        return [NSDictionary dictionaryWithObjectsAndKeys:
+                @"error", @"status",
+                @"The latest release has no valid version", @"error",
+                nil];
+    }
+    if (![releaseURL isKindOfClass:[NSString class]] || [releaseURL length] == 0) {
+        releaseURL = kUpdateReleasesURL;
+    }
+    tag = VCNormalizedReleaseVersion(tag);
+
+    NSString *currentVersion = AppShortVersion();
+    BOOL updateAvailable = (VCCompareVersions(currentVersion, tag) == NSOrderedAscending);
+    return [NSDictionary dictionaryWithObjectsAndKeys:
+            (updateAvailable ? @"update" : @"current"), @"status",
+            currentVersion, @"current_version",
+            tag, @"latest_version",
+            releaseURL, @"release_url",
+            nil];
+}
+
+static BOOL VCUpdateResultIsSuccessful(NSDictionary *result) {
+    NSString *status = [result objectForKey:@"status"];
+    return [status isEqualToString:@"update"] || [status isEqualToString:@"current"];
+}
+
+static void VCCacheSuccessfulUpdateResult(NSDictionary *result) {
+    if (!VCUpdateResultIsSuccessful(result)) return;
+
+    NSUserDefaults *defaults = [NSUserDefaults standardUserDefaults];
+    [defaults setDouble:[[NSDate date] timeIntervalSince1970] forKey:kDefaultsLastUpdateCheckKey];
+
+    NSString *latestVersion = [result objectForKey:@"latest_version"];
+    NSString *releaseURL = [result objectForKey:@"release_url"];
+    if ([latestVersion isKindOfClass:[NSString class]]) {
+        [defaults setObject:latestVersion forKey:kDefaultsLatestVersionKey];
+    }
+    if ([releaseURL isKindOfClass:[NSString class]]) {
+        [defaults setObject:releaseURL forKey:kDefaultsLatestReleaseURLKey];
+    }
+    [defaults synchronize];
+}
+
+static BOOL VCAutomaticUpdateCheckIsFresh(void) {
+    NSTimeInterval lastCheck = [[NSUserDefaults standardUserDefaults] doubleForKey:kDefaultsLastUpdateCheckKey];
+    NSTimeInterval now = [[NSDate date] timeIntervalSince1970];
+    return lastCheck > 0.0 && now >= lastCheck &&
+           (now - lastCheck) < kAutomaticUpdateCheckInterval;
+}
+
+@class VCUpdateChecker;
+@protocol VCUpdateCheckerDelegate <NSObject>
+- (void)updateChecker:(VCUpdateChecker *)checker didFinishWithResult:(NSDictionary *)result;
+@end
+
+@interface VCUpdateChecker : NSObject {
+    id<VCUpdateCheckerDelegate> _delegate;
+    BOOL _started;
+}
+@property (nonatomic, assign) id<VCUpdateCheckerDelegate> delegate;
+- (id)initWithDelegate:(id<VCUpdateCheckerDelegate>)delegate;
+- (void)start;
+@end
+
+@implementation VCUpdateChecker
+@synthesize delegate = _delegate;
+
+- (id)initWithDelegate:(id<VCUpdateCheckerDelegate>)delegate {
+    self = [super init];
+    if (self) {
+        _delegate = delegate;
+    }
+    return self;
+}
+
+- (void)start {
+    if (_started) return;
+    _started = YES;
+    [NSThread detachNewThreadSelector:@selector(checkWorker) toTarget:self withObject:nil];
+}
+
+- (void)checkWorker {
+    NSAutoreleasePool *pool = [[NSAutoreleasePool alloc] init];
+    NSDictionary *result = [VCPerformUpdateCheck() retain];
+    [self retain];
+    [self performSelectorOnMainThread:@selector(deliverResult:) withObject:result waitUntilDone:YES];
+    [result release];
+    [pool drain];
+}
+
+- (void)deliverResult:(NSDictionary *)result {
+    id<VCUpdateCheckerDelegate> delegate = _delegate;
+    if ([delegate respondsToSelector:@selector(updateChecker:didFinishWithResult:)]) {
+        [delegate updateChecker:self didFinishWithResult:result];
+    }
+    [self release];
+}
+
+@end
+
+static void VCShowUpdateAvailableAlert(NSDictionary *result,
+                                       id<UIAlertViewDelegate> delegate,
+                                       NSInteger tag) {
+    NSString *message = [NSString stringWithFormat:@"Version %@ is available.\n Currently installed: %@.",
+                         [result objectForKey:@"latest_version"],
+                         [result objectForKey:@"current_version"]];
+    UIAlertView *alert = [[[UIAlertView alloc] initWithTitle:@"Update Available"
+                                                     message:message
+                                                    delegate:delegate
+                                           cancelButtonTitle:@"Later"
+                                           otherButtonTitles:@"View Release", nil] autorelease];
+    alert.tag = tag;
+    [alert show];
 }
 
 static NSString *ClearLogsViaDaemon(void) {
@@ -2008,26 +2222,32 @@ static UIView *VCCreateDisclosureAccessoryView(void) {
 @class SettingsVC;
 @protocol SettingsVCDelegate <NSObject>
 - (void)settingsVC:(SettingsVC *)vc didChangeAutoUpdate:(BOOL)enabled;
+- (void)settingsVC:(SettingsVC *)vc didChangeAutomaticUpdateChecks:(BOOL)enabled;
 - (void)settingsVC:(SettingsVC *)vc didChangePreserveCustomSubscriptionNames:(BOOL)enabled;
 - (void)settingsVC:(SettingsVC *)vc didChangeStealthMode:(BOOL)enabled;
 - (void)settingsVC:(SettingsVC *)vc didChangeDarkTheme:(BOOL)enabled;
 @end
 
-@interface SettingsVC : UIViewController <UITableViewDataSource, UITableViewDelegate> {
+@interface SettingsVC : UIViewController <UITableViewDataSource, UITableViewDelegate, UIAlertViewDelegate, VCUpdateCheckerDelegate> {
     UITableView *_tableView;
     UISwitch *_autoUpdateSwitch;
     UISwitch *_preserveCustomNamesSwitch;
     UISwitch *_stealthSwitch;
+    UISwitch *_automaticUpdateChecksSwitch;
+    VCUpdateChecker *_updateChecker;
+    NSString *_availableReleaseURL;
     BOOL _autoUpdate;
     BOOL _preserveCustomNames;
     BOOL _stealthMode;
     BOOL _darkTheme;
+    BOOL _automaticUpdateChecks;
     id<SettingsVCDelegate> _delegate;
 }
 @property (nonatomic, assign) BOOL autoUpdate;
 @property (nonatomic, assign) BOOL preserveCustomNames;
 @property (nonatomic, assign) BOOL stealthMode;
 @property (nonatomic, assign) BOOL darkTheme;
+@property (nonatomic, assign) BOOL automaticUpdateChecks;
 @property (nonatomic, assign) id<SettingsVCDelegate> delegate;
 @end
 
@@ -3157,6 +3377,7 @@ commitEditingStyle:(UITableViewCellEditingStyle)editingStyle
 @synthesize preserveCustomNames = _preserveCustomNames;
 @synthesize stealthMode = _stealthMode;
 @synthesize darkTheme = _darkTheme;
+@synthesize automaticUpdateChecks = _automaticUpdateChecks;
 @synthesize delegate = _delegate;
 
 - (void)closePressed {
@@ -3184,6 +3405,76 @@ commitEditingStyle:(UITableViewCellEditingStyle)editingStyle
     }
 }
 
+- (void)automaticUpdateChecksSwitchChanged:(UISwitch *)sw {
+    _automaticUpdateChecks = [sw isOn];
+    if ([_delegate respondsToSelector:@selector(settingsVC:didChangeAutomaticUpdateChecks:)]) {
+        [_delegate settingsVC:self didChangeAutomaticUpdateChecks:_automaticUpdateChecks];
+    }
+}
+
+- (NSString *)updateCheckDetailText {
+    if (_updateChecker) return @"Checking GitHub Releases...";
+
+    NSString *latest = [[NSUserDefaults standardUserDefaults] objectForKey:kDefaultsLatestVersionKey];
+    if ([latest isKindOfClass:[NSString class]] &&
+        VCCompareVersions(AppShortVersion(), latest) == NSOrderedAscending) {
+        return [NSString stringWithFormat:@"%@ is available", latest];
+    }
+    return [NSString stringWithFormat:@"Installed version %@", AppShortVersion()];
+}
+
+- (void)startManualUpdateCheck {
+    if (_updateChecker) return;
+
+    _updateChecker = [[VCUpdateChecker alloc] initWithDelegate:self];
+    NSIndexPath *indexPath = [NSIndexPath indexPathForRow:1 inSection:3];
+    [_tableView reloadRowsAtIndexPaths:[NSArray arrayWithObject:indexPath]
+                      withRowAnimation:UITableViewRowAnimationNone];
+    [_updateChecker start];
+}
+
+- (void)updateChecker:(VCUpdateChecker *)checker didFinishWithResult:(NSDictionary *)result {
+    if (checker != _updateChecker) return;
+
+    checker.delegate = nil;
+    [_updateChecker release];
+    _updateChecker = nil;
+
+    NSString *status = [result objectForKey:@"status"];
+    if (VCUpdateResultIsSuccessful(result)) {
+        VCCacheSuccessfulUpdateResult(result);
+    }
+
+    NSIndexPath *indexPath = [NSIndexPath indexPathForRow:1 inSection:3];
+    [_tableView reloadRowsAtIndexPaths:[NSArray arrayWithObject:indexPath]
+                      withRowAnimation:UITableViewRowAnimationNone];
+
+    if ([status isEqualToString:@"update"]) {
+        [_availableReleaseURL release];
+        _availableReleaseURL = [[result objectForKey:@"release_url"] copy];
+        VCShowUpdateAvailableAlert(result, self, kVCSettingsUpdateAlertTag);
+    } else if ([status isEqualToString:@"current"]) {
+        NSString *message = [NSString stringWithFormat:@"Version %@ is the latest release.", AppShortVersion()];
+        UIAlertView *alert = [[[UIAlertView alloc] initWithTitle:@"Up to Date"
+                                                         message:message
+                                                        delegate:nil
+                                               cancelButtonTitle:@"OK"
+                                               otherButtonTitles:nil] autorelease];
+        [alert show];
+    } else {
+        NSString *error = [result objectForKey:@"error"];
+        if (![error isKindOfClass:[NSString class]] || [error length] == 0) {
+            error = @"Unable to check for updates.";
+        }
+        UIAlertView *alert = [[[UIAlertView alloc] initWithTitle:@"Update Check Failed"
+                                                         message:error
+                                                        delegate:nil
+                                               cancelButtonTitle:@"OK"
+                                               otherButtonTitles:nil] autorelease];
+        [alert show];
+    }
+}
+
 - (void)applyTheme {
     self.view.backgroundColor = VCBackgroundColor();
     VCAppearanceApplyNavigationBar(self.navigationController.navigationBar);
@@ -3192,6 +3483,7 @@ commitEditingStyle:(UITableViewCellEditingStyle)editingStyle
     _autoUpdateSwitch.onTintColor = VCAccentColor();
     _preserveCustomNamesSwitch.onTintColor = VCAccentColor();
     _stealthSwitch.onTintColor = VCAccentColor();
+    _automaticUpdateChecksSwitch.onTintColor = VCAccentColor();
     [_tableView reloadData];
     VCAppearanceRefreshVisibleTableHeaders(_tableView);
 }
@@ -3227,19 +3519,25 @@ commitEditingStyle:(UITableViewCellEditingStyle)editingStyle
     [_stealthSwitch setOn:_stealthMode animated:NO];
     [_stealthSwitch addTarget:self action:@selector(stealthSwitchChanged:) forControlEvents:UIControlEventValueChanged];
 
+    _automaticUpdateChecksSwitch = [[UISwitch alloc] initWithFrame:CGRectZero];
+    [_automaticUpdateChecksSwitch setOn:_automaticUpdateChecks animated:NO];
+    [_automaticUpdateChecksSwitch addTarget:self
+                                     action:@selector(automaticUpdateChecksSwitchChanged:)
+                           forControlEvents:UIControlEventValueChanged];
+
     [self applyTheme];
 }
 
 - (NSInteger)numberOfSectionsInTableView:(UITableView *)tableView {
     (void)tableView;
-    return 4;
+    return 5;
 }
 
 - (NSInteger)tableView:(UITableView *)tableView numberOfRowsInSection:(NSInteger)section {
     (void)tableView;
     if (section == 0) return 3;
-    if (section == 2) return 2;
     if (section == 1) return 1;
+    if (section == 2 || section == 3) return 2;
     return 4;
 }
 
@@ -3248,6 +3546,7 @@ commitEditingStyle:(UITableViewCellEditingStyle)editingStyle
     if (section == 0) return @"Subscriptions";
     if (section == 1) return @"Network";
     if (section == 2) return @"Appearance";
+    if (section == 3) return @"Updates";
     return @"About";
 }
 
@@ -3332,15 +3631,21 @@ commitEditingStyle:(UITableViewCellEditingStyle)editingStyle
         return @"Dark";
     }
     if (indexPath.section == 3 && indexPath.row == 0) {
-        return @"About vless-core";
+        return @"Automatic checks";
     }
     if (indexPath.section == 3 && indexPath.row == 1) {
+        return @"Check for Updates";
+    }
+    if (indexPath.section == 4 && indexPath.row == 0) {
+        return @"About vless-core";
+    }
+    if (indexPath.section == 4 && indexPath.row == 1) {
         return @"Credits";
     }
-    if (indexPath.section == 3 && indexPath.row == 2) {
+    if (indexPath.section == 4 && indexPath.row == 2) {
         return @"FAQ";
     }
-    if (indexPath.section == 3 && indexPath.row == 3) {
+    if (indexPath.section == 4 && indexPath.row == 3) {
         return @"Project on GitHub";
     }
     return @"";
@@ -3366,15 +3671,21 @@ commitEditingStyle:(UITableViewCellEditingStyle)editingStyle
         return @"Use the dark color scheme";
     }
     if (indexPath.section == 3 && indexPath.row == 0) {
-        return @"Version and core binary info";
+        return @"Check for new releases once a day";
     }
     if (indexPath.section == 3 && indexPath.row == 1) {
+        return [self updateCheckDetailText];
+    }
+    if (indexPath.section == 4 && indexPath.row == 0) {
+        return @"Version and core binary info";
+    }
+    if (indexPath.section == 4 && indexPath.row == 1) {
         return @"Dependencies and special thanks";
     }
-    if (indexPath.section == 3 && indexPath.row == 2) {
+    if (indexPath.section == 4 && indexPath.row == 2) {
         return @"Common questions and quick answers";
     }
-    if (indexPath.section == 3 && indexPath.row == 3) {
+    if (indexPath.section == 4 && indexPath.row == 3) {
         return @"github.com/notfence/vless-core-app";
     }
     return @"";
@@ -3460,6 +3771,48 @@ commitEditingStyle:(UITableViewCellEditingStyle)editingStyle
     }
 
     if (indexPath.section == 3 && indexPath.row == 0) {
+        static NSString *kAutomaticChecksCellId = @"SettingsAutomaticChecksCell";
+        UITableViewCell *cell = [tableView dequeueReusableCellWithIdentifier:kAutomaticChecksCellId];
+        if (!cell) {
+            cell = [[[UITableViewCell alloc] initWithStyle:UITableViewCellStyleSubtitle
+                                           reuseIdentifier:kAutomaticChecksCellId] autorelease];
+        }
+        cell.selectionStyle = UITableViewCellSelectionStyleNone;
+        [_automaticUpdateChecksSwitch setOn:_automaticUpdateChecks animated:NO];
+        cell.accessoryType = UITableViewCellAccessoryNone;
+        cell.accessoryView = _automaticUpdateChecksSwitch;
+        [self applySettingsMarqueesToCell:cell
+                                    title:@"Automatic checks"
+                                   detail:@"Check for new releases once a day"];
+        return cell;
+    }
+
+    if (indexPath.section == 3 && indexPath.row == 1) {
+        static NSString *kUpdateCellId = @"SettingsUpdateCell";
+        UITableViewCell *cell = [tableView dequeueReusableCellWithIdentifier:kUpdateCellId];
+        if (!cell) {
+            cell = [[[UITableViewCell alloc] initWithStyle:UITableViewCellStyleSubtitle reuseIdentifier:kUpdateCellId] autorelease];
+        }
+        cell.selectionStyle = _updateChecker ? UITableViewCellSelectionStyleNone
+                                             : UITableViewCellSelectionStyleBlue;
+        cell.accessoryType = UITableViewCellAccessoryNone;
+        if (_updateChecker) {
+            UIActivityIndicatorViewStyle style = VCAppearanceIsDark()
+                ? UIActivityIndicatorViewStyleWhite
+                : UIActivityIndicatorViewStyleGray;
+            UIActivityIndicatorView *spinner = [[[UIActivityIndicatorView alloc] initWithActivityIndicatorStyle:style] autorelease];
+            [spinner startAnimating];
+            cell.accessoryView = spinner;
+        } else {
+            cell.accessoryView = VCCreateDisclosureAccessoryView();
+        }
+        [self applySettingsMarqueesToCell:cell
+                                    title:@"Check for Updates"
+                                   detail:[self updateCheckDetailText]];
+        return cell;
+    }
+
+    if (indexPath.section == 4 && indexPath.row == 0) {
         static NSString *kAboutCellId = @"SettingsAboutCell";
         UITableViewCell *cell = [tableView dequeueReusableCellWithIdentifier:kAboutCellId];
         if (!cell) {
@@ -3474,7 +3827,7 @@ commitEditingStyle:(UITableViewCellEditingStyle)editingStyle
         return cell;
     }
 
-    if (indexPath.section == 3 && indexPath.row == 1) {
+    if (indexPath.section == 4 && indexPath.row == 1) {
         static NSString *kCreditsCellId = @"SettingsCreditsCell";
         UITableViewCell *cell = [tableView dequeueReusableCellWithIdentifier:kCreditsCellId];
         if (!cell) {
@@ -3489,7 +3842,7 @@ commitEditingStyle:(UITableViewCellEditingStyle)editingStyle
         return cell;
     }
 
-    if (indexPath.section == 3 && indexPath.row == 2) {
+    if (indexPath.section == 4 && indexPath.row == 2) {
         static NSString *kFAQCellId = @"SettingsFAQCell";
         UITableViewCell *cell = [tableView dequeueReusableCellWithIdentifier:kFAQCellId];
         if (!cell) {
@@ -3547,6 +3900,10 @@ commitEditingStyle:(UITableViewCellEditingStyle)editingStyle
             [self applyTheme];
         }
     } else if (indexPath.section == 3) {
+        if (indexPath.row == 1) {
+            [self startManualUpdateCheck];
+        }
+    } else if (indexPath.section == 4) {
         if (indexPath.row == 0) {
             AboutVC *about = [[[AboutVC alloc] init] autorelease];
             [self.navigationController pushViewController:about animated:YES];
@@ -3564,6 +3921,15 @@ commitEditingStyle:(UITableViewCellEditingStyle)editingStyle
         }
     }
     [tableView deselectRowAtIndexPath:indexPath animated:YES];
+}
+
+- (void)alertView:(UIAlertView *)alertView clickedButtonAtIndex:(NSInteger)buttonIndex {
+    if (alertView.tag != kVCSettingsUpdateAlertTag || buttonIndex == alertView.cancelButtonIndex) return;
+
+    NSURL *url = [NSURL URLWithString:_availableReleaseURL ? _availableReleaseURL : kUpdateReleasesURL];
+    if (url) {
+        [[UIApplication sharedApplication] openURL:url];
+    }
 }
 
 - (BOOL)shouldAutorotateToInterfaceOrientation:(UIInterfaceOrientation)interfaceOrientation {
@@ -3596,10 +3962,14 @@ commitEditingStyle:(UITableViewCellEditingStyle)editingStyle
 }
 
 - (void)dealloc {
+    _updateChecker.delegate = nil;
+    [_updateChecker release];
+    [_availableReleaseURL release];
     [_tableView release];
     [_autoUpdateSwitch release];
     [_preserveCustomNamesSwitch release];
     [_stealthSwitch release];
+    [_automaticUpdateChecksSwitch release];
     [super dealloc];
 }
 
@@ -4776,13 +5146,14 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
 
 @end
 
-@interface MainVC : UIViewController <UITableViewDataSource, UITableViewDelegate, UIActionSheetDelegate, UIAlertViewDelegate, UITextViewDelegate, SettingsVCDelegate, QRScanVCDelegate, SubscriptionInfoVCDelegate> {
+@interface MainVC : UIViewController <UITableViewDataSource, UITableViewDelegate, UIActionSheetDelegate, UIAlertViewDelegate, UITextViewDelegate, SettingsVCDelegate, QRScanVCDelegate, SubscriptionInfoVCDelegate, VCUpdateCheckerDelegate> {
     UIButton *_connectBtn;
     UIButton *_plusBtn;
     UIButton *_terminalBtn;
     UIButton *_clearLogsBtn;
     UIButton *_refreshBtn;
     UIButton *_settingsBtn;
+    UIButton *_updateBtn;
     UILabel *_statusLabel;
     UILabel *_uptimeLabel;
     UILabel *_titleLabel;
@@ -4802,6 +5173,9 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
     NSArray *_pendingImportRefreshIndices;
     NSArray *_pendingInsecureImportURLs;
     NSDictionary *_subscriptionToReexpandAfterReorder;
+    VCUpdateChecker *_updateChecker;
+    NSString *_availableReleaseURL;
+    NSString *_availableUpdateVersion;
 
     NSMutableArray *_configs;
     NSMutableArray *_subscriptions;
@@ -4832,11 +5206,13 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
     BOOL _preserveCustomSubscriptionNames;
     BOOL _stealthModeEnabled;
     BOOL _darkThemeEnabled;
+    BOOL _automaticUpdateChecksEnabled;
     BOOL _statusOK;
     BOOL _configurationsSectionExpanded;
     BOOL _subscriptionsSectionExpanded;
     BOOL _mainSectionTransitionInProgress;
     BOOL _didRunLaunchAutoUpdate;
+    BOOL _didScheduleAutomaticUpdateCheck;
     BOOL _launchAutoUpdateInProgress;
     BOOL _queuedMainMarqueeRelayout;
     BOOL _pendingInsecureImportUsesHappHeaders;
@@ -4867,6 +5243,8 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
                                           preservedOffset:(CGFloat)preservedOffset;
 - (void)refreshVisibleSubscriptionHeaderAccessories;
 - (void)importFileAtURL:(NSURL *)url;
+- (void)refreshUpdateIndicatorFromCache;
+- (void)startAutomaticUpdateCheckIfNeeded;
 - (void)updateMainSectionHeaderButton:(UIButton *)button section:(NSInteger)section animated:(BOOL)animated;
 - (void)updateMainSectionHeaderView:(UIView *)header section:(NSInteger)section animated:(BOOL)animated;
 - (void)updateStickyMainSectionHeader;
@@ -5527,6 +5905,7 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
     [ud setBool:_preserveCustomSubscriptionNames forKey:kDefaultsPreserveCustomSubscriptionNamesKey];
     [ud setBool:_stealthModeEnabled forKey:kDefaultsStealthModeKey];
     [ud setBool:_darkThemeEnabled forKey:kDefaultsDarkThemeKey];
+    [ud setBool:_automaticUpdateChecksEnabled forKey:kDefaultsAutomaticUpdateChecksKey];
     [ud synchronize];
     [self updateStickyMainSectionHeader];
 }
@@ -5563,6 +5942,12 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
     }
 
     _darkThemeEnabled = [ud boolForKey:kDefaultsDarkThemeKey];
+
+    if ([ud objectForKey:kDefaultsAutomaticUpdateChecksKey] == nil) {
+        _automaticUpdateChecksEnabled = YES;
+    } else {
+        _automaticUpdateChecksEnabled = [ud boolForKey:kDefaultsAutomaticUpdateChecksKey];
+    }
 
     _selectedConfigIndex = -1;
     _selectedSubIndex = -1;
@@ -5713,7 +6098,12 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
 
 - (void)refreshStatusText {
     NSString *base = _statusBaseText ? _statusBaseText : @"";
-    _statusLabel.text = base;
+    if ([base isEqualToString:@"Ready"] && [_availableUpdateVersion length] > 0) {
+        _statusLabel.text = [NSString stringWithFormat:@"Ready (New version available: %@)",
+                            _availableUpdateVersion];
+    } else {
+        _statusLabel.text = base;
+    }
 }
 
 - (void)refreshUptimeText {
@@ -6633,6 +7023,7 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
         : LoadBundledIconTinted(@"icon-terminal", 20.0f, iconColor);
     UIImage *settings = LoadBundledIconTinted(@"icon-settings", 20.0f, iconColor);
     UIImage *trash = LoadBundledIconTinted(@"icon-trash", 20.0f, iconColor);
+    UIImage *update = LoadBundledIconScaled(VCAppearanceIsDark() ? @"update-dark" : @"update-white", 20.0f);
 
     [_refreshBtn setImage:(refresh ? refresh : MakeIconImage(VCIconTypeRefresh, 20.0f, NO)) forState:UIControlStateNormal];
     [_terminalBtn setImage:(terminal ? terminal : MakeIconImage(_showingTerminal ? VCIconTypeList : VCIconTypeTerminal, 20.0f, _showingTerminal))
@@ -6640,6 +7031,8 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
     [_clearLogsBtn setImage:trash forState:UIControlStateNormal];
     _clearLogsBtn.hidden = !_showingTerminal;
     [_settingsBtn setImage:(settings ? settings : MakeIconImage(VCIconTypeSettings, 20.0f, NO)) forState:UIControlStateNormal];
+    [_updateBtn setImage:update forState:UIControlStateNormal];
+    _updateBtn.hidden = !([_availableUpdateVersion length] > 0);
 }
 
 - (NSArray *)extractConfigURIsFromText:(NSString *)text {
@@ -7057,7 +7450,14 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
     NSString *fetchErr = nil;
     NSString *curlHeaders = nil;
     int curlExitCode = -1;
-    NSData *data = FetchURLViaVlessCoreCurl(fetchURLString, allowInsecureFetch, useHappHeaders, &fetchErr, &curlHeaders, &curlExitCode);
+    NSData *data = FetchURLViaVlessCoreCurl(fetchURLString,
+                                            allowInsecureFetch,
+                                            useHappHeaders,
+                                            YES,
+                                            nil,
+                                            &fetchErr,
+                                            &curlHeaders,
+                                            &curlExitCode);
     if (!data && !allowInsecureFetch && CurlExitCodeCanRetryInsecurely(curlExitCode)) {
         if (insecureRetryAvailableOut) *insecureRetryAvailableOut = YES;
     }
@@ -7432,6 +7832,27 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
     [self saveData];
     [self showStatus:_autoUpdateSubscriptions ? @"Auto-update subscriptions: ON"
                                            : @"Auto-update subscriptions: OFF"
+                 ok:YES];
+}
+
+- (void)settingsVC:(SettingsVC *)vc didChangeAutomaticUpdateChecks:(BOOL)enabled {
+    (void)vc;
+    _automaticUpdateChecksEnabled = enabled;
+    [self saveData];
+
+    [NSObject cancelPreviousPerformRequestsWithTarget:self
+                                             selector:@selector(startAutomaticUpdateCheckIfNeeded)
+                                               object:nil];
+    if (enabled) {
+        [self performSelector:@selector(startAutomaticUpdateCheckIfNeeded) withObject:nil afterDelay:0.5];
+    } else if (_updateChecker) {
+        _updateChecker.delegate = nil;
+        [_updateChecker release];
+        _updateChecker = nil;
+    }
+
+    [self showStatus:enabled ? @"Automatic update checks: ON"
+                             : @"Automatic update checks: OFF"
                  ok:YES];
 }
 
@@ -8934,6 +9355,7 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
     settings.preserveCustomNames = _preserveCustomSubscriptionNames;
     settings.stealthMode = _stealthModeEnabled;
     settings.darkTheme = _darkThemeEnabled;
+    settings.automaticUpdateChecks = _automaticUpdateChecksEnabled;
     settings.delegate = self;
 
     SettingsNavController *nav = [[[SettingsNavController alloc] initWithRootViewController:settings] autorelease];
@@ -9535,6 +9957,62 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
     _mainTableTransitionSnapshotValid = NO;
 }
 
+- (void)refreshUpdateIndicatorFromCache {
+    NSUserDefaults *defaults = [NSUserDefaults standardUserDefaults];
+    NSString *latestVersion = [defaults objectForKey:kDefaultsLatestVersionKey];
+    NSString *releaseURL = [defaults objectForKey:kDefaultsLatestReleaseURLKey];
+    BOOL available = [latestVersion isKindOfClass:[NSString class]] &&
+                     VCCompareVersions(AppShortVersion(), latestVersion) == NSOrderedAscending;
+
+    [_availableUpdateVersion release];
+    _availableUpdateVersion = available ? [latestVersion copy] : nil;
+    [_availableReleaseURL release];
+    _availableReleaseURL = available && [releaseURL isKindOfClass:[NSString class]]
+        ? [releaseURL copy]
+        : nil;
+    [self updateTopButtonsIcons];
+    [self refreshStatusText];
+}
+
+- (void)updateIndicatorPressed {
+    if ([_availableUpdateVersion length] == 0) return;
+
+    NSString *releaseURL = [_availableReleaseURL length] > 0
+        ? _availableReleaseURL
+        : kUpdateReleasesURL;
+    NSDictionary *result = [NSDictionary dictionaryWithObjectsAndKeys:
+                            @"update", @"status",
+                            AppShortVersion(), @"current_version",
+                            _availableUpdateVersion, @"latest_version",
+                            releaseURL, @"release_url",
+                            nil];
+    VCShowUpdateAvailableAlert(result, self, VCAlertTagUpdateAvailable);
+}
+
+- (void)startAutomaticUpdateCheckIfNeeded {
+    if (!_automaticUpdateChecksEnabled || _updateChecker || VCAutomaticUpdateCheckIsFresh()) return;
+
+    if (_launchAutoUpdateInProgress || self.presentedViewController || !self.view.window) {
+        [self performSelector:@selector(startAutomaticUpdateCheckIfNeeded) withObject:nil afterDelay:1.0];
+        return;
+    }
+
+    _updateChecker = [[VCUpdateChecker alloc] initWithDelegate:self];
+    [_updateChecker start];
+}
+
+- (void)updateChecker:(VCUpdateChecker *)checker didFinishWithResult:(NSDictionary *)result {
+    if (checker != _updateChecker) return;
+
+    checker.delegate = nil;
+    [_updateChecker release];
+    _updateChecker = nil;
+
+    if (!VCUpdateResultIsSuccessful(result)) return;
+    VCCacheSuccessfulUpdateResult(result);
+    [self refreshUpdateIndicatorFromCache];
+}
+
 - (void)applyTheme {
     _darkThemeEnabled = VCAppearanceIsDark();
     UIColor *background = VCBackgroundColor();
@@ -9555,6 +10033,7 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
     [self applyTopButtonFeedbackToButton:_clearLogsBtn];
     [self applyTopButtonFeedbackToButton:_refreshBtn];
     [self applyTopButtonFeedbackToButton:_settingsBtn];
+    [self applyTopButtonFeedbackToButton:_updateBtn];
     [self updateTopButtonsIcons];
     [_tableView reloadData];
     VCAppearanceRefreshVisibleTableHeaders(_tableView);
@@ -9590,6 +10069,15 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
     _titleLabel.backgroundColor = [UIColor clearColor];
     _titleLabel.autoresizingMask = UIViewAutoresizingFlexibleWidth;
     [self.view addSubview:_titleLabel];
+
+    CGFloat updateX = CGRectGetMinX(_titleLabel.frame) +
+                      ceilf([_titleLabel.text sizeWithFont:_titleLabel.font].width) + 4.0f;
+    _updateBtn = [[UIButton buttonWithType:UIButtonTypeCustom] retain];
+    _updateBtn.frame = CGRectMake(updateX, 6.0f, iconW, iconW);
+    _updateBtn.hidden = YES;
+    [_updateBtn addTarget:self action:@selector(updateIndicatorPressed) forControlEvents:UIControlEventTouchUpInside];
+    [self applyTopButtonFeedbackToButton:_updateBtn];
+    [self.view addSubview:_updateBtn];
 
     _plusBtn = [[UIButton buttonWithType:UIButtonTypeCustom] retain];
     _plusBtn.frame = CGRectMake(plusX, topY, iconW, iconW);
@@ -9737,6 +10225,7 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
 
     [self updateConnectButton];
     [self applyTheme];
+    [self refreshUpdateIndicatorFromCache];
     [self queryInitialStatus];
 }
 
@@ -9746,7 +10235,12 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
 
 - (void)viewDidAppear:(BOOL)animated {
     [super viewDidAppear:animated];
+    [self refreshUpdateIndicatorFromCache];
     [self startLaunchAutoUpdateIfNeeded];
+    if (!_didScheduleAutomaticUpdateCheck) {
+        _didScheduleAutomaticUpdateCheck = YES;
+        [self performSelector:@selector(startAutomaticUpdateCheckIfNeeded) withObject:nil afterDelay:1.5];
+    }
 }
 
 - (void)viewDidLayoutSubviews {
@@ -9786,6 +10280,13 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
 }
 
 - (void)dealloc {
+    [NSObject cancelPreviousPerformRequestsWithTarget:self
+                                             selector:@selector(startAutomaticUpdateCheckIfNeeded)
+                                               object:nil];
+    _updateChecker.delegate = nil;
+    [_updateChecker release];
+    [_availableReleaseURL release];
+    [_availableUpdateVersion release];
     [_logTimer invalidate];
     [_logTimer release];
     [_uptimeTimer invalidate];
@@ -9798,6 +10299,7 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
     [_clearLogsBtn release];
     [_refreshBtn release];
     [_settingsBtn release];
+    [_updateBtn release];
     [_statusLabel release];
     [_uptimeLabel release];
     [_titleLabel release];
@@ -10885,6 +11387,16 @@ moveRowAtIndexPath:(NSIndexPath *)sourceIndexPath
 }
 
 - (void)alertView:(UIAlertView *)alertView clickedButtonAtIndex:(NSInteger)buttonIndex {
+    if (alertView.tag == VCAlertTagUpdateAvailable) {
+        if (buttonIndex != alertView.cancelButtonIndex) {
+            NSURL *url = [NSURL URLWithString:_availableReleaseURL ? _availableReleaseURL : kUpdateReleasesURL];
+            if (url) {
+                [[UIApplication sharedApplication] openURL:url];
+            }
+        }
+        return;
+    }
+
     if (alertView.tag == VCAlertTagImportManual) {
         if (buttonIndex != 1) return;
         NSString *txt = [[alertView textFieldAtIndex:0] text];

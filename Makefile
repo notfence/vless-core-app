@@ -154,6 +154,8 @@ package-root: check-package-inputs $(APP_BIN) $(DAEMON_BIN) $(BOOTSTRAP_BIN)
 	cp app/icons/icon-ping.png $(PKG_ROOT)/Applications/vless-core.app/icon-ping.png
 	cp app/icons/icon-flashlight.png $(PKG_ROOT)/Applications/vless-core.app/icon-flashlight.png
 	cp app/icons/info.png $(PKG_ROOT)/Applications/vless-core.app/info.png
+	cp app/icons/update-dark.png $(PKG_ROOT)/Applications/vless-core.app/update-dark.png
+	cp app/icons/update-white.png $(PKG_ROOT)/Applications/vless-core.app/update-white.png
 	cp $(APP_BIN) $(PKG_ROOT)/Applications/vless-core.app/vless-core
 	cp $(DAEMON_BIN) $(PKG_ROOT)/usr/bin/vpnctld
 	cp $(BOOTSTRAP_BIN) $(PKG_ROOT)/usr/bin/vpnctld-bootstrap
