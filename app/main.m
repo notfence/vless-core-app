@@ -200,6 +200,8 @@ static NSInteger const kVCMainSectionHeaderCountTagBase = 7430;
 static NSInteger const kVCMainSectionHeaderChevronTagBase = 7440;
 static NSInteger const kVCMainSectionHeaderOrderButtonTagBase = 7450;
 static NSInteger const kVCSubscriptionInfoButtonTagBase = 30000;
+static NSString *const kVCPingLoadingValue = @"__loading__";
+static NSString *const kVCPingFailureValue = @"Failed";
 static CGFloat const kVCMainSectionHeaderHeight = 46.0f;
 static CGFloat const kVCDetailMarqueeGap = 4.0f;
 static NSTimeInterval const kVCMarqueePauseSeconds = 1.0;
@@ -2215,6 +2217,281 @@ static UIView *VCCreateDisclosureAccessoryView(void) {
 - (void)restartMarquee {
     _needsRefresh = YES;
     [self refreshMarqueeIfNeeded:YES];
+}
+
+@end
+
+typedef NS_ENUM(NSInteger, VCMainListCellKind) {
+    VCMainListCellKindSubscriptionHeader = 0,
+    VCMainListCellKindSubscriptionItem = 1,
+    VCMainListCellKindConfigurationItem = 2,
+};
+
+@interface VCMainListCellBackgroundView : UIView {
+    VCMainListCellKind _kind;
+    BOOL _expanded;
+    BOOL _firstItem;
+    BOOL _lastItem;
+    BOOL _active;
+    BOOL _selectedStyle;
+}
+- (void)configureKind:(VCMainListCellKind)kind
+             expanded:(BOOL)expanded
+            firstItem:(BOOL)firstItem
+             lastItem:(BOOL)lastItem
+                active:(BOOL)active
+        selectedStyle:(BOOL)selectedStyle;
+@end
+
+@implementation VCMainListCellBackgroundView
+
+- (id)initWithFrame:(CGRect)frame {
+    self = [super initWithFrame:frame];
+    if (!self) return nil;
+    self.backgroundColor = [UIColor clearColor];
+    self.opaque = YES;
+    self.contentMode = UIViewContentModeRedraw;
+    return self;
+}
+
+- (void)configureKind:(VCMainListCellKind)kind
+             expanded:(BOOL)expanded
+            firstItem:(BOOL)firstItem
+             lastItem:(BOOL)lastItem
+                active:(BOOL)active
+        selectedStyle:(BOOL)selectedStyle {
+    _kind = kind;
+    _expanded = expanded;
+    _firstItem = firstItem;
+    _lastItem = lastItem;
+    _active = active;
+    _selectedStyle = selectedStyle;
+    [self setNeedsDisplay];
+}
+
+- (void)drawRect:(CGRect)rect {
+    (void)rect;
+    CGRect bounds = self.bounds;
+    [VCBackgroundColor() setFill];
+    UIRectFill(bounds);
+
+    if (_kind == VCMainListCellKindSubscriptionHeader) {
+        CGRect card = CGRectInset(bounds, 6.0f, 4.0f);
+        if (CGRectGetWidth(card) < 1.0f || CGRectGetHeight(card) < 1.0f) return;
+
+        UIBezierPath *cardPath = [UIBezierPath bezierPathWithRoundedRect:card cornerRadius:9.0f];
+        UIColor *fill = (_selectedStyle || _active)
+            ? VCSelectedCellColor()
+            : VCCellBackgroundColor();
+        [fill setFill];
+        [cardPath fill];
+
+        UIColor *border = _active
+            ? [VCAccentColor() colorWithAlphaComponent:0.82f]
+            : (_expanded ? [VCAccentColor() colorWithAlphaComponent:0.38f]
+                         : [VCSeparatorColor() colorWithAlphaComponent:0.82f]);
+        [border setStroke];
+        cardPath.lineWidth = _active ? 1.25f : 0.75f;
+        [cardPath stroke];
+
+        CGContextRef context = UIGraphicsGetCurrentContext();
+        CGContextSaveGState(context);
+        [cardPath addClip];
+        [VCAccentColor() setFill];
+        UIRectFill(CGRectMake(CGRectGetMinX(card), CGRectGetMinY(card), 4.0f, CGRectGetHeight(card)));
+        CGContextRestoreGState(context);
+        return;
+    }
+
+    BOOL nestedItem = (_kind == VCMainListCellKindSubscriptionItem);
+    CGFloat panelLeft = nestedItem ? 22.0f : 6.0f;
+    CGFloat topInset = _firstItem ? 4.0f : 0.0f;
+    CGFloat bottomInset = _lastItem ? 8.0f : 0.0f;
+    CGRect panel = CGRectMake(panelLeft,
+                              topInset,
+                              MAX(0.0f, CGRectGetWidth(bounds) - panelLeft - 6.0f),
+                              MAX(0.0f, CGRectGetHeight(bounds) - topInset - bottomInset));
+    if (CGRectGetWidth(panel) < 1.0f || CGRectGetHeight(panel) < 1.0f) return;
+
+    UIRectCorner corners = 0;
+    if (_firstItem) corners |= UIRectCornerTopLeft | UIRectCornerTopRight;
+    if (_lastItem) corners |= UIRectCornerBottomLeft | UIRectCornerBottomRight;
+    UIBezierPath *panelPath = corners
+        ? [UIBezierPath bezierPathWithRoundedRect:panel
+                                byRoundingCorners:corners
+                                      cornerRadii:CGSizeMake(7.0f, 7.0f)]
+        : [UIBezierPath bezierPathWithRect:panel];
+    [((_selectedStyle || _active) ? VCSelectedCellColor() : VCCellBackgroundColor()) setFill];
+    [panelPath fill];
+
+    UIColor *panelBorder = _active
+        ? [VCAccentColor() colorWithAlphaComponent:0.82f]
+        : [VCSeparatorColor() colorWithAlphaComponent:0.72f];
+    [panelBorder setStroke];
+    panelPath.lineWidth = 0.75f;
+    [panelPath stroke];
+
+    if (!_lastItem) {
+        if (_active) {
+            [panelBorder setFill];
+            UIRectFill(CGRectMake(CGRectGetMinX(panel),
+                                  MAX(CGRectGetMinY(panel), CGRectGetMaxY(panel) - 0.75f),
+                                  CGRectGetWidth(panel),
+                                  0.75f));
+        } else {
+            [[VCSeparatorColor() colorWithAlphaComponent:0.52f] setFill];
+            UIRectFill(CGRectMake(CGRectGetMinX(panel) + 14.0f,
+                                  MAX(CGRectGetMinY(panel), CGRectGetMaxY(panel) - 0.5f),
+                                  MAX(0.0f, CGRectGetWidth(panel) - 14.0f),
+                                  0.5f));
+        }
+    }
+
+    if (nestedItem) {
+        CGFloat nodeX = 12.0f;
+        CGFloat nodeY = CGRectGetMidY(panel);
+        CGFloat lineTop = _firstItem ? CGRectGetMinY(panel) : 0.0f;
+        CGFloat lineBottom = _lastItem ? nodeY : CGRectGetHeight(bounds);
+        CGContextRef context = UIGraphicsGetCurrentContext();
+        CGContextSetStrokeColorWithColor(context, [VCAccentColor() colorWithAlphaComponent:0.52f].CGColor);
+        CGContextSetLineWidth(context, 1.5f);
+        CGContextMoveToPoint(context, nodeX, lineTop);
+        CGContextAddLineToPoint(context, nodeX, lineBottom);
+        CGContextStrokePath(context);
+
+        UIBezierPath *node = [UIBezierPath bezierPathWithArcCenter:CGPointMake(nodeX, nodeY)
+                                                            radius:3.5f
+                                                        startAngle:0.0f
+                                                          endAngle:(CGFloat)(M_PI * 2.0f)
+                                                         clockwise:YES];
+        [VCBackgroundColor() setFill];
+        [node fill];
+        [VCAccentColor() setStroke];
+        node.lineWidth = 1.5f;
+        [node stroke];
+    }
+}
+
+@end
+
+@interface VCMainListCell : UITableViewCell {
+    VCMainListCellKind _visualKind;
+    BOOL _visualExpanded;
+    BOOL _visualFirstItem;
+    BOOL _visualLastItem;
+    BOOL _visualActive;
+    VCMainListCellBackgroundView *_normalVisualBackground;
+    VCMainListCellBackgroundView *_selectedVisualBackground;
+}
+- (void)configureVisualKind:(VCMainListCellKind)kind
+                   expanded:(BOOL)expanded
+                  firstItem:(BOOL)firstItem
+                   lastItem:(BOOL)lastItem
+                      active:(BOOL)active;
+- (void)refreshVisualAppearance;
+- (BOOL)usesConfigurationItemLayout;
+@end
+
+@implementation VCMainListCell
+
+- (id)initWithStyle:(UITableViewCellStyle)style reuseIdentifier:(NSString *)reuseIdentifier {
+    self = [super initWithStyle:style reuseIdentifier:reuseIdentifier];
+    if (!self) return nil;
+
+    _normalVisualBackground = [[VCMainListCellBackgroundView alloc] initWithFrame:self.bounds];
+    _selectedVisualBackground = [[VCMainListCellBackgroundView alloc] initWithFrame:self.bounds];
+    self.backgroundView = _normalVisualBackground;
+    self.selectedBackgroundView = _selectedVisualBackground;
+
+    return self;
+}
+
+- (void)dealloc {
+    [_normalVisualBackground release];
+    [_selectedVisualBackground release];
+    [super dealloc];
+}
+
+- (void)configureVisualKind:(VCMainListCellKind)kind
+                   expanded:(BOOL)expanded
+                  firstItem:(BOOL)firstItem
+                   lastItem:(BOOL)lastItem
+                      active:(BOOL)active {
+    _visualKind = kind;
+    _visualExpanded = expanded;
+    _visualFirstItem = firstItem;
+    _visualLastItem = lastItem;
+    _visualActive = active;
+    [self refreshVisualAppearance];
+    [self setNeedsLayout];
+}
+
+- (void)refreshVisualAppearance {
+    self.backgroundColor = [UIColor clearColor];
+    self.contentView.backgroundColor = [UIColor clearColor];
+    self.backgroundView = _normalVisualBackground;
+    self.selectedBackgroundView = _selectedVisualBackground;
+
+    [_normalVisualBackground configureKind:_visualKind
+                                  expanded:_visualExpanded
+                                 firstItem:_visualFirstItem
+                                  lastItem:_visualLastItem
+                                     active:_visualActive
+                             selectedStyle:NO];
+    [_selectedVisualBackground configureKind:_visualKind
+                                    expanded:_visualExpanded
+                                   firstItem:_visualFirstItem
+                                    lastItem:_visualLastItem
+                                       active:_visualActive
+                               selectedStyle:YES];
+
+    self.textLabel.textColor = VCPrimaryTextColor();
+    self.textLabel.highlightedTextColor = VCPrimaryTextColor();
+    self.detailTextLabel.textColor = VCSecondaryTextColor();
+    self.detailTextLabel.highlightedTextColor = VCSecondaryTextColor();
+
+    if (_visualKind == VCMainListCellKindSubscriptionHeader) {
+        self.textLabel.font = [UIFont boldSystemFontOfSize:15.5f];
+    } else {
+        self.textLabel.font = [UIFont boldSystemFontOfSize:18.0f];
+    }
+}
+
+- (BOOL)usesConfigurationItemLayout {
+    return _visualKind == VCMainListCellKindSubscriptionItem ||
+           _visualKind == VCMainListCellKindConfigurationItem;
+}
+
+- (void)layoutSubviews {
+    [super layoutSubviews];
+
+    CGFloat width = CGRectGetWidth(self.contentView.bounds);
+    if (_visualKind == VCMainListCellKindSubscriptionHeader) {
+        CGFloat left = 14.0f;
+        CGFloat rightPadding = 8.0f;
+        self.textLabel.frame = CGRectMake(left, 9.0f, MAX(0.0f, width - left - rightPadding), 21.0f);
+        self.detailTextLabel.frame = CGRectMake(left, 32.0f, MAX(0.0f, width - left - rightPadding), 15.0f);
+    } else if ([self usesConfigurationItemLayout]) {
+        CGFloat left = (_visualKind == VCMainListCellKindSubscriptionItem) ? 22.0f : 7.0f;
+        CGFloat rightPadding = 8.0f;
+        CGFloat topInset = _visualFirstItem ? 4.0f : 0.0f;
+        self.textLabel.frame = CGRectMake(left, topInset + 4.0f,
+                                          MAX(0.0f, width - left - rightPadding), 22.0f);
+        self.detailTextLabel.frame = CGRectMake(left, topInset + 26.0f,
+                                                MAX(0.0f, width - left - rightPadding), 14.0f);
+
+        if (self.accessoryView && !self.accessoryView.hidden) {
+            CGFloat height = CGRectGetHeight(self.bounds);
+            CGFloat bottomInset = _visualLastItem ? 8.0f : 0.0f;
+            CGFloat panelMidY = topInset + (height - topInset - bottomInset) * 0.5f;
+            CGRect accessoryFrame = self.accessoryView.frame;
+            accessoryFrame.origin.y = floorf(panelMidY - CGRectGetHeight(accessoryFrame) * 0.5f);
+            self.accessoryView.frame = accessoryFrame;
+        }
+    }
+
+    _normalVisualBackground.frame = self.bounds;
+    _selectedVisualBackground.frame = self.bounds;
 }
 
 @end
@@ -5179,6 +5456,7 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
 
     NSMutableArray *_configs;
     NSMutableArray *_subscriptions;
+    NSMutableDictionary *_pingDisplayByURI;
 
     NSInteger _selectedConfigIndex;
     NSInteger _selectedSubIndex;
@@ -5226,6 +5504,8 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
 - (void)finishMainSectionTransition:(NSNumber *)transitionNumber;
 - (void)rememberActiveLogPosition;
 - (void)reloadMainTableDataAfterExternalChange;
+- (void)refreshMainListCellAppearance:(UITableViewCell *)cell atIndexPath:(NSIndexPath *)indexPath;
+- (void)refreshVisiblePingAccessoriesForURI:(NSString *)uri;
 - (void)refreshPresentedSubscriptionInfoIfNeeded;
 - (void)refreshLogs;
 - (void)updateLogSelectorAnimated:(BOOL)animated;
@@ -6476,6 +6756,11 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
     if (legacyDetailFrame.size.height > 0.0f) {
         height = MAX(height, legacyDetailFrame.size.height);
     }
+    if ([cell isKindOfClass:[VCMainListCell class]] &&
+        [(VCMainListCell *)cell usesConfigurationItemLayout]) {
+        top += 2.0f;
+        height = 14.0f;
+    }
     if (top + height > contentH) {
         height = contentH - top;
     }
@@ -6878,69 +7163,62 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
 - (void)pingWorker:(NSDictionary *)payload {
     NSAutoreleasePool *pool = [[NSAutoreleasePool alloc] init];
     NSString *uri = [payload objectForKey:@"uri"];
-    NSString *title = [payload objectForKey:@"title"];
-
     NSString *host = nil;
     uint16_t port = 0;
-    NSString *result = nil;
+    int latencyMs = -1;
+    BOOL ok = NO;
     NSString *scheme = [self schemeFromURIString:uri];
     BOOL isSOCKS5Config = [scheme isEqualToString:@"socks5"];
     BOOL parsed = isSOCKS5Config
         ? [self parseSOCKS5Host:&host port:&port fromURI:uri]
         : [self parseVLESSHost:&host port:&port fromURI:uri];
-    if (!parsed) {
-        result = [NSString stringWithFormat:@"Ping failed (%@): invalid URI", title ? title : @"config"];
-    } else {
-        int ms = 0;
+    if (parsed) {
         int rc = -1;
 
         if (isSOCKS5Config) {
-            rc = RealPingViaTempCoreMs([uri UTF8String], 5000, 2, &ms);
-        } else if ([self isXHTTPTransportURI:uri]) {
-            // For xhttp we keep a real tunnel ping (same flow as runtime), but take best-of-2.
-            rc = RealPingViaTempCoreMs([uri UTF8String], 5000, 2, &ms);
-            if (rc != 0) {
-                rc = ConnectLatencyBestOfNMs([host UTF8String], port, 3500, 2, &ms);
-            }
+            rc = RealPingViaTempCoreMs([uri UTF8String], 5000, 2, &latencyMs);
         } else {
-            // For vision/reality and other transports prefer real tunnel delay first.
-            rc = RealPingViaTempCoreMs([uri UTF8String], 5000, 2, &ms);
+            // Prefer real tunnel delay, then fall back to connection latency.
+            rc = RealPingViaTempCoreMs([uri UTF8String], 5000, 2, &latencyMs);
             if (rc != 0) {
-                rc = ConnectLatencyBestOfNMs([host UTF8String], port, 3500, 2, &ms);
+                rc = ConnectLatencyBestOfNMs([host UTF8String], port, 3500, 2, &latencyMs);
             }
         }
-
-        if (rc == 0) {
-            result = [NSString stringWithFormat:@"Ping %@ = %d ms", title ? title : host, ms];
-        } else {
-            result = [NSString stringWithFormat:@"Ping %@ failed", title ? title : host];
-        }
+        ok = (rc == 0 && latencyMs >= 0);
     }
 
-    NSMutableDictionary *out = [NSMutableDictionary dictionaryWithCapacity:2];
-    [out setObject:(result ? result : @"Ping failed") forKey:@"text"];
+    NSMutableDictionary *out = [NSMutableDictionary dictionaryWithCapacity:3];
+    [out setObject:([uri isKindOfClass:[NSString class]] ? uri : @"") forKey:@"uri"];
+    [out setObject:[NSNumber numberWithBool:ok] forKey:@"ok"];
+    if (ok) {
+        [out setObject:[NSNumber numberWithInt:latencyMs] forKey:@"ms"];
+    }
     [self performSelectorOnMainThread:@selector(pingResultOnMain:) withObject:out waitUntilDone:NO];
 
     [pool drain];
 }
 
 - (void)pingResultOnMain:(NSDictionary *)payload {
-    NSString *text = [payload objectForKey:@"text"];
-    [self showStatus:text ok:([text rangeOfString:@"failed"].location == NSNotFound)];
+    NSString *uri = [payload objectForKey:@"uri"];
+    if (![uri isKindOfClass:[NSString class]] || [uri length] == 0) return;
+
+    BOOL ok = [[payload objectForKey:@"ok"] boolValue];
+    NSString *display = ok
+        ? [NSString stringWithFormat:@"%d ms", [[payload objectForKey:@"ms"] intValue]]
+        : kVCPingFailureValue;
+    [_pingDisplayByURI setObject:display forKey:uri];
+    [self refreshVisiblePingAccessoriesForURI:uri];
 }
 
 - (void)pingButtonPressed:(UIButton *)sender {
     NSInteger tag = sender.tag;
     NSString *uri = nil;
-    NSString *title = @"config";
 
     if (tag >= 10000 && tag < 20000) {
         NSInteger idx = tag - 10000;
         if (idx >= 0 && idx < (NSInteger)[_configs count]) {
             NSDictionary *cfg = [_configs objectAtIndex:idx];
             uri = [cfg objectForKey:@"uri"];
-            NSString *name = [cfg objectForKey:@"name"];
-            if ([name isKindOfClass:[NSString class]] && [name length] > 0) title = name;
         }
     } else if (tag >= 20000) {
         NSInteger code = tag - 20000;
@@ -6949,19 +7227,18 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
         NSArray *items = [self subscriptionItemsAtIndex:subIdx];
         if (itemIdx >= 0 && itemIdx < (NSInteger)[items count]) {
             uri = [items objectAtIndex:itemIdx];
-            title = [self displayNameForURI:uri index:itemIdx];
         }
     }
 
     if (![uri isKindOfClass:[NSString class]] || [uri length] == 0) {
-        [self showStatus:@"Ping failed: no URI" ok:NO];
         return;
     }
+    if ([[_pingDisplayByURI objectForKey:uri] isEqualToString:kVCPingLoadingValue]) return;
 
-    [self showStatus:[NSString stringWithFormat:@"Pinging %@...", title] ok:YES];
+    [_pingDisplayByURI setObject:kVCPingLoadingValue forKey:uri];
+    [self refreshVisiblePingAccessoriesForURI:uri];
     NSDictionary *payload = [NSDictionary dictionaryWithObjectsAndKeys:
                              uri, @"uri",
-                             title, @"title",
                              nil];
     [NSThread detachNewThreadSelector:@selector(pingWorker:) toTarget:self withObject:payload];
 }
@@ -7923,23 +8200,48 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
     return v;
 }
 
-- (UIView *)accessoryPingWithTag:(NSInteger)tag selected:(BOOL)selected {
-    UIView *v = [[[UIView alloc] initWithFrame:CGRectMake(0, 0, 48, 24)] autorelease];
+- (UIView *)accessoryPingWithTag:(NSInteger)tag uri:(NSString *)uri {
+    NSString *display = ([uri isKindOfClass:[NSString class]] ? [_pingDisplayByURI objectForKey:uri] : nil);
+    BOOL loading = [display isEqualToString:kVCPingLoadingValue];
+    BOOL hasResult = ([display length] > 0 && !loading);
+    BOOL failed = [display isEqualToString:kVCPingFailureValue];
+    UIView *v = [[[UIView alloc] initWithFrame:CGRectMake(0, 0, 24.0f, 24.0f)] autorelease];
+    v.clipsToBounds = NO;
+
+    if (hasResult) {
+        UILabel *label = [[[UILabel alloc] initWithFrame:CGRectMake(-5.0f, 21.0f, 34.0f, 12.0f)] autorelease];
+        label.backgroundColor = [UIColor clearColor];
+        label.font = [UIFont boldSystemFontOfSize:9.0f];
+        label.textAlignment = NSTextAlignmentCenter;
+        label.adjustsFontSizeToFitWidth = NO;
+        label.textColor = failed ? VCErrorColor() : VCSuccessColor();
+        label.text = display;
+        [v addSubview:label];
+    }
+
+    if (loading) {
+        UIActivityIndicatorView *spinner =
+            [[[UIActivityIndicatorView alloc] initWithActivityIndicatorStyle:(VCAppearanceIsDark()
+                ? UIActivityIndicatorViewStyleWhite
+                : UIActivityIndicatorViewStyleGray)] autorelease];
+        spinner.frame = CGRectMake(2.0f, 2.0f, 20.0f, 20.0f);
+        spinner.hidesWhenStopped = YES;
+        [spinner startAnimating];
+        [v addSubview:spinner];
+        return v;
+    }
 
     UIButton *btn = [UIButton buttonWithType:UIButtonTypeCustom];
-    btn.frame = CGRectMake(0, 0, 24, 24);
+    btn.frame = CGRectMake(0.0f, 0.0f, 24.0f, 24.0f);
     UIImage *pingIcon = LoadBundledIconTinted(@"icon-ping", 20.0f, VCPrimaryTextColor());
     [btn setImage:(pingIcon ? pingIcon : MakeIconImage(VCIconTypeWifi, 18.0f, NO)) forState:UIControlStateNormal];
     btn.tag = tag;
+    btn.accessibilityLabel = hasResult ? [NSString stringWithFormat:@"Ping result %@", display]
+                                       : @"Check ping";
+    btn.accessibilityHint = hasResult ? @"Double tap to check again" : @"Checks this configuration latency";
     [btn addTarget:self action:@selector(pingButtonPressed:) forControlEvents:UIControlEventTouchUpInside];
     [self applyTouchFeedbackToButton:btn];
     [v addSubview:btn];
-
-    if (selected) {
-        UIImageView *chk = [[[UIImageView alloc] initWithFrame:CGRectMake(28, 4, 16, 16)] autorelease];
-        chk.image = MakeIconImage(VCIconTypeCheck, 16.0f, YES);
-        [v addSubview:chk];
-    }
 
     return v;
 }
@@ -10026,6 +10328,8 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
     _logView.indicatorStyle = VCAppearanceIsDark() ? UIScrollViewIndicatorStyleWhite
                                                     : UIScrollViewIndicatorStyleDefault;
     VCAppearanceApplyTable(_tableView);
+    _tableView.separatorStyle = UITableViewCellSeparatorStyleNone;
+    _tableView.separatorColor = [UIColor clearColor];
     VCAppearanceApplyStatusBar();
 
     [self applyTopButtonFeedbackToButton:_plusBtn];
@@ -10044,6 +10348,7 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
     [super viewDidLoad];
 
     [self loadData];
+    _pingDisplayByURI = [[NSMutableDictionary alloc] init];
 
     CGRect b = self.view.bounds;
     BOOL collapsiblePhoneLayout = !IsPadDevice();
@@ -10153,6 +10458,8 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
     _tableView.dataSource = self;
     _tableView.delegate = self;
     _tableView.opaque = YES;
+    _tableView.separatorStyle = UITableViewCellSeparatorStyleNone;
+    _tableView.separatorColor = [UIColor clearColor];
     _tableView.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
     UIView *footer = [[[UIView alloc] initWithFrame:CGRectZero] autorelease];
     footer.backgroundColor = [UIColor clearColor];
@@ -10319,6 +10626,7 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
 
     [_configs release];
     [_subscriptions release];
+    [_pingDisplayByURI release];
 
     [super dealloc];
 }
@@ -10341,6 +10649,31 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
 - (NSString *)tableView:(UITableView *)tableView titleForHeaderInSection:(NSInteger)section {
     (void)tableView;
     return (section == 0) ? @"Configurations" : @"Subscriptions";
+}
+
+- (CGFloat)tableView:(UITableView *)tableView heightForRowAtIndexPath:(NSIndexPath *)indexPath {
+    (void)tableView;
+    if (indexPath.section == 0) {
+        BOOL firstItem = (indexPath.row == 0);
+        BOOL lastItem = (indexPath.row == (NSInteger)[_configs count] - 1);
+        return 44.0f + (firstItem ? 4.0f : 0.0f) + (lastItem ? 8.0f : 0.0f);
+    }
+
+    NSInteger subIdx = -1;
+    NSInteger itemIdx = -1;
+    BOOL isHeader = YES;
+    if (![self mapSubscriptionRow:indexPath.row
+                       toSubIndex:&subIdx
+                        itemIndex:&itemIdx
+                         isHeader:&isHeader]) {
+        return 44.0f;
+    }
+    if (isHeader) return 62.0f;
+
+    NSArray *items = [self subscriptionItemsAtIndex:subIdx];
+    BOOL firstItem = (itemIdx == 0);
+    BOOL lastItem = (itemIdx == (NSInteger)[items count] - 1);
+    return 44.0f + (firstItem ? 4.0f : 0.0f) + (lastItem ? 8.0f : 0.0f);
 }
 
 - (void)setMainReorderingSection:(NSInteger)section showStatus:(BOOL)showStatus {
@@ -10990,11 +11323,97 @@ moveRowAtIndexPath:(NSIndexPath *)sourceIndexPath
     [self performSelector:@selector(runQueuedMainMarqueeRelayout) withObject:nil afterDelay:0.0];
 }
 
+- (void)refreshMainListCellAppearance:(UITableViewCell *)cell atIndexPath:(NSIndexPath *)indexPath {
+    if (!cell || !indexPath) return;
+    if ([cell isKindOfClass:[VCMainListCell class]]) {
+        [(VCMainListCell *)cell refreshVisualAppearance];
+        return;
+    }
+
+    BOOL selectedConfig = (indexPath.section == 0 && _selectedConfigIndex == indexPath.row);
+    cell.backgroundColor = selectedConfig ? VCSelectedCellColor() : VCCellBackgroundColor();
+    cell.contentView.backgroundColor = [UIColor clearColor];
+}
+
+- (void)refreshVisiblePingAccessoriesForURI:(NSString *)uri {
+    if (![uri isKindOfClass:[NSString class]] || [uri length] == 0 || !_tableView) return;
+
+    NSArray *visibleRows = [_tableView indexPathsForVisibleRows];
+    for (NSIndexPath *indexPath in visibleRows) {
+        NSInteger tag = -1;
+        NSString *rowURI = nil;
+
+        if (indexPath.section == 0) {
+            if (indexPath.row >= 0 && indexPath.row < (NSInteger)[_configs count]) {
+                NSDictionary *cfg = [_configs objectAtIndex:indexPath.row];
+                rowURI = [cfg objectForKey:@"uri"];
+                tag = 10000 + indexPath.row;
+            }
+        } else {
+            NSInteger subIdx = -1;
+            NSInteger itemIdx = -1;
+            BOOL isHeader = YES;
+            if ([self mapSubscriptionRow:indexPath.row
+                              toSubIndex:&subIdx
+                               itemIndex:&itemIdx
+                                isHeader:&isHeader] && !isHeader) {
+                NSArray *items = [self subscriptionItemsAtIndex:subIdx];
+                if (itemIdx >= 0 && itemIdx < (NSInteger)[items count]) {
+                    rowURI = [items objectAtIndex:itemIdx];
+                    tag = 20000 + (subIdx * 1000) + itemIdx;
+                }
+            }
+        }
+
+        if (tag < 0 || ![rowURI isEqualToString:uri]) continue;
+        UITableViewCell *cell = [_tableView cellForRowAtIndexPath:indexPath];
+        if (!cell) continue;
+        cell.accessoryView = [self accessoryPingWithTag:tag uri:rowURI];
+        [cell setNeedsLayout];
+        [cell layoutIfNeeded];
+        [self applyMarqueeDetailForMainCell:cell atIndexPath:indexPath];
+    }
+}
+
 - (UITableViewCell *)tableView:(UITableView *)tableView cellForRowAtIndexPath:(NSIndexPath *)indexPath {
-    static NSString *kCellId = @"VCItemCell";
-    UITableViewCell *cell = [tableView dequeueReusableCellWithIdentifier:kCellId];
+    NSInteger mappedSubIdx = -1;
+    NSInteger mappedItemIdx = -1;
+    BOOL mappedIsHeader = YES;
+    VCMainListCellKind visualKind = VCMainListCellKindConfigurationItem;
+    BOOL firstItem = NO;
+    BOOL lastItem = NO;
+    BOOL expanded = NO;
+    BOOL active = NO;
+    NSString *cellID = @"VCItemCell";
+
+    if (indexPath.section == 0) {
+        firstItem = (indexPath.row == 0);
+        lastItem = (indexPath.row == (NSInteger)[_configs count] - 1);
+        active = (_selectedConfigIndex == indexPath.row);
+        cellID = @"VCConfigurationItemCell";
+    } else if (indexPath.section == 1 &&
+        [self mapSubscriptionRow:indexPath.row
+                      toSubIndex:&mappedSubIdx
+                       itemIndex:&mappedItemIdx
+                        isHeader:&mappedIsHeader]) {
+        if (mappedIsHeader) {
+            visualKind = VCMainListCellKindSubscriptionHeader;
+            expanded = (_expandedSubscription == mappedSubIdx);
+            active = (_selectedSubIndex == mappedSubIdx && _selectedSubItemIndex >= 0);
+            cellID = @"VCSubscriptionHeaderCell";
+        } else {
+            visualKind = VCMainListCellKindSubscriptionItem;
+            NSArray *mappedItems = [self subscriptionItemsAtIndex:mappedSubIdx];
+            firstItem = (mappedItemIdx == 0);
+            lastItem = (mappedItemIdx == (NSInteger)[mappedItems count] - 1);
+            active = (_selectedSubIndex == mappedSubIdx && _selectedSubItemIndex == mappedItemIdx);
+            cellID = @"VCSubscriptionItemCell";
+        }
+    }
+
+    UITableViewCell *cell = [tableView dequeueReusableCellWithIdentifier:cellID];
     if (!cell) {
-        cell = [[[UITableViewCell alloc] initWithStyle:UITableViewCellStyleSubtitle reuseIdentifier:kCellId] autorelease];
+        cell = [[[VCMainListCell alloc] initWithStyle:UITableViewCellStyleSubtitle reuseIdentifier:cellID] autorelease];
         cell.accessoryType = UITableViewCellAccessoryNone;
         cell.detailTextLabel.font = [UIFont systemFontOfSize:11.0f];
     }
@@ -11008,6 +11427,15 @@ moveRowAtIndexPath:(NSIndexPath *)sourceIndexPath
     cell.selectionStyle = (_reorderingSection >= 0) ? UITableViewCellSelectionStyleNone
                                                      : UITableViewCellSelectionStyleBlue;
     VCAppearanceApplyCell(cell);
+    if ([cell isKindOfClass:[VCMainListCell class]]) {
+        [(VCMainListCell *)cell configureVisualKind:visualKind
+                                          expanded:expanded
+                                         firstItem:firstItem
+                                          lastItem:lastItem
+                                             active:active];
+    } else {
+        [self refreshMainListCellAppearance:cell atIndexPath:indexPath];
+    }
 
     if (indexPath.section == 0) {
         NSDictionary *cfg = [_configs objectAtIndex:indexPath.row];
@@ -11015,13 +11443,14 @@ moveRowAtIndexPath:(NSIndexPath *)sourceIndexPath
         NSString *shownConfigName = ([name length] > 0) ? name : [NSString stringWithFormat:@"Config %ld", (long)(indexPath.row + 1)];
         cell.textLabel.text = [self maskedLinkText:shownConfigName];
         if (_reorderingSection != 0) {
-            cell.accessoryView = [self accessoryPingWithTag:(10000 + indexPath.row) selected:(_selectedConfigIndex == indexPath.row)];
+            NSString *uri = [cfg objectForKey:@"uri"];
+            cell.accessoryView = [self accessoryPingWithTag:(10000 + indexPath.row) uri:uri];
         }
     } else {
-        NSInteger subIdx = -1;
-        NSInteger itemIdx = -1;
-        BOOL isHeader = YES;
-        if ([self mapSubscriptionRow:indexPath.row toSubIndex:&subIdx itemIndex:&itemIdx isHeader:&isHeader]) {
+        NSInteger subIdx = mappedSubIdx;
+        NSInteger itemIdx = mappedItemIdx;
+        BOOL isHeader = mappedIsHeader;
+        if (subIdx >= 0) {
             NSDictionary *sub = [_subscriptions objectAtIndex:subIdx];
             NSString *name = [sub objectForKey:@"name"];
             NSString *url = [sub objectForKey:@"url"];
@@ -11047,8 +11476,7 @@ moveRowAtIndexPath:(NSIndexPath *)sourceIndexPath
                 NSString *itemName = [self displayNameForURI:uri index:itemIdx];
                 cell.textLabel.text = [self maskedLinkText:itemName];
                 NSInteger tag = 20000 + (subIdx * 1000) + itemIdx;
-                BOOL selected = (_selectedSubIndex == subIdx && _selectedSubItemIndex == itemIdx);
-                cell.accessoryView = [self accessoryPingWithTag:tag selected:selected];
+                cell.accessoryView = [self accessoryPingWithTag:tag uri:uri];
             }
         } else {
             cell.textLabel.text = @"(invalid row)";
@@ -11063,6 +11491,7 @@ moveRowAtIndexPath:(NSIndexPath *)sourceIndexPath
 - (void)tableView:(UITableView *)tableView willDisplayCell:(UITableViewCell *)cell forRowAtIndexPath:(NSIndexPath *)indexPath {
     (void)tableView;
     VCAppearanceApplyCell(cell);
+    [self refreshMainListCellAppearance:cell atIndexPath:indexPath];
     [self applyMarqueeDetailForMainCell:cell atIndexPath:indexPath];
     [self scheduleMainMarqueeRelayout];
 }
