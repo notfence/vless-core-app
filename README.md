@@ -6,7 +6,7 @@
 
 - iOS 6.x through iOS 10.x
 - All compatible 32-bit devices
-- ARMv7 only; 64-bit ARM devices are not supported
+- ARM64 devices running iOS 10 or earlier are supported through 32-bit compatibility
 - Jailbreak required
 
 The app, daemon, bundled core, and helper binaries are all built for ARMv7 with iOS 6.0 as the minimum deployment target.

@@ -35,6 +35,7 @@ static NSString *const kDefaultsPreserveCustomSubscriptionNamesKey = @"vlesscore
 static NSString *const kDefaultsStealthModeKey = @"vlesscore.stealth_mode";
 static NSString *const kDefaultsDarkThemeKey = @"vlesscore.dark_theme";
 static NSString *const kDefaultsAutomaticUpdateChecksKey = @"vlesscore.update.automatic";
+static NSString *const kDefaultsPingTypeKey = @"vlesscore.ping.type";
 static NSString *const kDefaultsLastUpdateCheckKey = @"vlesscore.update.last_check";
 static NSString *const kDefaultsLatestVersionKey = @"vlesscore.update.latest_version";
 static NSString *const kDefaultsLatestReleaseURLKey = @"vlesscore.update.latest_release_url";
@@ -173,9 +174,34 @@ typedef NS_ENUM(NSInteger, VCActionSheetTag) {
     VCActionSheetTagImportFileBrowser = 2002,
 };
 
+typedef NS_ENUM(NSInteger, VCPingType) {
+    VCPingTypeProxyGET = 0,
+    VCPingTypeTCP = 1,
+    VCPingTypeICMP = 2,
+};
+
+static VCPingType VCSelectedPingType(void) {
+    NSInteger value = [[NSUserDefaults standardUserDefaults] integerForKey:kDefaultsPingTypeKey];
+    if (value < VCPingTypeProxyGET || value > VCPingTypeICMP) {
+        return VCPingTypeProxyGET;
+    }
+    return (VCPingType)value;
+}
+
+static NSString *VCPingTypeName(VCPingType type) {
+    if (type == VCPingTypeTCP) return @"TCP";
+    if (type == VCPingTypeICMP) return @"ICMP";
+    return @"Proxy GET";
+}
+
+static NSString *VCSelectedPingTypeText(void) {
+    return [NSString stringWithFormat:@"Selected: %@", VCPingTypeName(VCSelectedPingType())];
+}
+
 static NSInteger const kVCSubscriptionDeleteAlertTag = 3101;
 static NSInteger const kVCSubscriptionRenameAlertTag = 3102;
 static NSInteger const kVCSettingsUpdateAlertTag = 3103;
+static NSInteger const kVCSettingsPingTypeActionSheetTag = 3104;
 
 typedef NS_ENUM(NSInteger, VCIconType) {
     VCIconTypeAdd = 1,
@@ -202,6 +228,13 @@ static NSInteger const kVCMainSectionHeaderOrderButtonTagBase = 7450;
 static NSInteger const kVCSubscriptionInfoButtonTagBase = 30000;
 static NSString *const kVCPingLoadingValue = @"__loading__";
 static NSString *const kVCPingFailureValue = @"Failed";
+static const char *kVCProxyPingHost = "www.gstatic.com";
+static const uint16_t kVCProxyPingPort = 80;
+static const char *kVCProxyPingRequest =
+    "GET /generate_204 HTTP/1.1\r\n"
+    "Host: www.gstatic.com\r\n"
+    "User-Agent: vless-core-app-ping\r\n"
+    "Connection: close\r\n\r\n";
 static CGFloat const kVCMainSectionHeaderHeight = 46.0f;
 static CGFloat const kVCDetailMarqueeGap = 4.0f;
 static NSTimeInterval const kVCMarqueePauseSeconds = 1.0;
@@ -758,6 +791,29 @@ static int socks5_negotiate_noauth(int fd) {
     return 0;
 }
 
+static int socks5_read_connect_response(int fd) {
+    unsigned char resp[4];
+    if (read_full(fd, resp, sizeof(resp)) != 0) return -1;
+    if (resp[0] != 0x05 || resp[1] != 0x00) return -1;
+
+    size_t tail = 0;
+    if (resp[3] == 0x01) {
+        tail = 4 + 2;
+    } else if (resp[3] == 0x04) {
+        tail = 16 + 2;
+    } else if (resp[3] == 0x03) {
+        unsigned char domain_len = 0;
+        if (read_full(fd, &domain_len, 1) != 0) return -1;
+        tail = (size_t)domain_len + 2;
+    } else {
+        return -1;
+    }
+
+    unsigned char bound_address[257];
+    if (tail > sizeof(bound_address)) return -1;
+    return read_full(fd, bound_address, tail);
+}
+
 static int socks5_connect_ipv4(int fd, uint32_t ipv4_be, uint16_t port) {
     if (socks5_negotiate_noauth(fd) != 0) return -1;
 
@@ -774,31 +830,53 @@ static int socks5_connect_ipv4(int fd, uint32_t ipv4_be, uint16_t port) {
 
     if (write_all(fd, req, n) != 0) return -1;
 
-    unsigned char resp[4];
-    if (read_full(fd, resp, sizeof(resp)) != 0) return -1;
-    if (resp[0] != 0x05 || resp[1] != 0x00) return -1;
+    return socks5_read_connect_response(fd);
+}
 
-    size_t tail = 0;
-    if (resp[3] == 0x01) {
-        tail = 4 + 2;
-    } else if (resp[3] == 0x04) {
-        tail = 16 + 2;
-    } else if (resp[3] == 0x03) {
-        unsigned char dsz = 0;
-        if (read_full(fd, &dsz, 1) != 0) return -1;
-        tail = (size_t)dsz + 2;
-    } else {
-        return -1;
+static int socks5_connect_domain(int fd, const char *host, uint16_t port) {
+    if (!host || !*host) return -1;
+    size_t host_len = strlen(host);
+    if (host_len > 255) return -1;
+    if (socks5_negotiate_noauth(fd) != 0) return -1;
+
+    unsigned char req[4 + 1 + 255 + 2];
+    size_t n = 0;
+    req[n++] = 0x05;
+    req[n++] = 0x01;
+    req[n++] = 0x00;
+    req[n++] = 0x03;
+    req[n++] = (unsigned char)host_len;
+    memcpy(&req[n], host, host_len);
+    n += host_len;
+    req[n++] = (unsigned char)((port >> 8) & 0xFF);
+    req[n++] = (unsigned char)(port & 0xFF);
+
+    if (write_all(fd, req, n) != 0) return -1;
+
+    return socks5_read_connect_response(fd);
+}
+
+static int TunnelConnectOnceMs(uint16_t local_port, int timeout_ms, int *latency_ms) {
+    int fd = connect_loopback_port(local_port, timeout_ms);
+    if (fd < 0) return -1;
+
+    struct timeval t0, t1;
+    gettimeofday(&t0, NULL);
+    uint32_t target = inet_addr("1.1.1.1");
+    if (target == INADDR_NONE || socks5_connect_ipv4(fd, target, 80) != 0) {
+        close(fd);
+        return -2;
     }
-    if (tail > 0) {
-        unsigned char tmp[300];
-        if (tail > sizeof(tmp)) return -1;
-        if (read_full(fd, tmp, tail) != 0) return -1;
-    }
+    gettimeofday(&t1, NULL);
+    close(fd);
+
+    long ms = (long)((t1.tv_sec - t0.tv_sec) * 1000L + (t1.tv_usec - t0.tv_usec) / 1000L);
+    if (ms < 0) ms = 0;
+    if (latency_ms) *latency_ms = (int)ms;
     return 0;
 }
 
-static int RealPingConnectOnceMs(uint16_t local_port, int timeout_ms, int *latency_ms) {
+static int ProxyGetConnectOnceMs(uint16_t local_port, int timeout_ms, int *latency_ms) {
     int fd = connect_loopback_port(local_port, timeout_ms);
     if (fd < 0) {
         return -1;
@@ -807,22 +885,40 @@ static int RealPingConnectOnceMs(uint16_t local_port, int timeout_ms, int *laten
     struct timeval t0, t1;
     gettimeofday(&t0, NULL);
 
-    uint32_t target = inet_addr("1.1.1.1");
-    if (target == INADDR_NONE || socks5_connect_ipv4(fd, target, 80) != 0) {
+    if (socks5_connect_domain(fd, kVCProxyPingHost, kVCProxyPingPort) != 0 ||
+        write_all(fd, kVCProxyPingRequest, strlen(kVCProxyPingRequest)) != 0) {
         close(fd);
         return -2;
     }
 
-    gettimeofday(&t1, NULL);
+    char response[512];
+    size_t response_len = 0;
+    BOOL got_first_byte = NO;
+    while (response_len + 1 < sizeof(response)) {
+        ssize_t rd = read(fd, response + response_len, sizeof(response) - response_len - 1);
+        if (rd < 0 && errno == EINTR) continue;
+        if (rd <= 0) break;
+        if (!got_first_byte) {
+            gettimeofday(&t1, NULL);
+            got_first_byte = YES;
+        }
+        response_len += (size_t)rd;
+        response[response_len] = '\0';
+        if (strstr(response, "\r\n") != NULL) break;
+    }
+    close(fd);
+
+    if (!got_first_byte || response_len < 5 || strncmp(response, "HTTP/", 5) != 0) {
+        return -3;
+    }
+
     long ms = (long)((t1.tv_sec - t0.tv_sec) * 1000L + (t1.tv_usec - t0.tv_usec) / 1000L);
     if (ms < 0) ms = 0;
     if (latency_ms) *latency_ms = (int)ms;
-
-    close(fd);
     return 0;
 }
 
-static int RealPingViaTempCoreMs(const char *uri, int timeout_ms, int attempts, int *latency_ms) {
+static int ProxyGetViaTempCoreMs(const char *uri, int timeout_ms, int attempts, int *latency_ms) {
     if (!uri || !*uri) return -1;
     if (attempts <= 0) attempts = 1;
 
@@ -841,7 +937,7 @@ static int RealPingViaTempCoreMs(const char *uri, int timeout_ms, int attempts, 
     int best = -1;
     for (int i = 0; i < attempts; i++) {
         int ms = 0;
-        if (RealPingConnectOnceMs((uint16_t)port, timeout_ms, &ms) == 0) {
+        if (ProxyGetConnectOnceMs((uint16_t)port, timeout_ms, &ms) == 0) {
             if (best < 0 || ms < best) best = ms;
         }
     }
@@ -850,6 +946,143 @@ static int RealPingViaTempCoreMs(const char *uri, int timeout_ms, int attempts, 
     if (best < 0) {
         return -5;
     }
+    if (latency_ms) *latency_ms = best;
+    return 0;
+}
+
+static uint16_t ICMPChecksum(const void *bytes, size_t length) {
+    const unsigned char *cursor = (const unsigned char *)bytes;
+    uint32_t sum = 0;
+    while (length >= 2) {
+        uint16_t word = 0;
+        memcpy(&word, cursor, sizeof(word));
+        sum += word;
+        cursor += 2;
+        length -= 2;
+    }
+    if (length == 1) {
+        uint16_t word = 0;
+        memcpy(&word, cursor, 1);
+        sum += word;
+    }
+    while ((sum >> 16) != 0) {
+        sum = (sum & 0xFFFFU) + (sum >> 16);
+    }
+    return (uint16_t)~sum;
+}
+
+static int ICMPLatencyOnceMs(const struct sockaddr_in *target,
+                             int timeout_ms,
+                             uint16_t sequence,
+                             int *latency_ms) {
+    if (!target) return -1;
+
+    int fd = socket(AF_INET, SOCK_DGRAM, IPPROTO_ICMP);
+    if (fd < 0) {
+        fd = socket(AF_INET, SOCK_RAW, IPPROTO_ICMP);
+    }
+    if (fd < 0) return -2;
+
+    unsigned char packet[24];
+    memset(packet, 0, sizeof(packet));
+    packet[0] = 8;  // ICMP echo request
+    uint16_t identifier = htons((uint16_t)(getpid() & 0xFFFF));
+    uint16_t network_sequence = htons(sequence);
+    memcpy(packet + 4, &identifier, sizeof(identifier));
+    memcpy(packet + 6, &network_sequence, sizeof(network_sequence));
+    for (size_t i = 8; i < sizeof(packet); i++) {
+        packet[i] = (unsigned char)i;
+    }
+    uint16_t checksum = ICMPChecksum(packet, sizeof(packet));
+    memcpy(packet + 2, &checksum, sizeof(checksum));
+
+    struct timeval t0, t1;
+    gettimeofday(&t0, NULL);
+    ssize_t sent = sendto(fd,
+                          packet,
+                          sizeof(packet),
+                          0,
+                          (const struct sockaddr *)target,
+                          (socklen_t)sizeof(*target));
+    if (sent != (ssize_t)sizeof(packet)) {
+        close(fd);
+        return -3;
+    }
+
+    fd_set rfds;
+    FD_ZERO(&rfds);
+    FD_SET(fd, &rfds);
+    struct timeval timeout;
+    timeout.tv_sec = timeout_ms / 1000;
+    timeout.tv_usec = (timeout_ms % 1000) * 1000;
+    int selected = select(fd + 1, &rfds, NULL, NULL, &timeout);
+    if (selected <= 0 || !FD_ISSET(fd, &rfds)) {
+        close(fd);
+        return -4;
+    }
+
+    unsigned char reply[512];
+    struct sockaddr_in source;
+    socklen_t source_len = (socklen_t)sizeof(source);
+    ssize_t received = recvfrom(fd,
+                                reply,
+                                sizeof(reply),
+                                0,
+                                (struct sockaddr *)&source,
+                                &source_len);
+    gettimeofday(&t1, NULL);
+    close(fd);
+    if (received < 8 || source.sin_addr.s_addr != target->sin_addr.s_addr) return -5;
+
+    size_t offset = 0;
+    if ((reply[0] >> 4) == 4) {
+        offset = (size_t)(reply[0] & 0x0F) * 4;
+    }
+    if (offset + 8 > (size_t)received || reply[offset] != 0 || reply[offset + 1] != 0) {
+        return -6;
+    }
+    uint16_t reply_sequence = 0;
+    memcpy(&reply_sequence, reply + offset + 6, sizeof(reply_sequence));
+    if (ntohs(reply_sequence) != sequence) return -7;
+
+    long ms = (long)((t1.tv_sec - t0.tv_sec) * 1000L + (t1.tv_usec - t0.tv_usec) / 1000L);
+    if (ms < 0) ms = 0;
+    if (latency_ms) *latency_ms = (int)ms;
+    return 0;
+}
+
+static int ICMPLatencyBestOfNMs(const char *host,
+                                int timeout_ms,
+                                int attempts,
+                                int *latency_ms) {
+    if (!host || !*host) return -1;
+    if (attempts <= 0) attempts = 1;
+
+    struct addrinfo hints;
+    memset(&hints, 0, sizeof(hints));
+    hints.ai_family = AF_INET;
+    hints.ai_socktype = SOCK_DGRAM;
+
+    struct addrinfo *result = NULL;
+    if (getaddrinfo(host, NULL, &hints, &result) != 0 || !result) return -2;
+
+    struct sockaddr_in target;
+    memset(&target, 0, sizeof(target));
+    memcpy(&target, result->ai_addr, sizeof(target));
+    freeaddrinfo(result);
+
+    struct timeval sequence_time;
+    gettimeofday(&sequence_time, NULL);
+    uint16_t first_sequence = (uint16_t)(sequence_time.tv_usec & 0xFFFF);
+    int best = -1;
+    for (int i = 0; i < attempts; i++) {
+        int ms = 0;
+        uint16_t sequence = (uint16_t)(first_sequence + i);
+        if (ICMPLatencyOnceMs(&target, timeout_ms, sequence, &ms) == 0) {
+            if (best < 0 || ms < best) best = ms;
+        }
+    }
+    if (best < 0) return -3;
     if (latency_ms) *latency_ms = best;
     return 0;
 }
@@ -2505,7 +2738,7 @@ typedef NS_ENUM(NSInteger, VCMainListCellKind) {
 - (void)settingsVC:(SettingsVC *)vc didChangeDarkTheme:(BOOL)enabled;
 @end
 
-@interface SettingsVC : UIViewController <UITableViewDataSource, UITableViewDelegate, UIAlertViewDelegate, VCUpdateCheckerDelegate> {
+@interface SettingsVC : UIViewController <UITableViewDataSource, UITableViewDelegate, UIActionSheetDelegate, UIAlertViewDelegate, VCUpdateCheckerDelegate> {
     UITableView *_tableView;
     UISwitch *_autoUpdateSwitch;
     UISwitch *_preserveCustomNamesSwitch;
@@ -2616,7 +2849,7 @@ typedef NS_ENUM(NSInteger, VCMainListCellKind) {
 
     NSArray *compatibility = [NSArray arrayWithObject:
         [self question:@"Which devices are supported?"
-                 answer:@"A jailbreak is required. The package targets 32-bit armv7 devices and requires iOS 6 - iOS 10. It is tested on iOS 6.1.3 and iOS 10.3.3; other device and iOS combinations are not guaranteed. 64-bit devices are not supported."]];
+                 answer:@"A jailbreak is required. The package requires iOS 6 - iOS 10 and contains ARMv7 binaries. It supports compatible 32-bit devices as well as 64-bit devices (ARM64) running iOS 10 or earlier through 32-bit compatibility. It is tested on iOS 6.1.3 and iOS 10.3.3; other device and iOS combinations are not guaranteed."]];
 
     NSArray *newSections = [[NSArray alloc] initWithObjects:
         [self sectionWithTitle:@"Getting started" questions:gettingStarted],
@@ -3813,8 +4046,7 @@ commitEditingStyle:(UITableViewCellEditingStyle)editingStyle
 - (NSInteger)tableView:(UITableView *)tableView numberOfRowsInSection:(NSInteger)section {
     (void)tableView;
     if (section == 0) return 3;
-    if (section == 1) return 1;
-    if (section == 2 || section == 3) return 2;
+    if (section == 1 || section == 2 || section == 3) return 2;
     return 4;
 }
 
@@ -3901,6 +4133,9 @@ commitEditingStyle:(UITableViewCellEditingStyle)editingStyle
     if (indexPath.section == 1 && indexPath.row == 0) {
         return @"Routing";
     }
+    if (indexPath.section == 1 && indexPath.row == 1) {
+        return @"Ping type";
+    }
     if (indexPath.section == 2 && indexPath.row == 0) {
         return @"Light";
     }
@@ -3940,6 +4175,9 @@ commitEditingStyle:(UITableViewCellEditingStyle)editingStyle
     }
     if (indexPath.section == 1 && indexPath.row == 0) {
         return @"Proxy, Direct and Block rules";
+    }
+    if (indexPath.section == 1 && indexPath.row == 1) {
+        return VCSelectedPingTypeText();
     }
     if (indexPath.section == 2 && indexPath.row == 0) {
         return @"Use the light color scheme";
@@ -4016,17 +4254,20 @@ commitEditingStyle:(UITableViewCellEditingStyle)editingStyle
     }
 
     if (indexPath.section == 1) {
-        static NSString *kRoutingCellId = @"SettingsRoutingCell";
-        UITableViewCell *cell = [tableView dequeueReusableCellWithIdentifier:kRoutingCellId];
+        static NSString *kNetworkCellId = @"SettingsNetworkCell";
+        UITableViewCell *cell = [tableView dequeueReusableCellWithIdentifier:kNetworkCellId];
         if (!cell) {
-            cell = [[[UITableViewCell alloc] initWithStyle:UITableViewCellStyleSubtitle reuseIdentifier:kRoutingCellId] autorelease];
+            cell = [[[UITableViewCell alloc] initWithStyle:UITableViewCellStyleSubtitle
+                                           reuseIdentifier:kNetworkCellId] autorelease];
         }
         cell.selectionStyle = UITableViewCellSelectionStyleBlue;
         cell.accessoryType = UITableViewCellAccessoryNone;
         cell.accessoryView = VCCreateDisclosureAccessoryView();
         [self applySettingsMarqueesToCell:cell
-                                    title:@"Routing"
-                                   detail:@"Proxy, Direct and Block rules"];
+                                    title:(indexPath.row == 0 ? @"Routing" : @"Ping type")
+                                   detail:(indexPath.row == 0
+                                       ? @"Proxy, Direct and Block rules"
+                                       : VCSelectedPingTypeText())];
         return cell;
     }
 
@@ -4163,9 +4404,17 @@ commitEditingStyle:(UITableViewCellEditingStyle)editingStyle
 }
 
 - (void)tableView:(UITableView *)tableView didSelectRowAtIndexPath:(NSIndexPath *)indexPath {
-    if (indexPath.section == 1) {
+    if (indexPath.section == 1 && indexPath.row == 0) {
         RoutingVC *routing = [[[RoutingVC alloc] init] autorelease];
         [self.navigationController pushViewController:routing animated:YES];
+    } else if (indexPath.section == 1 && indexPath.row == 1) {
+        UIActionSheet *sheet = [[[UIActionSheet alloc] initWithTitle:@"Ping type"
+                                                             delegate:self
+                                                    cancelButtonTitle:@"Cancel"
+                                               destructiveButtonTitle:nil
+                                                    otherButtonTitles:@"Proxy GET", @"TCP", @"ICMP", nil] autorelease];
+        sheet.tag = kVCSettingsPingTypeActionSheetTag;
+        [sheet showInView:self.view];
     } else if (indexPath.section == 2) {
         BOOL dark = (indexPath.row == 1);
         if (_darkTheme != dark) {
@@ -4198,6 +4447,23 @@ commitEditingStyle:(UITableViewCellEditingStyle)editingStyle
         }
     }
     [tableView deselectRowAtIndexPath:indexPath animated:YES];
+}
+
+- (void)actionSheet:(UIActionSheet *)actionSheet clickedButtonAtIndex:(NSInteger)buttonIndex {
+    if (actionSheet.tag != kVCSettingsPingTypeActionSheetTag ||
+        buttonIndex < VCPingTypeProxyGET ||
+        buttonIndex > VCPingTypeICMP ||
+        buttonIndex == actionSheet.cancelButtonIndex) {
+        return;
+    }
+
+    VCPingType pingType = (VCPingType)buttonIndex;
+    NSUserDefaults *defaults = [NSUserDefaults standardUserDefaults];
+    [defaults setInteger:pingType forKey:kDefaultsPingTypeKey];
+    [defaults synchronize];
+    [_tableView reloadRowsAtIndexPaths:
+        [NSArray arrayWithObject:[NSIndexPath indexPathForRow:1 inSection:1]]
+                          withRowAnimation:UITableViewRowAnimationNone];
 }
 
 - (void)alertView:(UIAlertView *)alertView clickedButtonAtIndex:(NSInteger)buttonIndex {
@@ -7074,7 +7340,7 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
         NSInteger socksPort = [self currentDaemonSocksPort];
         if (socksPort > 0 && socksPort <= 65535) {
             int ms = 0;
-            if (RealPingConnectOnceMs((uint16_t)socksPort, 3500, &ms) == 0) {
+            if (TunnelConnectOnceMs((uint16_t)socksPort, 3500, &ms) == 0) {
                 ok = YES;
                 break;
             }
@@ -7163,6 +7429,7 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
 - (void)pingWorker:(NSDictionary *)payload {
     NSAutoreleasePool *pool = [[NSAutoreleasePool alloc] init];
     NSString *uri = [payload objectForKey:@"uri"];
+    VCPingType pingType = (VCPingType)[[payload objectForKey:@"type"] integerValue];
     NSString *host = nil;
     uint16_t port = 0;
     int latencyMs = -1;
@@ -7175,14 +7442,12 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
     if (parsed) {
         int rc = -1;
 
-        if (isSOCKS5Config) {
-            rc = RealPingViaTempCoreMs([uri UTF8String], 5000, 2, &latencyMs);
-        } else {
-            // Prefer real tunnel delay, then fall back to connection latency.
-            rc = RealPingViaTempCoreMs([uri UTF8String], 5000, 2, &latencyMs);
-            if (rc != 0) {
-                rc = ConnectLatencyBestOfNMs([host UTF8String], port, 3500, 2, &latencyMs);
-            }
+        if (pingType == VCPingTypeProxyGET) {
+            rc = ProxyGetViaTempCoreMs([uri UTF8String], 5000, 2, &latencyMs);
+        } else if (pingType == VCPingTypeTCP) {
+            rc = ConnectLatencyBestOfNMs([host UTF8String], port, 3500, 2, &latencyMs);
+        } else if (pingType == VCPingTypeICMP) {
+            rc = ICMPLatencyBestOfNMs([host UTF8String], 3500, 2, &latencyMs);
         }
         ok = (rc == 0 && latencyMs >= 0);
     }
@@ -7210,6 +7475,19 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
     [self refreshVisiblePingAccessoriesForURI:uri];
 }
 
+- (void)startPingForURI:(NSString *)uri type:(VCPingType)pingType {
+    if (![uri isKindOfClass:[NSString class]] || [uri length] == 0) return;
+    if ([[_pingDisplayByURI objectForKey:uri] isEqualToString:kVCPingLoadingValue]) return;
+
+    [_pingDisplayByURI setObject:kVCPingLoadingValue forKey:uri];
+    [self refreshVisiblePingAccessoriesForURI:uri];
+    NSDictionary *payload = [NSDictionary dictionaryWithObjectsAndKeys:
+                             uri, @"uri",
+                             [NSNumber numberWithInteger:pingType], @"type",
+                             nil];
+    [NSThread detachNewThreadSelector:@selector(pingWorker:) toTarget:self withObject:payload];
+}
+
 - (void)pingButtonPressed:(UIButton *)sender {
     NSInteger tag = sender.tag;
     NSString *uri = nil;
@@ -7235,12 +7513,7 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
     }
     if ([[_pingDisplayByURI objectForKey:uri] isEqualToString:kVCPingLoadingValue]) return;
 
-    [_pingDisplayByURI setObject:kVCPingLoadingValue forKey:uri];
-    [self refreshVisiblePingAccessoriesForURI:uri];
-    NSDictionary *payload = [NSDictionary dictionaryWithObjectsAndKeys:
-                             uri, @"uri",
-                             nil];
-    [NSThread detachNewThreadSelector:@selector(pingWorker:) toTarget:self withObject:payload];
+    [self startPingForURI:uri type:VCSelectedPingType()];
 }
 
 - (void)updateConnectButton {
@@ -8238,7 +8511,10 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
     btn.tag = tag;
     btn.accessibilityLabel = hasResult ? [NSString stringWithFormat:@"Ping result %@", display]
                                        : @"Check ping";
-    btn.accessibilityHint = hasResult ? @"Double tap to check again" : @"Checks this configuration latency";
+    NSString *pingTypeName = VCPingTypeName(VCSelectedPingType());
+    btn.accessibilityHint = hasResult
+        ? [NSString stringWithFormat:@"Double tap to run %@ again", pingTypeName]
+        : [NSString stringWithFormat:@"Runs %@ latency test", pingTypeName];
     [btn addTarget:self action:@selector(pingButtonPressed:) forControlEvents:UIControlEventTouchUpInside];
     [self applyTouchFeedbackToButton:btn];
     [v addSubview:btn];
