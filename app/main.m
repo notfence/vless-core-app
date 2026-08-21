@@ -214,6 +214,7 @@ typedef NS_ENUM(NSInteger, VCIconType) {
     VCIconTypeCheck = 8,
     VCIconTypeList = 9,
     VCIconTypeReorder = 10,
+    VCIconTypeStop = 11,
 };
 
 static NSInteger const kVCSettingsTitleMarqueeTag = 7400;
@@ -226,6 +227,7 @@ static NSInteger const kVCMainSectionHeaderCountTagBase = 7430;
 static NSInteger const kVCMainSectionHeaderChevronTagBase = 7440;
 static NSInteger const kVCMainSectionHeaderOrderButtonTagBase = 7450;
 static NSInteger const kVCSubscriptionInfoButtonTagBase = 30000;
+static NSInteger const kVCSubscriptionPingButtonTagBase = 40000;
 static NSString *const kVCPingLoadingValue = @"__loading__";
 static NSString *const kVCPingFailureValue = @"Failed";
 static const char *kVCProxyPingHost = "www.gstatic.com";
@@ -2235,6 +2237,12 @@ static UIImage *MakeIconImage(VCIconType type, CGFloat size, BOOL active) {
             CGContextAddLineToPoint(ctx, size * 0.82f, ys[i]);
         }
         CGContextStrokePath(ctx);
+    } else if (type == VCIconTypeStop) {
+        CGContextSetFillColorWithColor(ctx, VCPrimaryTextColor().CGColor);
+        CGContextFillRect(ctx, CGRectMake(size * 0.28f,
+                                          size * 0.28f,
+                                          size * 0.44f,
+                                          size * 0.44f));
     }
 
     UIImage *img = UIGraphicsGetImageFromCurrentImageContext();
@@ -5723,6 +5731,12 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
     NSMutableArray *_configs;
     NSMutableArray *_subscriptions;
     NSMutableDictionary *_pingDisplayByURI;
+    NSMutableSet *_standalonePingURIs;
+    NSMutableDictionary *_subscriptionPingPendingByIdentifier;
+    NSMutableDictionary *_subscriptionPingOperationsByIdentifier;
+    NSMutableDictionary *_subscriptionPingPreviousDisplayByIdentifier;
+    NSMutableDictionary *_subscriptionPingTokenByIdentifier;
+    NSOperationQueue *_pingQueue;
 
     NSInteger _selectedConfigIndex;
     NSInteger _selectedSubIndex;
@@ -5733,6 +5747,7 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
     NSInteger _reorderingSection;
     NSInteger _activeLogIndex;
     NSUInteger _mainSectionTransitionToken;
+    NSUInteger _nextSubscriptionPingToken;
     NSString *_logTexts[2];
     CGPoint _logContentOffsets[2];
     CGFloat _mainTableDragStartOffsetY;
@@ -5772,6 +5787,8 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
 - (void)reloadMainTableDataAfterExternalChange;
 - (void)refreshMainListCellAppearance:(UITableViewCell *)cell atIndexPath:(NSIndexPath *)indexPath;
 - (void)refreshVisiblePingAccessoriesForURI:(NSString *)uri;
+- (void)refreshVisibleSubscriptionPingAccessories;
+- (void)refreshVisibleSubscriptionHeaderAccessories;
 - (void)refreshPresentedSubscriptionInfoIfNeeded;
 - (void)refreshLogs;
 - (void)updateLogSelectorAnimated:(BOOL)animated;
@@ -5787,7 +5804,6 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
 - (void)completeMainTableStructuralTransition;
 - (void)restoreMainTableAfterStructuralTransitionCompact:(BOOL)compact
                                           preservedOffset:(CGFloat)preservedOffset;
-- (void)refreshVisibleSubscriptionHeaderAccessories;
 - (void)importFileAtURL:(NSURL *)url;
 - (void)refreshUpdateIndicatorFromCache;
 - (void)startAutomaticUpdateCheckIfNeeded;
@@ -6516,6 +6532,23 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
     NSArray *items = [sub objectForKey:@"items"];
     if (![items isKindOfClass:[NSArray class]]) return [NSArray array];
     return items;
+}
+
+- (NSString *)subscriptionPingIdentifierAtIndex:(NSInteger)subIdx {
+    if (subIdx < 0 || subIdx >= (NSInteger)[_subscriptions count]) return nil;
+    NSDictionary *sub = [_subscriptions objectAtIndex:subIdx];
+    NSString *url = [sub objectForKey:@"url"];
+    if ([url isKindOfClass:[NSString class]] && [url length] > 0) {
+        return [@"url:" stringByAppendingString:url];
+    }
+    return [NSString stringWithFormat:@"object:%p", (void *)sub];
+}
+
+- (BOOL)isSubscriptionPingInProgressAtIndex:(NSInteger)subIdx {
+    NSString *identifier = [self subscriptionPingIdentifierAtIndex:subIdx];
+    if (!identifier) return NO;
+    NSSet *pending = [_subscriptionPingPendingByIdentifier objectForKey:identifier];
+    return [pending count] > 0;
 }
 
 - (NSInteger)subscriptionSectionRowCount {
@@ -7452,9 +7485,15 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
         ok = (rc == 0 && latencyMs >= 0);
     }
 
-    NSMutableDictionary *out = [NSMutableDictionary dictionaryWithCapacity:3];
+    NSMutableDictionary *out = [NSMutableDictionary dictionaryWithCapacity:5];
     [out setObject:([uri isKindOfClass:[NSString class]] ? uri : @"") forKey:@"uri"];
     [out setObject:[NSNumber numberWithBool:ok] forKey:@"ok"];
+    NSString *batchIdentifier = [payload objectForKey:@"batch_identifier"];
+    NSNumber *batchToken = [payload objectForKey:@"batch_token"];
+    if (batchIdentifier && batchToken) {
+        [out setObject:batchIdentifier forKey:@"batch_identifier"];
+        [out setObject:batchToken forKey:@"batch_token"];
+    }
     if (ok) {
         [out setObject:[NSNumber numberWithInt:latencyMs] forKey:@"ms"];
     }
@@ -7467,25 +7506,79 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
     NSString *uri = [payload objectForKey:@"uri"];
     if (![uri isKindOfClass:[NSString class]] || [uri length] == 0) return;
 
+    NSString *batchIdentifier = [payload objectForKey:@"batch_identifier"];
+    NSNumber *batchToken = [payload objectForKey:@"batch_token"];
+    if (batchIdentifier && batchToken) {
+        NSNumber *currentToken = [_subscriptionPingTokenByIdentifier objectForKey:batchIdentifier];
+        if (![currentToken isEqualToNumber:batchToken]) {
+            return;
+        }
+    }
+    if (!batchIdentifier) {
+        [_standalonePingURIs removeObject:uri];
+    }
+
     BOOL ok = [[payload objectForKey:@"ok"] boolValue];
     NSString *display = ok
         ? [NSString stringWithFormat:@"%d ms", [[payload objectForKey:@"ms"] intValue]]
         : kVCPingFailureValue;
     [_pingDisplayByURI setObject:display forKey:uri];
+
+    BOOL completedSubscriptionPing = NO;
+    if (batchIdentifier) {
+        NSMutableSet *pending = [_subscriptionPingPendingByIdentifier objectForKey:batchIdentifier];
+        [pending removeObject:uri];
+        if ([pending count] == 0) {
+            [_subscriptionPingPendingByIdentifier removeObjectForKey:batchIdentifier];
+            [_subscriptionPingOperationsByIdentifier removeObjectForKey:batchIdentifier];
+            [_subscriptionPingPreviousDisplayByIdentifier removeObjectForKey:batchIdentifier];
+            [_subscriptionPingTokenByIdentifier removeObjectForKey:batchIdentifier];
+            completedSubscriptionPing = YES;
+        }
+    }
+
     [self refreshVisiblePingAccessoriesForURI:uri];
+    if (completedSubscriptionPing) {
+        [self refreshVisibleSubscriptionPingAccessories];
+        [self refreshVisibleSubscriptionHeaderAccessories];
+    }
+}
+
+- (NSOperation *)enqueuePingForURI:(NSString *)uri
+                              type:(VCPingType)pingType
+                          priority:(NSOperationQueuePriority)priority
+                   batchIdentifier:(NSString *)batchIdentifier
+                        batchToken:(NSNumber *)batchToken {
+    NSMutableDictionary *payload = [NSMutableDictionary dictionaryWithObjectsAndKeys:
+                                    uri, @"uri",
+                                    [NSNumber numberWithInteger:pingType], @"type",
+                                    nil];
+    if (batchIdentifier && batchToken) {
+        [payload setObject:batchIdentifier forKey:@"batch_identifier"];
+        [payload setObject:batchToken forKey:@"batch_token"];
+    }
+    NSInvocationOperation *operation = [[[NSInvocationOperation alloc]
+        initWithTarget:self
+              selector:@selector(pingWorker:)
+                object:payload] autorelease];
+    operation.queuePriority = priority;
+    [_pingQueue addOperation:operation];
+    return operation;
 }
 
 - (void)startPingForURI:(NSString *)uri type:(VCPingType)pingType {
     if (![uri isKindOfClass:[NSString class]] || [uri length] == 0) return;
+    if ([_standalonePingURIs containsObject:uri]) return;
     if ([[_pingDisplayByURI objectForKey:uri] isEqualToString:kVCPingLoadingValue]) return;
 
+    [_standalonePingURIs addObject:uri];
     [_pingDisplayByURI setObject:kVCPingLoadingValue forKey:uri];
     [self refreshVisiblePingAccessoriesForURI:uri];
-    NSDictionary *payload = [NSDictionary dictionaryWithObjectsAndKeys:
-                             uri, @"uri",
-                             [NSNumber numberWithInteger:pingType], @"type",
-                             nil];
-    [NSThread detachNewThreadSelector:@selector(pingWorker:) toTarget:self withObject:payload];
+    [self enqueuePingForURI:uri
+                       type:pingType
+                   priority:NSOperationQueuePriorityHigh
+            batchIdentifier:nil
+                 batchToken:nil];
 }
 
 - (void)pingButtonPressed:(UIButton *)sender {
@@ -7502,6 +7595,7 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
         NSInteger code = tag - 20000;
         NSInteger subIdx = code / 1000;
         NSInteger itemIdx = code % 1000;
+        if ([self isSubscriptionPingInProgressAtIndex:subIdx]) return;
         NSArray *items = [self subscriptionItemsAtIndex:subIdx];
         if (itemIdx >= 0 && itemIdx < (NSInteger)[items count]) {
             uri = [items objectAtIndex:itemIdx];
@@ -7511,9 +7605,120 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
     if (![uri isKindOfClass:[NSString class]] || [uri length] == 0) {
         return;
     }
+    if ([_standalonePingURIs containsObject:uri]) return;
     if ([[_pingDisplayByURI objectForKey:uri] isEqualToString:kVCPingLoadingValue]) return;
 
+    sender.enabled = NO;
     [self startPingForURI:uri type:VCSelectedPingType()];
+}
+
+- (void)startSubscriptionPingAtIndex:(NSInteger)subIdx {
+    NSArray *items = [self subscriptionItemsAtIndex:subIdx];
+    if ([items count] == 0 || [self isSubscriptionPingInProgressAtIndex:subIdx]) return;
+
+    NSMutableArray *urisToPing = [NSMutableArray arrayWithCapacity:[items count]];
+    NSMutableSet *seenURIs = [NSMutableSet setWithCapacity:[items count]];
+    for (NSString *uri in items) {
+        if (![uri isKindOfClass:[NSString class]] || [uri length] == 0 ||
+            [seenURIs containsObject:uri]) {
+            continue;
+        }
+        [seenURIs addObject:uri];
+        [urisToPing addObject:uri];
+    }
+    if ([urisToPing count] == 0) return;
+
+    NSString *identifier = [self subscriptionPingIdentifierAtIndex:subIdx];
+    if (!identifier) return;
+    [_subscriptionPingPendingByIdentifier setObject:[NSMutableSet setWithArray:urisToPing]
+                                             forKey:identifier];
+
+    _nextSubscriptionPingToken++;
+    if (_nextSubscriptionPingToken == 0) _nextSubscriptionPingToken++;
+    NSNumber *batchToken = [NSNumber numberWithUnsignedInteger:_nextSubscriptionPingToken];
+    [_subscriptionPingTokenByIdentifier setObject:batchToken forKey:identifier];
+
+    NSMutableDictionary *previousDisplay = [NSMutableDictionary dictionaryWithCapacity:[urisToPing count]];
+    NSMutableArray *operations = [NSMutableArray arrayWithCapacity:[urisToPing count]];
+    [_subscriptionPingPreviousDisplayByIdentifier setObject:previousDisplay forKey:identifier];
+    [_subscriptionPingOperationsByIdentifier setObject:operations forKey:identifier];
+
+    VCPingType pingType = VCSelectedPingType();
+    for (NSString *uri in urisToPing) {
+        NSString *previous = [_pingDisplayByURI objectForKey:uri];
+        if ([previous length] > 0 && ![previous isEqualToString:kVCPingLoadingValue]) {
+            [previousDisplay setObject:previous forKey:uri];
+        }
+        [_pingDisplayByURI setObject:kVCPingLoadingValue forKey:uri];
+        NSOperation *operation = [self enqueuePingForURI:uri
+                                                    type:pingType
+                                                priority:NSOperationQueuePriorityNormal
+                                         batchIdentifier:identifier
+                                              batchToken:batchToken];
+        if (operation) [operations addObject:operation];
+    }
+    [self refreshVisibleSubscriptionPingAccessories];
+    [self refreshVisibleSubscriptionHeaderAccessories];
+}
+
+- (BOOL)isURIInActiveSubscriptionPing:(NSString *)uri {
+    if (![uri isKindOfClass:[NSString class]] || [uri length] == 0) return NO;
+    for (NSString *identifier in _subscriptionPingPendingByIdentifier) {
+        NSSet *pending = [_subscriptionPingPendingByIdentifier objectForKey:identifier];
+        if ([pending containsObject:uri]) return YES;
+    }
+    return NO;
+}
+
+- (void)stopSubscriptionPingAtIndex:(NSInteger)subIdx {
+    NSString *identifier = [self subscriptionPingIdentifierAtIndex:subIdx];
+    if (!identifier) return;
+
+    NSArray *operations = [[_subscriptionPingOperationsByIdentifier objectForKey:identifier] copy];
+    NSSet *pending = [[_subscriptionPingPendingByIdentifier objectForKey:identifier] copy];
+    NSDictionary *previousDisplay = [[_subscriptionPingPreviousDisplayByIdentifier objectForKey:identifier] copy];
+
+    [_subscriptionPingPendingByIdentifier removeObjectForKey:identifier];
+    [_subscriptionPingOperationsByIdentifier removeObjectForKey:identifier];
+    [_subscriptionPingPreviousDisplayByIdentifier removeObjectForKey:identifier];
+    [_subscriptionPingTokenByIdentifier removeObjectForKey:identifier];
+
+    for (NSOperation *operation in operations) {
+        [operation cancel];
+    }
+
+    for (NSString *uri in pending) {
+        if (![[_pingDisplayByURI objectForKey:uri] isEqualToString:kVCPingLoadingValue]) continue;
+        if ([self isURIInActiveSubscriptionPing:uri]) {
+            continue;
+        }
+        NSString *previous = [previousDisplay objectForKey:uri];
+        if ([previous length] > 0) {
+            [_pingDisplayByURI setObject:previous forKey:uri];
+        } else {
+            [_pingDisplayByURI removeObjectForKey:uri];
+        }
+    }
+
+    [operations release];
+    [pending release];
+    [previousDisplay release];
+
+    [self refreshVisibleSubscriptionPingAccessories];
+    [self refreshVisibleSubscriptionHeaderAccessories];
+    [self showStatus:@"Subscription ping stopped" ok:YES];
+}
+
+- (void)subscriptionPingButtonPressed:(UIButton *)sender {
+    NSInteger subIdx = sender.tag - kVCSubscriptionPingButtonTagBase;
+    NSArray *items = [self subscriptionItemsAtIndex:subIdx];
+    if ([self isSubscriptionPingInProgressAtIndex:subIdx]) {
+        [self stopSubscriptionPingAtIndex:subIdx];
+        return;
+    }
+    if ([items count] == 0) return;
+
+    [self startSubscriptionPingAtIndex:subIdx];
 }
 
 - (void)updateConnectButton {
@@ -8441,11 +8646,35 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
 }
 
 - (UIView *)accessorySubscriptionHeaderAtIndex:(NSInteger)index expanded:(BOOL)expanded loading:(BOOL)loading {
-    CGFloat width = loading ? 70.0f : 48.0f;
+    BOOL pingLoading = [self isSubscriptionPingInProgressAtIndex:index];
+    CGFloat width = loading ? 100.0f : 80.0f;
     UIView *v = [[[UIView alloc] initWithFrame:CGRectMake(0, 0, width, 24)] autorelease];
 
+    UIButton *pingButton = [UIButton buttonWithType:UIButtonTypeCustom];
+    pingButton.frame = CGRectMake(0.0f, 0.0f, 24.0f, 24.0f);
+    pingButton.tag = kVCSubscriptionPingButtonTagBase + index;
+    if (pingLoading) {
+        [pingButton setImage:MakeIconImage(VCIconTypeStop, 20.0f, NO)
+                    forState:UIControlStateNormal];
+        pingButton.accessibilityLabel = @"Stop subscription ping";
+        pingButton.accessibilityHint = @"Stops the remaining latency tests";
+    } else {
+        UIImage *pingIcon = LoadBundledIconTinted(@"icon-ping", 20.0f, VCPrimaryTextColor());
+        [pingButton setImage:(pingIcon ? pingIcon : MakeIconImage(VCIconTypeWifi, 18.0f, NO))
+                    forState:UIControlStateNormal];
+        pingButton.accessibilityLabel = @"Ping all subscription configurations";
+        pingButton.accessibilityHint = [NSString stringWithFormat:@"Runs %@ latency tests",
+                                                                  VCPingTypeName(VCSelectedPingType())];
+    }
+    pingButton.enabled = pingLoading || ([[self subscriptionItemsAtIndex:index] count] > 0);
+    [pingButton addTarget:self
+                   action:@selector(subscriptionPingButtonPressed:)
+         forControlEvents:UIControlEventTouchUpInside];
+    [self applyTouchFeedbackToButton:pingButton];
+    [v addSubview:pingButton];
+
     UIButton *infoButton = [UIButton buttonWithType:UIButtonTypeCustom];
-    infoButton.frame = CGRectMake(0.0f, 0.0f, 24.0f, 24.0f);
+    infoButton.frame = CGRectMake(32.0f, 0.0f, 24.0f, 24.0f);
     infoButton.tag = kVCSubscriptionInfoButtonTagBase + index;
     UIImage *infoIcon = LoadBundledIconTinted(@"info", 21.0f, VCSecondaryTextColor());
     [infoButton setImage:infoIcon forState:UIControlStateNormal];
@@ -8460,13 +8689,13 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
             [[[UIActivityIndicatorView alloc] initWithActivityIndicatorStyle:(VCAppearanceIsDark()
                 ? UIActivityIndicatorViewStyleWhite
                 : UIActivityIndicatorViewStyleGray)] autorelease];
-        spinner.frame = CGRectMake(26.0f, 2.0f, 20.0f, 20.0f);
+        spinner.frame = CGRectMake(58.0f, 2.0f, 20.0f, 20.0f);
         spinner.hidesWhenStopped = YES;
         [spinner startAnimating];
         [v addSubview:spinner];
     }
 
-    CGFloat chevronX = loading ? 52.0f : 32.0f;
+    CGFloat chevronX = loading ? 84.0f : 64.0f;
     UIImageView *iv = [[[UIImageView alloc] initWithFrame:CGRectMake(chevronX, 4, 16, 16)] autorelease];
     iv.image = MakeIconImage(expanded ? VCIconTypeChevronDown : VCIconTypeChevronRight, 16.0f, NO);
     [v addSubview:iv];
@@ -8512,9 +8741,18 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
     btn.accessibilityLabel = hasResult ? [NSString stringWithFormat:@"Ping result %@", display]
                                        : @"Check ping";
     NSString *pingTypeName = VCPingTypeName(VCSelectedPingType());
-    btn.accessibilityHint = hasResult
-        ? [NSString stringWithFormat:@"Double tap to run %@ again", pingTypeName]
-        : [NSString stringWithFormat:@"Runs %@ latency test", pingTypeName];
+    BOOL subscriptionPingRunning = NO;
+    if (tag >= 20000) {
+        NSInteger subIdx = (tag - 20000) / 1000;
+        subscriptionPingRunning = [self isSubscriptionPingInProgressAtIndex:subIdx];
+    }
+    btn.enabled = !subscriptionPingRunning;
+    btn.adjustsImageWhenDisabled = YES;
+    btn.accessibilityHint = subscriptionPingRunning
+        ? @"All configurations in this subscription are being pinged"
+        : (hasResult
+            ? [NSString stringWithFormat:@"Double tap to run %@ again", pingTypeName]
+            : [NSString stringWithFormat:@"Runs %@ latency test", pingTypeName]);
     [btn addTarget:self action:@selector(pingButtonPressed:) forControlEvents:UIControlEventTouchUpInside];
     [self applyTouchFeedbackToButton:btn];
     [v addSubview:btn];
@@ -10625,6 +10863,13 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
 
     [self loadData];
     _pingDisplayByURI = [[NSMutableDictionary alloc] init];
+    _standalonePingURIs = [[NSMutableSet alloc] init];
+    _subscriptionPingPendingByIdentifier = [[NSMutableDictionary alloc] init];
+    _subscriptionPingOperationsByIdentifier = [[NSMutableDictionary alloc] init];
+    _subscriptionPingPreviousDisplayByIdentifier = [[NSMutableDictionary alloc] init];
+    _subscriptionPingTokenByIdentifier = [[NSMutableDictionary alloc] init];
+    _pingQueue = [[NSOperationQueue alloc] init];
+    _pingQueue.maxConcurrentOperationCount = 4;
 
     CGRect b = self.view.bounds;
     BOOL collapsiblePhoneLayout = !IsPadDevice();
@@ -10903,6 +11148,13 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
     [_configs release];
     [_subscriptions release];
     [_pingDisplayByURI release];
+    [_standalonePingURIs release];
+    [_subscriptionPingPendingByIdentifier release];
+    [_subscriptionPingOperationsByIdentifier release];
+    [_subscriptionPingPreviousDisplayByIdentifier release];
+    [_subscriptionPingTokenByIdentifier release];
+    [_pingQueue cancelAllOperations];
+    [_pingQueue release];
 
     [super dealloc];
 }
@@ -11645,6 +11897,37 @@ moveRowAtIndexPath:(NSIndexPath *)sourceIndexPath
         UITableViewCell *cell = [_tableView cellForRowAtIndexPath:indexPath];
         if (!cell) continue;
         cell.accessoryView = [self accessoryPingWithTag:tag uri:rowURI];
+        [cell setNeedsLayout];
+        [cell layoutIfNeeded];
+        [self applyMarqueeDetailForMainCell:cell atIndexPath:indexPath];
+    }
+}
+
+- (void)refreshVisibleSubscriptionPingAccessories {
+    if (!_tableView || !_subscriptionsSectionExpanded) return;
+
+    NSArray *visibleRows = [_tableView indexPathsForVisibleRows];
+    for (NSIndexPath *indexPath in visibleRows) {
+        if (indexPath.section != 1) continue;
+
+        NSInteger subIdx = -1;
+        NSInteger itemIdx = -1;
+        BOOL isHeader = YES;
+        if (![self mapSubscriptionRow:indexPath.row
+                           toSubIndex:&subIdx
+                            itemIndex:&itemIdx
+                             isHeader:&isHeader] || isHeader) {
+            continue;
+        }
+
+        NSArray *items = [self subscriptionItemsAtIndex:subIdx];
+        if (itemIdx < 0 || itemIdx >= (NSInteger)[items count]) continue;
+
+        NSString *uri = [items objectAtIndex:itemIdx];
+        NSInteger tag = 20000 + (subIdx * 1000) + itemIdx;
+        UITableViewCell *cell = [_tableView cellForRowAtIndexPath:indexPath];
+        if (!cell) continue;
+        cell.accessoryView = [self accessoryPingWithTag:tag uri:uri];
         [cell setNeedsLayout];
         [cell layoutIfNeeded];
         [self applyMarqueeDetailForMainCell:cell atIndexPath:indexPath];
