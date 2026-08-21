@@ -53,6 +53,7 @@ typedef struct {
     char server_ips[512];
     char routing[8192];
     int routing_bypass_lan;
+    int protect_logs;
     route_bypass_entry_t route_bypass[256];
 } vpn_state_t;
 
@@ -68,6 +69,7 @@ static int g_vpn_icon_publisher_logged = 0;
 
 static void stop_pid(pid_t *p);
 static void truncate_log_file(const char *path);
+static void clear_logs(void);
 
 static void handle_term_signal(int sig) {
     (void)sig;
@@ -79,6 +81,8 @@ static void handle_term_signal(int sig) {
 }
 
 static void log_msg(const char *fmt, ...) {
+    if (g.protect_logs) return;
+
     struct timeval tv;
     gettimeofday(&tv, NULL);
 
@@ -1116,8 +1120,11 @@ static int spawn_logged(const char *bin, char *const argv[], pid_t *pid_out) {
     posix_spawn_file_actions_t actions;
     posix_spawn_file_actions_init(&actions);
 
-    posix_spawn_file_actions_addopen(&actions, STDOUT_FILENO, "/var/log/vless-core.log", O_WRONLY | O_CREAT | O_APPEND, 0644);
-    posix_spawn_file_actions_addopen(&actions, STDERR_FILENO, "/var/log/vless-core.log", O_WRONLY | O_CREAT | O_APPEND, 0644);
+    const char *output_path = g.protect_logs ? "/dev/null" : "/var/log/vless-core.log";
+    int output_flags = g.protect_logs ? O_WRONLY : (O_WRONLY | O_CREAT | O_APPEND);
+    mode_t output_mode = g.protect_logs ? 0 : 0644;
+    posix_spawn_file_actions_addopen(&actions, STDOUT_FILENO, output_path, output_flags, output_mode);
+    posix_spawn_file_actions_addopen(&actions, STDERR_FILENO, output_path, output_flags, output_mode);
 
     pid_t pid = 0;
     int rc = posix_spawn(&pid, bin, &actions, NULL, argv, environ);
@@ -2096,6 +2103,7 @@ static void clear_pf_rules(void) {
 }
 
 static void disconnect_all(void) {
+    int protected_logs = g.protect_logs;
     char routing[sizeof(g.routing)];
     snprintf(routing, sizeof(routing), "%s", g.routing);
     int routing_bypass_lan = g.routing_bypass_lan;
@@ -2114,6 +2122,9 @@ static void disconnect_all(void) {
     snprintf(g.routing, sizeof(g.routing), "%s", routing);
     g.routing_bypass_lan = routing_bypass_lan;
     update_vpn_icon_state(0);
+    if (protected_logs) {
+        clear_logs();
+    }
 }
 
 static int try_connect_pf(int socks_port) {
@@ -2156,21 +2167,39 @@ static int try_connect_pf(int socks_port) {
     return 0;
 }
 
-static int connect_all(const char *uri, int requested_port, char *msg, size_t msg_cap) {
+static void finish_failed_protected_connect(void) {
+    if (!g.protect_logs) return;
+    clear_logs();
+    g.protect_logs = 0;
+}
+
+static int connect_all(const char *uri, int requested_port, int protect_logs, char *msg, size_t msg_cap) {
     if (g.connected) {
-        snprintf(msg, msg_cap, "OK already connected mode=%s socks=%d", mode_name(g.mode), g.socks_port);
+        if (g.protect_logs != (protect_logs ? 1 : 0)) {
+            snprintf(msg, msg_cap, "ERR already connected with different log protection");
+            return -1;
+        }
+        snprintf(msg, msg_cap, "OK already connected mode=%s socks=%d protected=%d",
+                 mode_name(g.mode), g.socks_port, g.protect_logs);
         return 0;
+    }
+
+    g.protect_logs = protect_logs ? 1 : 0;
+    if (g.protect_logs) {
+        clear_logs();
     }
 
     int port = pick_port(requested_port);
     if (port <= 0) {
         snprintf(msg, msg_cap, "ERR no free local SOCKS port");
+        finish_failed_protected_connect();
         return -1;
     }
 
     char host[256];
     if (parse_server_host(uri, host, sizeof(host)) != 0) {
         snprintf(msg, msg_cap, "ERR invalid config URI (cannot parse host)");
+        finish_failed_protected_connect();
         return -1;
     }
 
@@ -2180,10 +2209,12 @@ static int connect_all(const char *uri, int requested_port, char *msg, size_t ms
     if (resolve_rc == -2) {
         snprintf(msg, msg_cap, "ERR server DNS timeout after %dms", kConnectResolveTimeoutMs);
         log_msg("resolve server host %s timed out after %dms", host, kConnectResolveTimeoutMs);
+        finish_failed_protected_connect();
         return -1;
     }
     if (resolve_rc != 0) {
         snprintf(msg, msg_cap, "ERR failed to resolve server host");
+        finish_failed_protected_connect();
         return -1;
     }
 
@@ -2200,7 +2231,8 @@ static int connect_all(const char *uri, int requested_port, char *msg, size_t ms
     int pf_rc = try_connect_pf(port);
     if (pf_rc == 0) {
         update_vpn_icon_state(1);
-        snprintf(msg, msg_cap, "OK connected mode=%s socks=%d redir=%d", mode_name(g.mode), g.socks_port, g.redir_port);
+        snprintf(msg, msg_cap, "OK connected mode=%s socks=%d redir=%d protected=%d",
+                 mode_name(g.mode), g.socks_port, g.redir_port, g.protect_logs);
         return 0;
     }
 
@@ -2236,8 +2268,8 @@ static void handle_client(int cfd) {
 
     if (strncmp(buf, "STATUS", 6) == 0) {
         if (g.connected) {
-            snprintf(reply, sizeof(reply), "OK connected mode=%s socks=%d redir=%d dns=%d\n", mode_name(g.mode), g.socks_port, g.redir_port,
-                     g.dns_port);
+            snprintf(reply, sizeof(reply), "OK connected mode=%s socks=%d redir=%d dns=%d protected=%d\n", mode_name(g.mode), g.socks_port,
+                     g.redir_port, g.dns_port, g.protect_logs ? 1 : 0);
         } else {
             snprintf(reply, sizeof(reply), "OK disconnected\n");
         }
@@ -2272,8 +2304,9 @@ static void handle_client(int cfd) {
         } else {
             snprintf(reply, sizeof(reply), "ERR route bypass update failed\n");
         }
-    } else if (strncmp(buf, "CONNECT\t", 8) == 0) {
-        char *p = buf + 8;
+    } else if (strncmp(buf, "CONNECT\t", 8) == 0 || strncmp(buf, "CONNECT_PRIVATE\t", 16) == 0) {
+        int protect_logs = strncmp(buf, "CONNECT_PRIVATE\t", 16) == 0;
+        char *p = buf + (protect_logs ? 16 : 8);
         char *tab = strchr(p, '\t');
         if (!tab) {
             snprintf(reply, sizeof(reply), "ERR malformed CONNECT\n");
@@ -2288,7 +2321,7 @@ static void handle_client(int cfd) {
             if (!is_supported_config_uri(uri)) {
                 snprintf(reply, sizeof(reply), "ERR uri must start with vless:// or socks5://\n");
             } else {
-                connect_all(uri, port, reply, sizeof(reply));
+                connect_all(uri, port, protect_logs, reply, sizeof(reply));
                 strncat(reply, "\n", sizeof(reply) - strlen(reply) - 1);
             }
         }

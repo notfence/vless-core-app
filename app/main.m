@@ -61,6 +61,7 @@ static NSString *const kSubscriptionUpdateIntervalKey = @"update_interval_hours"
 static NSString *const kSubscriptionRefillDateKey = @"refill_date";
 static NSString *const kSubscriptionLastUpdatedKey = @"last_updated";
 static NSString *const kSubscriptionCustomNameKey = @"custom_name";
+static NSString *const kHiddenLinkText = @"**link is hidden**";
 static NSString *const kUpdateAPIURL = @"https://api.github.com/repos/notfence/vless-core-app/releases/latest";
 static NSString *const kUpdateReleasesURL = @"https://github.com/notfence/vless-core-app/releases";
 static const NSTimeInterval kAutomaticUpdateCheckInterval = 24.0 * 60.0 * 60.0;
@@ -462,7 +463,8 @@ static ssize_t SendRawCommandToPort(int port, NSData *outData, const struct time
 }
 
 static NSString *SendCommand(NSString *cmdLine) {
-    BOOL isConnectCommand = [cmdLine hasPrefix:@"CONNECT\t"];
+    BOOL isConnectCommand = [cmdLine hasPrefix:@"CONNECT\t"] ||
+                            [cmdLine hasPrefix:@"CONNECT_PRIVATE\t"];
 
     struct timeval cmd_tv;
     cmd_tv.tv_sec = isConnectCommand ? 8 : 2;
@@ -510,6 +512,11 @@ static NSString *SendCommand(NSString *cmdLine) {
         last_errno = ECONNREFUSED;
     }
     return [NSString stringWithFormat:@"daemon offline (%s)", strerror(last_errno)];
+}
+
+static NSString *ConnectCommandForURI(NSString *uri, BOOL protectLogs) {
+    NSString *command = protectLogs ? @"CONNECT_PRIVATE" : @"CONNECT";
+    return [NSString stringWithFormat:@"%@\t0\t%@\n", command, (uri ? uri : @"")];
 }
 
 static NSString *RoutingPolicyText(void) {
@@ -1308,6 +1315,11 @@ static BOOL SubscriptionDictionaryAllowsInsecureFetch(NSDictionary *sub) {
     return NO;
 }
 
+static BOOL HappURLStringIsEncrypted(NSString *urlString) {
+    NSString *lower = [urlString isKindOfClass:[NSString class]] ? [urlString lowercaseString] : nil;
+    return [lower hasPrefix:@"happ://crypt4/"] || [lower hasPrefix:@"happ://crypt5/"];
+}
+
 static BOOL SubscriptionDictionaryUsesHappHeaders(NSDictionary *sub) {
     if (![sub isKindOfClass:[NSDictionary class]]) return NO;
 
@@ -1318,10 +1330,14 @@ static BOOL SubscriptionDictionaryUsesHappHeaders(NSDictionary *sub) {
 
     NSString *urlString = [sub objectForKey:@"url"];
     NSString *lower = [urlString isKindOfClass:[NSString class]] ? [urlString lowercaseString] : nil;
-    if ([lower hasPrefix:kHappAddPrefix] ||
-        [lower hasPrefix:@"happ://crypt4/"] ||
-        [lower hasPrefix:@"happ://crypt5/"]) return YES;
+    if ([lower hasPrefix:kHappAddPrefix] || HappURLStringIsEncrypted(urlString)) return YES;
     return NO;
+}
+
+static BOOL SubscriptionDictionaryIsHappEncrypted(NSDictionary *sub) {
+    if (![sub isKindOfClass:[NSDictionary class]]) return NO;
+
+    return HappURLStringIsEncrypted([sub objectForKey:@"url"]);
 }
 
 static BOOL CurlExitCodeCanRetryInsecurely(int exitCode) {
@@ -2850,9 +2866,9 @@ typedef NS_ENUM(NSInteger, VCMainListCellKind) {
 
     NSArray *troubleshooting = [NSArray arrayWithObjects:
         [self question:@"Where can I find the logs?"
-                 answer:@"Tap the terminal button on the main screen. The vpnctld log covers daemon and device-routing work; the vless-core log covers the selected proxy transport and server connection. The logs update live, and the trash button clears them."],
+                 answer:@"Tap the terminal button on the main screen. The vpnctld log covers daemon and device-routing work; the vless-core log covers the selected proxy transport and server connection. The logs update live, and the trash button clears them. Logs are unavailable for encrypted HAPP subscriptions."],
         [self question:@"What does Stealth mode hide?"
-                 answer:@"Stealth mode masks configuration and subscription links in the interface. It does not change the connection and does not encrypt stored links or redact technical logs. Review logs before sharing them."],
+                 answer:@"Stealth mode masks configuration and subscription links in the interface. It does not change the connection and does not encrypt stored links or redact technical logs. Encrypted HAPP subscriptions are protected separately and never expose their links or connection logs."],
         nil];
 
     NSArray *compatibility = [NSArray arrayWithObject:
@@ -5347,7 +5363,8 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
 
     NSString *url = [_subscription objectForKey:@"url"];
     if (![url isKindOfClass:[NSString class]]) url = @"";
-    NSString *shownURL = _stealthMode ? @"**link is hidden**" : url;
+    BOOL encryptedHappSubscription = SubscriptionDictionaryIsHappEncrypted(_subscription);
+    NSString *shownURL = (_stealthMode || encryptedHappSubscription) ? kHiddenLinkText : url;
     if ([shownURL length] > 0) {
         [generalRows addObject:[self rowWithTitle:@"Subscription Link" detail:shownURL action:nil]];
     }
@@ -5413,13 +5430,13 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
     NSString *webPageURL = [metadata objectForKey:kSubscriptionWebPageURLKey];
     if ([webPageURL isKindOfClass:[NSString class]] && [webPageURL length] > 0) {
         [providerRows addObject:[self rowWithTitle:@"Web Page"
-                                            detail:(_stealthMode ? @"**link is hidden**" : webPageURL)
+                                            detail:(_stealthMode ? kHiddenLinkText : webPageURL)
                                             action:nil]];
     }
     NSString *supportURL = [metadata objectForKey:kSubscriptionSupportURLKey];
     if ([supportURL isKindOfClass:[NSString class]] && [supportURL length] > 0) {
         [providerRows addObject:[self rowWithTitle:@"Support"
-                                            detail:(_stealthMode ? @"**link is hidden**" : supportURL)
+                                            detail:(_stealthMode ? kHiddenLinkText : supportURL)
                                             action:nil]];
     }
     NSNumber *intervalNumber = [metadata objectForKey:kSubscriptionUpdateIntervalKey];
@@ -5436,7 +5453,9 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
         }
     }
     [providerRows addObject:[self rowWithTitle:@"Source"
-                                       detail:(SubscriptionDictionaryUsesHappHeaders(_subscription) ? @"HAPP" : @"URL")
+                                       detail:(encryptedHappSubscription
+                                                   ? @"HAPP (encrypted)"
+                                                   : (SubscriptionDictionaryUsesHappHeaders(_subscription) ? @"HAPP" : @"URL"))
                                        action:nil]];
     [newSections addObject:[self sectionWithTitle:@"Provider" rows:providerRows]];
 
@@ -5760,6 +5779,7 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
     BOOL _phoneConnectionCompactBeforeTransition;
 
     BOOL _connected;
+    BOOL _connectedWithProtectedLogs;
     BOOL _showingTerminal;
     BOOL _autoUpdateSubscriptions;
     BOOL _preserveCustomSubscriptionNames;
@@ -5791,6 +5811,7 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
 - (void)refreshVisibleSubscriptionHeaderAccessories;
 - (void)refreshPresentedSubscriptionInfoIfNeeded;
 - (void)refreshLogs;
+- (BOOL)selectedSubscriptionIsHappEncrypted;
 - (void)updateLogSelectorAnimated:(BOOL)animated;
 - (void)updatePhoneConnectionScrollInsets;
 - (void)updatePhoneConnectionLayout;
@@ -5932,6 +5953,17 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
 
     NSString *host = [self hostFromConfigURI:uri];
     return [NSString stringWithFormat:@"Config %ld (%@)", (long)(index + 1), host];
+}
+
+- (NSString *)displayNameForSubscriptionURI:(NSString *)uri
+                                      index:(NSInteger)index
+                               subscription:(NSDictionary *)subscription {
+    if (!SubscriptionDictionaryIsHappEncrypted(subscription)) {
+        return [self displayNameForURI:uri index:index];
+    }
+
+    NSString *name = [self decodedFragmentFromURI:uri];
+    return [name length] > 0 ? name : [NSString stringWithFormat:@"Config %ld", (long)(index + 1)];
 }
 
 - (NSString *)hostFromURLString:(NSString *)urlString {
@@ -6434,7 +6466,7 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
     if (!_stealthModeEnabled || ![self isLikelyLinkText:trim]) {
         return trim;
     }
-    return @"**link is hidden**";
+    return kHiddenLinkText;
 }
 
 - (BOOL)isSubscriptionURL:(NSString *)s {
@@ -7421,12 +7453,14 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
         return;
     }
 
+    BOOL protectLogs = _connectedWithProtectedLogs;
     NSString *discResp = [self sanitizeDaemonText:SendCommand(@"DISCONNECT\n")];
     if (![discResp hasPrefix:@"OK"]) {
         [self showStatus:[NSString stringWithFormat:@"%@ (disconnect failed: %@)", reason, discResp] ok:NO];
         return;
     }
     _connected = NO;
+    _connectedWithProtectedLogs = NO;
     [self stopUptimeTimer];
     [self updateConnectButton];
 
@@ -7435,10 +7469,11 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
         [self showStatus:[NSString stringWithFormat:@"%@ (routing sync failed: %@)", reason, routingResp] ok:NO];
         return;
     }
-    NSString *cmd = [NSString stringWithFormat:@"CONNECT\t0\t%@\n", uri];
+    NSString *cmd = ConnectCommandForURI(uri, protectLogs);
     NSString *resp = [self sanitizeDaemonText:SendCommand(cmd)];
     if ([resp hasPrefix:@"OK"]) {
         _connected = YES;
+        _connectedWithProtectedLogs = protectLogs;
         [self startUptimeTimer];
         [self updateConnectButton];
         if (removedAny) {
@@ -7447,6 +7482,7 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
             [self showStatus:@"Connected (xhttp reconnected)" ok:YES];
         }
     } else {
+        _connectedWithProtectedLogs = NO;
         [self showStatus:[NSString stringWithFormat:@"%@ (reconnect failed: %@)", reason, resp] ok:NO];
     }
 }
@@ -10055,11 +10091,19 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
     return nil;
 }
 
+- (BOOL)selectedSubscriptionIsHappEncrypted {
+    if (_selectedSubIndex < 0 || _selectedSubIndex >= (NSInteger)[_subscriptions count]) {
+        return NO;
+    }
+    return SubscriptionDictionaryIsHappEncrypted([_subscriptions objectAtIndex:_selectedSubIndex]);
+}
+
 - (void)reconnectToURIIfNeededFrom:(NSString *)oldURI to:(NSString *)newURI {
     if (!_connected) return;
     if (![oldURI isKindOfClass:[NSString class]] || ![newURI isKindOfClass:[NSString class]]) return;
     if ([oldURI length] == 0 || [newURI length] == 0) return;
-    if ([oldURI isEqualToString:newURI]) return;
+    BOOL protectLogs = [self selectedSubscriptionIsHappEncrypted];
+    if ([oldURI isEqualToString:newURI] && _connectedWithProtectedLogs == protectLogs) return;
     if (![self isSupportedConfigTupleForURI:newURI]) {
         [self showStatus:[self unsupportedConfigStatusTextForURI:newURI] ok:NO];
         return;
@@ -10072,6 +10116,7 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
         [self showStatus:[NSString stringWithFormat:@"Reconnect failed (disconnect): %@", discResp] ok:NO];
         return;
     }
+    _connectedWithProtectedLogs = NO;
 
     NSString *routingResp = [self sanitizeDaemonText:SyncRoutingPolicyToDaemon()];
     if (![routingResp hasPrefix:@"OK"]) {
@@ -10081,16 +10126,18 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
         [self showStatus:[NSString stringWithFormat:@"Reconnect failed (routing): %@", routingResp] ok:NO];
         return;
     }
-    NSString *cmd = [NSString stringWithFormat:@"CONNECT\t0\t%@\n", newURI];
+    NSString *cmd = ConnectCommandForURI(newURI, protectLogs);
     NSString *connResp = [self sanitizeDaemonText:SendCommand(cmd)];
     if ([connResp hasPrefix:@"OK"]) {
         _connected = YES;
+        _connectedWithProtectedLogs = protectLogs;
         [self startUptimeTimer];
         [self updateConnectButton];
         [self showStatus:@"Connected (switched config)" ok:YES];
         [self scheduleXHTTPConnectHealthCheckForURI:newURI];
     } else {
         _connected = NO;
+        _connectedWithProtectedLogs = NO;
         [self stopUptimeTimer];
         [self updateConnectButton];
         [self showStatus:[NSString stringWithFormat:@"Reconnect failed (connect): %@", connResp] ok:NO];
@@ -10117,10 +10164,12 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
             [self showStatus:[NSString stringWithFormat:@"Routing sync failed: %@", routingResp] ok:NO];
             return;
         }
-        NSString *cmd = [NSString stringWithFormat:@"CONNECT\t0\t%@\n", uri];
+        BOOL protectLogs = [self selectedSubscriptionIsHappEncrypted];
+        NSString *cmd = ConnectCommandForURI(uri, protectLogs);
         NSString *resp = [self sanitizeDaemonText:SendCommand(cmd)];
         if ([resp hasPrefix:@"OK"]) {
             _connected = YES;
+            _connectedWithProtectedLogs = protectLogs;
             [self startUptimeTimer];
             [self updateConnectButton];
             [self showStatus:@"Connected" ok:YES];
@@ -10134,6 +10183,7 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
     NSString *resp = [self sanitizeDaemonText:SendCommand(@"DISCONNECT\n")];
     if ([resp hasPrefix:@"OK"]) {
         _connected = NO;
+        _connectedWithProtectedLogs = NO;
         [self stopUptimeTimer];
         [self updateConnectButton];
         [self showStatus:@"Ready" ok:YES];
@@ -10315,6 +10365,10 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
     if (_reorderingSection >= 0) {
         [self setMainReorderingSection:-1 showStatus:NO];
     }
+    if (_connectedWithProtectedLogs || [self selectedSubscriptionIsHappEncrypted]) {
+        [self showStatus:@"Logs are unavailable for encrypted HAPP subscriptions" ok:NO];
+        return;
+    }
     _showingTerminal = !_showingTerminal;
 
     _tableView.hidden = _showingTerminal;
@@ -10495,14 +10549,18 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
         NSAutoreleasePool *pool = [[NSAutoreleasePool alloc] init];
         NSString *resp = [self sanitizeDaemonText:SendCommand(@"STATUS\n")];
         BOOL connectedNow = [resp hasPrefix:@"OK connected"];
+        BOOL protectedLogsNow = connectedNow &&
+            [resp rangeOfString:@"protected=1"].location != NSNotFound;
 
         dispatch_async(dispatch_get_main_queue(), ^{
             if (connectedNow) {
                 _connected = YES;
+                _connectedWithProtectedLogs = protectedLogsNow;
                 [self startUptimeTimer];
                 [self showStatus:@"Connected" ok:YES];
             } else {
                 _connected = NO;
+                _connectedWithProtectedLogs = NO;
                 [self stopUptimeTimer];
                 [self showStatus:@"Ready" ok:YES];
             }
@@ -11609,7 +11667,14 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
     NSInteger subIdx = -1;
     NSInteger itemIdx = -1;
     BOOL isHeader = YES;
-    return [self mapSubscriptionRow:indexPath.row toSubIndex:&subIdx itemIndex:&itemIdx isHeader:&isHeader];
+    if (![self mapSubscriptionRow:indexPath.row toSubIndex:&subIdx itemIndex:&itemIdx isHeader:&isHeader]) {
+        return NO;
+    }
+    if (!isHeader && subIdx >= 0 && subIdx < (NSInteger)[_subscriptions count] &&
+        SubscriptionDictionaryIsHappEncrypted([_subscriptions objectAtIndex:subIdx])) {
+        return NO;
+    }
+    return YES;
 }
 
 - (UITableViewCellEditingStyle)tableView:(UITableView *)tableView editingStyleForRowAtIndexPath:(NSIndexPath *)indexPath {
@@ -11745,6 +11810,7 @@ moveRowAtIndexPath:(NSIndexPath *)sourceIndexPath
 
     if (subIdx < 0 || subIdx >= (NSInteger)[_subscriptions count]) return;
     NSDictionary *sub = [_subscriptions objectAtIndex:subIdx];
+    if (SubscriptionDictionaryIsHappEncrypted(sub)) return;
     NSArray *items = [sub objectForKey:@"items"];
     if (![items isKindOfClass:[NSArray class]]) return;
     if (itemIdx < 0 || itemIdx >= (NSInteger)[items count]) return;
@@ -11825,7 +11891,9 @@ moveRowAtIndexPath:(NSIndexPath *)sourceIndexPath
 
     NSString *uri = [items objectAtIndex:itemIdx];
     NSString *prefix = [self configPrefixTextFromURI:uri];
-    NSString *tail = [self configEndpointTextFromURI:uri];
+    NSString *tail = SubscriptionDictionaryIsHappEncrypted(sub)
+        ? kHiddenLinkText
+        : [self configEndpointTextFromURI:uri];
     [self applyDetailPrefix:prefix
                 prefixColor:[self configPrefixColorForURI:uri]
                 marqueeTail:tail
@@ -12032,7 +12100,9 @@ moveRowAtIndexPath:(NSIndexPath *)sourceIndexPath
             } else {
                 NSString *uri = [items objectAtIndex:itemIdx];
                 cell.indentationLevel = 0;
-                NSString *itemName = [self displayNameForURI:uri index:itemIdx];
+                NSString *itemName = [self displayNameForSubscriptionURI:uri
+                                                                    index:itemIdx
+                                                             subscription:sub];
                 cell.textLabel.text = [self maskedLinkText:itemName];
                 NSInteger tag = 20000 + (subIdx * 1000) + itemIdx;
                 cell.accessoryView = [self accessoryPingWithTag:tag uri:uri];
@@ -12194,7 +12264,11 @@ moveRowAtIndexPath:(NSIndexPath *)sourceIndexPath
                 _selectedConfigIndex = -1;
                 _selectedSubIndex = subIdx;
                 _selectedSubItemIndex = itemIdx;
-                [self showStatus:[NSString stringWithFormat:@"Selected: %@", [self displayNameForURI:uri index:itemIdx]] ok:YES];
+                NSDictionary *sub = [_subscriptions objectAtIndex:subIdx];
+                NSString *itemName = [self displayNameForSubscriptionURI:uri
+                                                                    index:itemIdx
+                                                             subscription:sub];
+                [self showStatus:[NSString stringWithFormat:@"Selected: %@", itemName] ok:YES];
             }
         }
     }
