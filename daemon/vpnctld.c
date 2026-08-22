@@ -605,6 +605,8 @@ static int pf_table_change(const char *operation, const char *ip) {
     if (!pfctl) return -1;
     char *argv[] = {
         (char *)pfctl,
+        "-a",
+        "vlesscore",
         "-t",
         "vlesscore_bypass",
         "-T",
@@ -1528,7 +1530,7 @@ static int write_pf_conf(const char *server_ips, char ifnames[][32], size_t if_c
                 "pass out quick on %s inet proto tcp from any to <vlesscore_bypass> flags S/SA keep state\n"
                 "pass out quick on %s route-to (lo0 127.0.0.1) inet proto tcp from any to ! <vlesscore_bypass> flags S/SA keep state\n"
                 "pass out quick on %s route-to (lo0 127.0.0.1) inet proto udp from any to any port 53 keep state\n"
-                "block return out quick on %s inet proto udp from any to ! <vlesscore_bypass> port 443\n"
+                "block return out quick on %s inet proto udp from any to ! <vlesscore_bypass>\n"
                 "block return out quick on %s inet6 all\n"
                 "pass out on %s all keep state\n",
                 ifname, ifname, ifname, ifname, ifname, ifname) < 0) {
@@ -1537,10 +1539,6 @@ static int write_pf_conf(const char *server_ips, char ifnames[][32], size_t if_c
             }
         }
 
-        if (fprintf(fp, "pass in all keep state\n") < 0) {
-            fclose(fp);
-            return -1;
-        }
     } else if (mode == PF_RULE_ROUTE_TO_LO0_NOGW) {
         if (write_pf_bypass_table(fp, server_ips) != 0) {
             fclose(fp);
@@ -1576,7 +1574,7 @@ static int write_pf_conf(const char *server_ips, char ifnames[][32], size_t if_c
                 "pass out quick on %s inet proto tcp from any to <vlesscore_bypass> flags S/SA keep state\n"
                 "pass out quick on %s route-to (lo0) inet proto tcp from any to ! <vlesscore_bypass> flags S/SA keep state\n"
                 "pass out quick on %s route-to (lo0) inet proto udp from any to any port 53 keep state\n"
-                "block return out quick on %s inet proto udp from any to ! <vlesscore_bypass> port 443\n"
+                "block return out quick on %s inet proto udp from any to ! <vlesscore_bypass>\n"
                 "block return out quick on %s inet6 all\n"
                 "pass out on %s all keep state\n",
                 ifname, ifname, ifname, ifname, ifname, ifname) < 0) {
@@ -1585,10 +1583,6 @@ static int write_pf_conf(const char *server_ips, char ifnames[][32], size_t if_c
             }
         }
 
-        if (fprintf(fp, "pass in all keep state\n") < 0) {
-            fclose(fp);
-            return -1;
-        }
     } else if (mode == PF_RULE_DIVERT_TO) {
         if (fprintf(fp, "set skip on lo0\n") < 0 ||
             write_pf_bypass_table(fp, server_ips) != 0) {
@@ -1602,7 +1596,7 @@ static int write_pf_conf(const char *server_ips, char ifnames[][32], size_t if_c
                 "pass out quick on %s inet proto tcp from any to <vlesscore_bypass> flags S/SA keep state\n"
                 "pass out quick on %s divert-to 127.0.0.1 port %d inet proto tcp from any to ! <vlesscore_bypass> flags S/SA keep state\n"
                 "pass out quick on %s divert-to 127.0.0.1 port %d inet proto udp from any to any port 53 keep state\n"
-                "block return out quick on %s inet proto udp from any to ! <vlesscore_bypass> port 443\n"
+                "block return out quick on %s inet proto udp from any to ! <vlesscore_bypass>\n"
                 "block return out quick on %s inet6 all\n"
                 "pass out on %s all keep state\n",
                 ifname, ifname, redir_port, ifname, dns_port, ifname, ifname, ifname) < 0) {
@@ -1611,10 +1605,6 @@ static int write_pf_conf(const char *server_ips, char ifnames[][32], size_t if_c
             }
         }
 
-        if (fprintf(fp, "pass in all keep state\n") < 0) {
-            fclose(fp);
-            return -1;
-        }
     } else if (mode == PF_RULE_DIVERT_TO_OLD) {
         if (fprintf(fp, "set skip on lo0\n") < 0 ||
             write_pf_bypass_table(fp, server_ips) != 0) {
@@ -1628,7 +1618,7 @@ static int write_pf_conf(const char *server_ips, char ifnames[][32], size_t if_c
                 "pass out quick on %s inet proto tcp from any to <vlesscore_bypass> keep state\n"
                 "pass out quick on %s inet proto tcp from any to ! <vlesscore_bypass> divert-to 127.0.0.1 port %d keep state\n"
                 "pass out quick on %s inet proto udp from any to any port 53 divert-to 127.0.0.1 port %d keep state\n"
-                "block return out quick on %s inet proto udp from any to ! <vlesscore_bypass> port 443\n"
+                "block return out quick on %s inet proto udp from any to ! <vlesscore_bypass>\n"
                 "block return out quick on %s inet6 all\n"
                 "pass out on %s all keep state\n",
                 ifname, ifname, redir_port, ifname, dns_port, ifname, ifname, ifname) < 0) {
@@ -1637,10 +1627,6 @@ static int write_pf_conf(const char *server_ips, char ifnames[][32], size_t if_c
             }
         }
 
-        if (fprintf(fp, "pass in all keep state\n") < 0) {
-            fclose(fp);
-            return -1;
-        }
     } else if (mode == PF_RULE_RDR_TO) {
         if (fprintf(fp, "set skip on lo0\n") < 0 ||
             write_pf_bypass_table(fp, server_ips) != 0) {
@@ -1654,7 +1640,7 @@ static int write_pf_conf(const char *server_ips, char ifnames[][32], size_t if_c
                 "pass out quick on %s inet proto tcp from any to <vlesscore_bypass> flags S/SA keep state\n"
                 "pass out quick on %s inet proto tcp from any to ! <vlesscore_bypass> rdr-to 127.0.0.1 port %d flags S/SA keep state\n"
                 "pass out quick on %s inet proto udp from any to any port 53 rdr-to 127.0.0.1 port %d keep state\n"
-                "block return out quick on %s inet proto udp from any to ! <vlesscore_bypass> port 443\n"
+                "block return out quick on %s inet proto udp from any to ! <vlesscore_bypass>\n"
                 "block return out quick on %s inet6 all\n"
                 "pass out on %s all keep state\n",
                 ifname, ifname, redir_port, ifname, dns_port, ifname, ifname, ifname) < 0) {
@@ -1663,10 +1649,6 @@ static int write_pf_conf(const char *server_ips, char ifnames[][32], size_t if_c
             }
         }
 
-        if (fprintf(fp, "pass in all keep state\n") < 0) {
-            fclose(fp);
-            return -1;
-        }
     } else if (mode == PF_RULE_RDR_TO_OLD) {
         if (fprintf(fp, "set skip on lo0\n") < 0 ||
             write_pf_bypass_table(fp, server_ips) != 0) {
@@ -1680,7 +1662,7 @@ static int write_pf_conf(const char *server_ips, char ifnames[][32], size_t if_c
                 "pass out quick on %s inet proto tcp from any to <vlesscore_bypass> keep state\n"
                 "pass out quick on %s inet proto tcp from any to ! <vlesscore_bypass> rdr-to 127.0.0.1 port %d keep state\n"
                 "pass out quick on %s inet proto udp from any to any port 53 rdr-to 127.0.0.1 port %d keep state\n"
-                "block return out quick on %s inet proto udp from any to ! <vlesscore_bypass> port 443\n"
+                "block return out quick on %s inet proto udp from any to ! <vlesscore_bypass>\n"
                 "block return out quick on %s inet6 all\n"
                 "pass out on %s all keep state\n",
                 ifname, ifname, redir_port, ifname, dns_port, ifname, ifname, ifname) < 0) {
@@ -1689,10 +1671,6 @@ static int write_pf_conf(const char *server_ips, char ifnames[][32], size_t if_c
             }
         }
 
-        if (fprintf(fp, "pass in all keep state\n") < 0) {
-            fclose(fp);
-            return -1;
-        }
     } else {
         if (fprintf(fp, "set skip on lo0\n") < 0 ||
             write_pf_bypass_table(fp, server_ips) != 0) {
@@ -1719,7 +1697,7 @@ static int write_pf_conf(const char *server_ips, char ifnames[][32], size_t if_c
         for (size_t i = 0; i < if_count; i++) {
             const char *ifname = ifnames[i];
             if (fprintf(fp,
-                "block return out quick on %s inet proto udp from any to ! <vlesscore_bypass> port 443\n"
+                "block return out quick on %s inet proto udp from any to ! <vlesscore_bypass>\n"
                 "block return out quick on %s inet6 all\n"
                 "pass out on %s all keep state\n",
                 ifname, ifname, ifname) < 0) {
@@ -1728,10 +1706,6 @@ static int write_pf_conf(const char *server_ips, char ifnames[][32], size_t if_c
             }
         }
 
-        if (fprintf(fp, "pass in all keep state\n") < 0) {
-            fclose(fp);
-            return -1;
-        }
     }
 
     fclose(fp);
@@ -1787,6 +1761,58 @@ static void flush_pf_states(void) {
     }
 }
 
+static int pf_root_has_vlesscore_dispatch(const char *pfctl) {
+    char nat_rules[16384];
+    char filter_rules[16384];
+    char *nat_argv[] = { (char *)pfctl, "-sn", NULL };
+    char *filter_argv[] = { (char *)pfctl, "-sr", NULL };
+    if (run_argv_capture(nat_argv, nat_rules, sizeof(nat_rules)) != 0 ||
+        run_argv_capture(filter_argv, filter_rules, sizeof(filter_rules)) != 0) {
+        return -1;
+    }
+
+    int has_nat = contains_ci(nat_rules, "nat-anchor \"vlesscore\"");
+    int has_rdr = contains_ci(nat_rules, "rdr-anchor \"vlesscore\"");
+    int has_filter = contains_ci(filter_rules, "anchor \"vlesscore\"");
+    if (has_nat && has_rdr && has_filter) return 1;
+
+    if (nat_rules[0] != '\0' || filter_rules[0] != '\0') {
+        log_msg("pf root rules exist without vlesscore anchor; refusing to replace them");
+        return -2;
+    }
+    return 0;
+}
+
+static int ensure_pf_dispatch(const char *pfctl) {
+    int state = pf_root_has_vlesscore_dispatch(pfctl);
+    if (state == 1) return 0;
+    if (state != 0) return -1;
+
+    const char *path = "/var/run/vlesscore-pf-dispatch.conf";
+    FILE *fp = fopen(path, "w");
+    if (!fp) return -1;
+    int write_failed =
+        fprintf(fp,
+                "nat-anchor \"vlesscore\"\n"
+                "rdr-anchor \"vlesscore\"\n"
+                "anchor \"vlesscore\"\n") < 0;
+    if (fclose(fp) != 0 || write_failed) return -1;
+
+    char *load_argv[] = {
+        (char *)pfctl,
+        "-q",
+        "-f",
+        (char *)path,
+        NULL,
+    };
+    if (run_argv(load_argv) != 0) {
+        log_msg("pf failed to install vlesscore anchor dispatch");
+        return -1;
+    }
+    log_msg("pf vlesscore anchor dispatch installed");
+    return 0;
+}
+
 static int apply_pf_rules(const char *server_ips, int redir_port, int dns_port) {
     const char *pfctl = find_pfctl_bin();
     if (!pfctl) {
@@ -1795,6 +1821,10 @@ static int apply_pf_rules(const char *server_ips, int redir_port, int dns_port) 
     }
 
     int was_enabled = pf_is_enabled();
+    g.pf_enabled_before = was_enabled ? 1 : 0;
+    int dispatch_rc = ensure_pf_dispatch(pfctl);
+    if (dispatch_rc != 0) return -7;
+
     if (was_enabled) {
         log_msg("pf already enabled; will reload rules");
     }
@@ -1816,8 +1846,6 @@ static int apply_pf_rules(const char *server_ips, int redir_port, int dns_port) 
         strncat(if_list, ifnames[i], sizeof(if_list) - strlen(if_list) - 1);
     }
     log_msg("pf target interfaces: %s", if_list);
-
-    g.pf_enabled_before = was_enabled ? 1 : 0;
 
     int enabled_now = 0;
 
@@ -1889,6 +1917,8 @@ static int apply_pf_rules(const char *server_ips, int redir_port, int dns_port) 
         char *load_argv[] = {
             (char *)pfctl,
             "-q",
+            "-a",
+            "vlesscore",
             "-f",
             "/var/run/vlesscore-pf.conf",
             NULL,
@@ -1907,14 +1937,27 @@ static void clear_pf_rules(void) {
     const char *pfctl = find_pfctl_bin();
     if (!pfctl) return;
 
-    char *flush_argv[] = {
+    char *empty_argv[] = {
         (char *)pfctl,
         "-q",
-        "-F",
-        "all",
+        "-a",
+        "vlesscore",
+        "-f",
+        "/dev/null",
         NULL,
     };
-    run_argv(flush_argv);
+    run_argv(empty_argv);
+
+    char *flush_tables_argv[] = {
+        (char *)pfctl,
+        "-q",
+        "-a",
+        "vlesscore",
+        "-F",
+        "Tables",
+        NULL,
+    };
+    run_argv(flush_tables_argv);
 
     if (!g.pf_enabled_before) {
         char *disable_argv[] = {
@@ -1943,6 +1986,8 @@ static void disconnect_all(void) {
     stop_pid(&g.core_pid);
 
     unlink("/var/run/vlesscore-redsocks.conf");
+    unlink("/var/run/vlesscore-pf.conf");
+    unlink("/var/run/vlesscore-pf-dispatch.conf");
 
     memset(&g, 0, sizeof(g));
     snprintf(g.routing, sizeof(g.routing), "%s", routing);
