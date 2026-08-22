@@ -69,6 +69,7 @@ static NSString *const kUpdateAPIURL = @"https://api.github.com/repos/notfence/v
 static NSString *const kUpdateReleasesURL = @"https://github.com/notfence/vless-core-app/releases";
 static const NSTimeInterval kAutomaticUpdateCheckInterval = 24.0 * 60.0 * 60.0;
 static const char *kDaemonPortPath = "/var/run/vpnctld.port";
+static NSString *const kImportDirectoryPath = @"/var/mobile/vless-core-import";
 static const int kDaemonDefaultPort = 9093;
 static const int kDaemonPortMax = 9113;
 static const CGFloat kVCMainContentStartY = 246.0f;
@@ -175,7 +176,6 @@ typedef NS_ENUM(NSInteger, VCAlertTag) {
 
 typedef NS_ENUM(NSInteger, VCActionSheetTag) {
     VCActionSheetTagImport = 2001,
-    VCActionSheetTagImportFileBrowser = 2002,
 };
 
 typedef NS_ENUM(NSInteger, VCPingType) {
@@ -6018,7 +6018,182 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
 
 @end
 
-@interface MainVC : UIViewController <UITableViewDataSource, UITableViewDelegate, UIActionSheetDelegate, UIAlertViewDelegate, UITextViewDelegate, SettingsVCDelegate, QRScanVCDelegate, SubscriptionInfoVCDelegate, VCUpdateCheckerDelegate> {
+@protocol VCImportBrowserDelegate <NSObject>
+- (void)importBrowserDidCancel:(UIViewController *)browser;
+- (void)importBrowser:(UIViewController *)browser didSelectFileAtPath:(NSString *)path;
+@end
+
+@interface VCImportBrowserVC : UITableViewController {
+    id<VCImportBrowserDelegate> _browserDelegate;
+    NSString *_rootPath;
+    NSString *_directoryPath;
+    NSArray *_entries;
+}
+- (id)initWithRootPath:(NSString *)rootPath
+         directoryPath:(NSString *)directoryPath
+              delegate:(id<VCImportBrowserDelegate>)delegate;
+@end
+
+@implementation VCImportBrowserVC
+
+- (id)initWithRootPath:(NSString *)rootPath
+         directoryPath:(NSString *)directoryPath
+              delegate:(id<VCImportBrowserDelegate>)delegate {
+    self = [super initWithStyle:UITableViewStylePlain];
+    if (self) {
+        _browserDelegate = delegate;
+        _rootPath = [[rootPath stringByStandardizingPath] copy];
+        _directoryPath = [[directoryPath stringByStandardizingPath] copy];
+    }
+    return self;
+}
+
+- (BOOL)pathIsInsideImportDirectory:(NSString *)path {
+    NSString *root = [_rootPath stringByResolvingSymlinksInPath];
+    NSString *resolved = [[path stringByStandardizingPath] stringByResolvingSymlinksInPath];
+    if ([resolved isEqualToString:root]) return YES;
+    NSString *prefix = [root stringByAppendingString:@"/"];
+    return [resolved hasPrefix:prefix];
+}
+
+- (void)reloadEntries {
+    NSArray *names = [[NSFileManager defaultManager] contentsOfDirectoryAtPath:_directoryPath error:nil];
+    NSMutableArray *directories = [NSMutableArray array];
+    NSMutableArray *files = [NSMutableArray array];
+
+    for (id object in names) {
+        if (![object isKindOfClass:[NSString class]]) continue;
+        NSString *name = (NSString *)object;
+        if ([name length] == 0 || [name hasPrefix:@"."]) continue;
+
+        NSString *path = [_directoryPath stringByAppendingPathComponent:name];
+        if (![self pathIsInsideImportDirectory:path]) continue;
+
+        BOOL isDirectory = NO;
+        if (![[NSFileManager defaultManager] fileExistsAtPath:path isDirectory:&isDirectory]) continue;
+        NSDictionary *entry = [NSDictionary dictionaryWithObjectsAndKeys:
+                               name, @"name",
+                               path, @"path",
+                               [NSNumber numberWithBool:isDirectory], @"is_directory",
+                               nil];
+        [(isDirectory ? directories : files) addObject:entry];
+    }
+
+    NSComparator comparator = ^NSComparisonResult(id left, id right) {
+        return [[left objectForKey:@"name"] localizedCaseInsensitiveCompare:[right objectForKey:@"name"]];
+    };
+    [directories sortUsingComparator:comparator];
+    [files sortUsingComparator:comparator];
+
+    NSMutableArray *all = [NSMutableArray arrayWithArray:directories];
+    [all addObjectsFromArray:files];
+    [_entries release];
+    _entries = [all copy];
+}
+
+- (void)viewDidLoad {
+    [super viewDidLoad];
+    self.title = [_directoryPath isEqualToString:_rootPath]
+        ? @"Import Files"
+        : [_directoryPath lastPathComponent];
+    self.view.backgroundColor = VCBackgroundColor();
+    self.tableView.backgroundColor = VCBackgroundColor();
+    self.tableView.separatorColor = VCSeparatorColor();
+
+    if ([_directoryPath isEqualToString:_rootPath]) {
+        self.navigationItem.leftBarButtonItem = [[[UIBarButtonItem alloc]
+            initWithBarButtonSystemItem:UIBarButtonSystemItemCancel
+                                 target:self
+                                 action:@selector(cancelPressed)] autorelease];
+
+        UILabel *hint = [[[UILabel alloc] initWithFrame:CGRectMake(0.0f, 0.0f, self.view.bounds.size.width, 62.0f)] autorelease];
+        hint.autoresizingMask = UIViewAutoresizingFlexibleWidth;
+        hint.backgroundColor = VCBackgroundColor();
+        hint.textColor = VCSecondaryTextColor();
+        hint.font = [UIFont systemFontOfSize:13.0f];
+        hint.textAlignment = NSTextAlignmentCenter;
+        hint.numberOfLines = 2;
+        hint.text = @"Copy configuration or backup files to\n/var/mobile/vless-core-import";
+        self.tableView.tableHeaderView = hint;
+    }
+
+    [self reloadEntries];
+}
+
+- (void)cancelPressed {
+    if ([_browserDelegate respondsToSelector:@selector(importBrowserDidCancel:)]) {
+        [_browserDelegate importBrowserDidCancel:self];
+    }
+}
+
+- (NSInteger)tableView:(UITableView *)tableView numberOfRowsInSection:(NSInteger)section {
+    (void)tableView;
+    (void)section;
+    return MAX((NSInteger)[_entries count], 1);
+}
+
+- (UITableViewCell *)tableView:(UITableView *)tableView cellForRowAtIndexPath:(NSIndexPath *)indexPath {
+    static NSString *identifier = @"ImportFileCell";
+    UITableViewCell *cell = [tableView dequeueReusableCellWithIdentifier:identifier];
+    if (!cell) {
+        cell = [[[UITableViewCell alloc] initWithStyle:UITableViewCellStyleSubtitle reuseIdentifier:identifier] autorelease];
+    }
+
+    cell.backgroundColor = VCCellBackgroundColor();
+    cell.textLabel.textColor = VCPrimaryTextColor();
+    cell.detailTextLabel.textColor = VCSecondaryTextColor();
+    cell.accessoryType = UITableViewCellAccessoryNone;
+    cell.selectionStyle = UITableViewCellSelectionStyleNone;
+
+    if ([_entries count] == 0) {
+        cell.textLabel.text = @"No files found";
+        cell.detailTextLabel.text = @"Copy a file to the import directory, then reopen this screen.";
+        cell.textLabel.textColor = VCSecondaryTextColor();
+        return cell;
+    }
+
+    NSDictionary *entry = [_entries objectAtIndex:indexPath.row];
+    BOOL isDirectory = [[entry objectForKey:@"is_directory"] boolValue];
+    cell.textLabel.text = [entry objectForKey:@"name"];
+    cell.detailTextLabel.text = isDirectory ? @"Folder" : @"Tap to import";
+    cell.accessoryType = isDirectory ? UITableViewCellAccessoryDisclosureIndicator : UITableViewCellAccessoryNone;
+    cell.selectionStyle = UITableViewCellSelectionStyleBlue;
+    return cell;
+}
+
+- (void)tableView:(UITableView *)tableView didSelectRowAtIndexPath:(NSIndexPath *)indexPath {
+    [tableView deselectRowAtIndexPath:indexPath animated:YES];
+    if (indexPath.row < 0 || indexPath.row >= (NSInteger)[_entries count]) return;
+
+    NSDictionary *entry = [_entries objectAtIndex:indexPath.row];
+    NSString *path = [entry objectForKey:@"path"];
+    if ([[entry objectForKey:@"is_directory"] boolValue]) {
+        VCImportBrowserVC *child = [[[VCImportBrowserVC alloc] initWithRootPath:_rootPath
+                                                                  directoryPath:path
+                                                                       delegate:_browserDelegate] autorelease];
+        [self.navigationController pushViewController:child animated:YES];
+    } else if ([_browserDelegate respondsToSelector:@selector(importBrowser:didSelectFileAtPath:)]) {
+        [_browserDelegate importBrowser:self didSelectFileAtPath:path];
+    }
+}
+
+- (BOOL)shouldAutorotateToInterfaceOrientation:(UIInterfaceOrientation)interfaceOrientation {
+    return IsPadDevice() ? (UIInterfaceOrientationIsPortrait(interfaceOrientation) ||
+                            UIInterfaceOrientationIsLandscape(interfaceOrientation))
+                         : interfaceOrientation == UIInterfaceOrientationPortrait;
+}
+
+- (void)dealloc {
+    _browserDelegate = nil;
+    [_rootPath release];
+    [_directoryPath release];
+    [_entries release];
+    [super dealloc];
+}
+
+@end
+
+@interface MainVC : UIViewController <UITableViewDataSource, UITableViewDelegate, UIActionSheetDelegate, UIAlertViewDelegate, UITextViewDelegate, SettingsVCDelegate, QRScanVCDelegate, SubscriptionInfoVCDelegate, VCUpdateCheckerDelegate, VCImportBrowserDelegate> {
     UIButton *_connectBtn;
     UIButton *_plusBtn;
     UIButton *_terminalBtn;
@@ -6040,7 +6215,6 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
     NSTimer *_uptimeTimer;
     NSTimeInterval _connectedSince;
     NSString *_statusBaseText;
-    NSArray *_importBrowserItems;
     NSString *_pendingImportDoneStatus;
     NSArray *_pendingImportRefreshIndices;
     NSArray *_pendingInsecureImportURLs;
@@ -10134,18 +10308,6 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
     [self showStatus:@"Importing data from file..." ok:YES];
 
     NSData *data = [NSData dataWithContentsOfFile:path];
-    if ((!data || [data length] == 0) &&
-        [path rangeOfString:@"\n"].location == NSNotFound &&
-        [path rangeOfString:@"\r"].location == NSNotFound &&
-        [path rangeOfString:@"\t"].location == NSNotFound) {
-        NSString *resp = SendCommand([NSString stringWithFormat:@"READFILE\t%@\n", path]);
-        if ([resp isKindOfClass:[NSString class]] && [resp hasPrefix:@"OK\t"]) {
-            NSString *b64 = [resp substringFromIndex:3];
-            b64 = [b64 stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
-            NSData *decoded = ([b64 length] > 0) ? DecodeBase64String(b64) : [NSData data];
-            if (decoded) data = decoded;
-        }
-    }
     if (!data || [data length] == 0) {
         if (!exists) {
             [self showStatus:@"Import file not found" ok:NO];
@@ -10182,171 +10344,33 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
     [self importTextFileAtPath:path];
 }
 
-- (BOOL)isDirectoryPath:(NSString *)path {
-    if (![path isKindOfClass:[NSString class]] || [path length] == 0) return NO;
-    BOOL isDir = NO;
-    if (![[NSFileManager defaultManager] fileExistsAtPath:path isDirectory:&isDir]) return NO;
-    return isDir;
-}
-
-- (NSArray *)fileBrowserEntriesAtPath:(NSString *)dirPath {
-    NSFileManager *fm = [NSFileManager defaultManager];
-    NSArray *names = nil;
-    if ([self isDirectoryPath:dirPath]) {
-        names = [fm contentsOfDirectoryAtPath:dirPath error:nil];
-    }
-    if (![names isKindOfClass:[NSArray class]]) {
-        if ([dirPath rangeOfString:@"\n"].location == NSNotFound &&
-            [dirPath rangeOfString:@"\r"].location == NSNotFound &&
-            [dirPath rangeOfString:@"\t"].location == NSNotFound) {
-            NSString *resp = SendCommand([NSString stringWithFormat:@"LISTDIR\t%@\n", dirPath]);
-            if ([resp isKindOfClass:[NSString class]] && [resp hasPrefix:@"OK"]) {
-                NSArray *lines = [resp componentsSeparatedByCharactersInSet:[NSCharacterSet newlineCharacterSet]];
-                NSMutableArray *dirs = [NSMutableArray array];
-                NSMutableArray *files = [NSMutableArray array];
-
-                for (NSInteger i = 1; i < (NSInteger)[lines count]; i++) {
-                    id lineObj = [lines objectAtIndex:i];
-                    if (![lineObj isKindOfClass:[NSString class]]) continue;
-                    NSString *line = (NSString *)lineObj;
-                    if ([line length] < 3) continue;
-                    unichar kind = [line characterAtIndex:0];
-                    if ((kind != 'D' && kind != 'F') || [line characterAtIndex:1] != '\t') continue;
-
-                    NSString *name = [self safeTrim:[line substringFromIndex:2]];
-                    if ([name length] == 0 || [name hasPrefix:@"."]) continue;
-
-                    NSString *childPath = [dirPath stringByAppendingPathComponent:name];
-                    BOOL childIsDir = (kind == 'D');
-                    NSString *title = childIsDir ? [NSString stringWithFormat:@"[DIR] %@", name] : name;
-                    NSDictionary *item = [NSDictionary dictionaryWithObjectsAndKeys:
-                                          title, @"title",
-                                          childPath, @"path",
-                                          [NSNumber numberWithBool:childIsDir], @"is_dir",
-                                          nil];
-                    if (childIsDir) [dirs addObject:item];
-                    else [files addObject:item];
-                }
-
-                NSArray *sortedDirs = [dirs sortedArrayUsingComparator:^NSComparisonResult(id a, id b) {
-                    NSString *la = [a objectForKey:@"title"];
-                    NSString *lb = [b objectForKey:@"title"];
-                    if (![la isKindOfClass:[NSString class]]) la = @"";
-                    if (![lb isKindOfClass:[NSString class]]) lb = @"";
-                    return [la localizedCaseInsensitiveCompare:lb];
-                }];
-                NSArray *sortedFiles = [files sortedArrayUsingComparator:^NSComparisonResult(id a, id b) {
-                    NSString *la = [a objectForKey:@"title"];
-                    NSString *lb = [b objectForKey:@"title"];
-                    if (![la isKindOfClass:[NSString class]]) la = @"";
-                    if (![lb isKindOfClass:[NSString class]]) lb = @"";
-                    return [la localizedCaseInsensitiveCompare:lb];
-                }];
-
-                NSMutableArray *out = [NSMutableArray array];
-                if (![dirPath isEqualToString:@"/"]) {
-                    NSString *parent = [dirPath stringByDeletingLastPathComponent];
-                    if ([parent length] == 0) parent = @"/";
-                    NSDictionary *up = [NSDictionary dictionaryWithObjectsAndKeys:
-                                        @"[..]", @"title",
-                                        parent, @"path",
-                                        [NSNumber numberWithBool:YES], @"is_dir",
-                                        nil];
-                    [out addObject:up];
-                }
-                [out addObjectsFromArray:sortedDirs];
-                [out addObjectsFromArray:sortedFiles];
-
-                NSInteger cap = 90;
-                if ((NSInteger)[out count] > cap) {
-                    return [out subarrayWithRange:NSMakeRange(0, cap)];
-                }
-                return out;
-            }
-        }
-        return [NSArray array];
-    }
-    NSArray *sortedNames = [names sortedArrayUsingSelector:@selector(localizedCaseInsensitiveCompare:)];
-
-    NSMutableArray *dirs = [NSMutableArray array];
-    NSMutableArray *files = [NSMutableArray array];
-
-    for (id obj in sortedNames) {
-        if (![obj isKindOfClass:[NSString class]]) continue;
-        NSString *name = (NSString *)obj;
-        if ([name hasPrefix:@"."] || [name length] == 0) continue;
-
-        NSString *path = [dirPath stringByAppendingPathComponent:name];
-        BOOL childIsDir = NO;
-        if (![fm fileExistsAtPath:path isDirectory:&childIsDir]) continue;
-
-        NSString *title = childIsDir ? [NSString stringWithFormat:@"[DIR] %@", name] : name;
-        NSDictionary *item = [NSDictionary dictionaryWithObjectsAndKeys:
-                              title, @"title",
-                              path, @"path",
-                              [NSNumber numberWithBool:childIsDir], @"is_dir",
-                              nil];
-        if (childIsDir) [dirs addObject:item];
-        else [files addObject:item];
-    }
-
-    NSMutableArray *out = [NSMutableArray array];
-
-    if (![dirPath isEqualToString:@"/"]) {
-        NSString *parent = [dirPath stringByDeletingLastPathComponent];
-        if ([parent length] == 0) parent = @"/";
-        NSDictionary *up = [NSDictionary dictionaryWithObjectsAndKeys:
-                            @"[..]", @"title",
-                            parent, @"path",
-                            [NSNumber numberWithBool:YES], @"is_dir",
-                            nil];
-        [out addObject:up];
-    }
-
-    [out addObjectsFromArray:dirs];
-    [out addObjectsFromArray:files];
-
-    NSInteger cap = 90;
-    if ((NSInteger)[out count] > cap) {
-        return [out subarrayWithRange:NSMakeRange(0, cap)];
-    }
-    return out;
-}
-
-- (void)presentImportFileBrowserAtPath:(NSString *)rawPath {
-    NSString *path = [self safeTrim:rawPath];
-    if ([path length] == 0) path = @"/var/mobile";
-
-    NSArray *items = [self fileBrowserEntriesAtPath:path];
-    if ([items count] == 0) {
-        [self showStatus:@"Directory not found or not allowed" ok:NO];
+- (void)startFileBrowserImportFlow {
+    BOOL isDirectory = NO;
+    if (![[NSFileManager defaultManager] fileExistsAtPath:kImportDirectoryPath isDirectory:&isDirectory] || !isDirectory) {
+        [self showStatus:@"Import directory is unavailable" ok:NO];
         return;
     }
 
-    [_importBrowserItems release];
-    _importBrowserItems = [items copy];
-
-    NSString *title = [NSString stringWithFormat:@"Directory:\n%@", path];
-    [self showStatus:[NSString stringWithFormat:@"Current directory: %@", path] ok:YES];
-
-    UIActionSheet *sheet = [[[UIActionSheet alloc] initWithTitle:title
-                                                         delegate:self
-                                                cancelButtonTitle:nil
-                                           destructiveButtonTitle:nil
-                                                otherButtonTitles:nil] autorelease];
-    for (NSDictionary *item in _importBrowserItems) {
-        NSString *t = [item objectForKey:@"title"];
-        if (![t isKindOfClass:[NSString class]] || [t length] == 0) t = @"(unnamed)";
-        [sheet addButtonWithTitle:t];
-    }
-    NSInteger cancelIndex = [sheet addButtonWithTitle:@"Cancel"];
-    sheet.cancelButtonIndex = cancelIndex;
-    sheet.tag = VCActionSheetTagImportFileBrowser;
-    [sheet showInView:self.view];
+    VCImportBrowserVC *browser = [[[VCImportBrowserVC alloc] initWithRootPath:kImportDirectoryPath
+                                                                directoryPath:kImportDirectoryPath
+                                                                     delegate:self] autorelease];
+    UINavigationController *navigation = [[[UINavigationController alloc] initWithRootViewController:browser] autorelease];
+    navigation.modalPresentationStyle = UIModalPresentationFullScreen;
+    [self presentViewController:navigation animated:YES completion:nil];
 }
 
-- (void)startFileBrowserImportFlow {
-    [self presentImportFileBrowserAtPath:@"/var/mobile"];
+- (void)importBrowserDidCancel:(UIViewController *)browser {
+    (void)browser;
+    [self dismissViewControllerAnimated:YES completion:nil];
+}
+
+- (void)importBrowser:(UIViewController *)browser didSelectFileAtPath:(NSString *)path {
+    (void)browser;
+    NSString *selectedPath = [path copy];
+    [self dismissViewControllerAnimated:YES completion:^{
+        [self importTextFileAtPath:selectedPath];
+        [selectedPath release];
+    }];
 }
 
 - (void)startQRImportFlow {
@@ -11501,7 +11525,6 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
     [_logTexts[0] release];
     [_logTexts[1] release];
     [_stickySectionHeaderView release];
-    [_importBrowserItems release];
     [_pendingImportDoneStatus release];
     [_pendingImportRefreshIndices release];
     [_pendingInsecureImportURLs release];
@@ -12666,32 +12689,6 @@ moveRowAtIndexPath:(NSIndexPath *)sourceIndexPath
         return;
     }
 
-    if (actionSheet.tag == VCActionSheetTagImportFileBrowser) {
-        NSDictionary *selectedItem = nil;
-        if (buttonIndex >= 0 &&
-            buttonIndex != actionSheet.cancelButtonIndex &&
-            buttonIndex < (NSInteger)[_importBrowserItems count]) {
-            id obj = [_importBrowserItems objectAtIndex:buttonIndex];
-            if ([obj isKindOfClass:[NSDictionary class]]) {
-                selectedItem = [obj retain];
-            }
-        }
-        [_importBrowserItems release];
-        _importBrowserItems = nil;
-
-        if (selectedItem) {
-            NSString *path = [[selectedItem objectForKey:@"path"] copy];
-            BOOL isDir = [[selectedItem objectForKey:@"is_dir"] boolValue];
-            [selectedItem release];
-            if (isDir) {
-                [self presentImportFileBrowserAtPath:path];
-            } else {
-                [self importTextFileAtPath:path];
-            }
-            [path release];
-        }
-        return;
-    }
 }
 
 - (void)qrScanVCDidCancel:(UIViewController *)vc {

@@ -11,6 +11,9 @@ refresh_uicache() {
 chown -R root:wheel /Applications/vless-core.app || true
 chown root:wheel /Library/LaunchDaemons/com.vlesscore.vpnctld.plist || true
 chown root:wheel /usr/bin/vpnctld-bootstrap || true
+mkdir -p /var/mobile/vless-core-import
+chown mobile:mobile /var/mobile/vless-core-import || true
+chmod 700 /var/mobile/vless-core-import || true
 chmod 644 /Library/LaunchDaemons/com.vlesscore.vpnctld.plist || true
 chmod 755 /Applications/vless-core.app/vless-core || true
 for bin in /usr/bin/vpnctld /usr/bin/vless-core-darwin-armv7 /usr/bin/vless-core-curl /usr/bin/redsocks-vless-core; do
