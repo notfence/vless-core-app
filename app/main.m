@@ -36,6 +36,8 @@ static NSString *const kDefaultsStealthModeKey = @"vlesscore.stealth_mode";
 static NSString *const kDefaultsDarkThemeKey = @"vlesscore.dark_theme";
 static NSString *const kDefaultsAutomaticUpdateChecksKey = @"vlesscore.update.automatic";
 static NSString *const kDefaultsPingTypeKey = @"vlesscore.ping.type";
+static NSString *const kDefaultsXrayVersionSpoofEnabledKey = @"vlesscore.xray.version.spoof.enabled";
+static NSString *const kDefaultsXrayVersionKey = @"vlesscore.xray.version";
 static NSString *const kDefaultsLastUpdateCheckKey = @"vlesscore.update.last_check";
 static NSString *const kDefaultsLatestVersionKey = @"vlesscore.update.latest_version";
 static NSString *const kDefaultsLatestReleaseURLKey = @"vlesscore.update.latest_release_url";
@@ -62,6 +64,7 @@ static NSString *const kSubscriptionRefillDateKey = @"refill_date";
 static NSString *const kSubscriptionLastUpdatedKey = @"last_updated";
 static NSString *const kSubscriptionCustomNameKey = @"custom_name";
 static NSString *const kHiddenLinkText = @"**link is hidden**";
+static NSString *const kDefaultXrayVersion = @"26.3.27";
 static NSString *const kUpdateAPIURL = @"https://api.github.com/repos/notfence/vless-core-app/releases/latest";
 static NSString *const kUpdateReleasesURL = @"https://github.com/notfence/vless-core-app/releases";
 static const NSTimeInterval kAutomaticUpdateCheckInterval = 24.0 * 60.0 * 60.0;
@@ -197,6 +200,41 @@ static NSString *VCPingTypeName(VCPingType type) {
 
 static NSString *VCSelectedPingTypeText(void) {
     return [NSString stringWithFormat:@"Selected: %@", VCPingTypeName(VCSelectedPingType())];
+}
+
+static BOOL VCXrayVersionIsValid(NSString *value) {
+    if (![value isKindOfClass:[NSString class]]) return NO;
+    NSArray *parts = [value componentsSeparatedByString:@"."];
+    if ([parts count] != 3) return NO;
+
+    for (NSString *part in parts) {
+        NSUInteger length = [part length];
+        if (length == 0 || length > 3) return NO;
+        for (NSUInteger i = 0; i < length; i++) {
+            unichar c = [part characterAtIndex:i];
+            if (c < '0' || c > '9') return NO;
+        }
+        if ([part integerValue] > 255) return NO;
+    }
+    return YES;
+}
+
+static NSString *VCSelectedXrayVersion(void) {
+    NSString *value = [[NSUserDefaults standardUserDefaults] stringForKey:kDefaultsXrayVersionKey];
+    return VCXrayVersionIsValid(value) ? value : kDefaultXrayVersion;
+}
+
+static BOOL VCXrayVersionSpoofEnabled(void) {
+    return [[NSUserDefaults standardUserDefaults] boolForKey:kDefaultsXrayVersionSpoofEnabledKey];
+}
+
+static NSString *VCActiveXrayVersion(void) {
+    return VCXrayVersionSpoofEnabled() ? VCSelectedXrayVersion() : nil;
+}
+
+static NSString *VCSelectedXrayVersionText(void) {
+    if (!VCXrayVersionSpoofEnabled()) return @"Disabled";
+    return [NSString stringWithFormat:@"Enabled: %@", VCSelectedXrayVersion()];
 }
 
 static NSInteger const kVCSubscriptionDeleteAlertTag = 3101;
@@ -516,6 +554,11 @@ static NSString *SendCommand(NSString *cmdLine) {
 
 static NSString *ConnectCommandForURI(NSString *uri, BOOL protectLogs) {
     NSString *command = protectLogs ? @"CONNECT_PRIVATE" : @"CONNECT";
+    NSString *xrayVersion = VCActiveXrayVersion();
+    if (xrayVersion) {
+        return [NSString stringWithFormat:@"%@\t0\t%@\t%@\n",
+                command, xrayVersion, (uri ? uri : @"")];
+    }
     return [NSString stringWithFormat:@"%@\t0\t%@\n", command, (uri ? uri : @"")];
 }
 
@@ -765,7 +808,7 @@ static void stop_child_process(pid_t pid) {
     if (wr < 0 && errno == ECHILD) return;
 }
 
-static pid_t spawn_temp_core_for_ping(const char *uri, uint16_t port) {
+static pid_t spawn_temp_core_for_ping(const char *uri, uint16_t port, const char *xray_version) {
     if (!uri || !*uri) return -1;
     const char *core = "/usr/bin/vless-core-darwin-armv7";
     if (access(core, X_OK) != 0) {
@@ -784,7 +827,13 @@ static pid_t spawn_temp_core_for_ping(const char *uri, uint16_t port) {
             (void)dup2(dn, STDERR_FILENO);
             if (dn > STDERR_FILENO) close(dn);
         }
-        execl(core, "vless-core-darwin-armv7", "--uri", uri, "--listen-port", port_str, (char *)NULL);
+        if (xray_version && *xray_version) {
+            execl(core, "vless-core-darwin-armv7", "--uri", uri, "--listen-port", port_str,
+                  "--xray-version", xray_version, (char *)NULL);
+        } else {
+            execl(core, "vless-core-darwin-armv7", "--uri", uri, "--listen-port", port_str,
+                  (char *)NULL);
+        }
         _exit(127);
     }
     return pid;
@@ -927,14 +976,15 @@ static int ProxyGetConnectOnceMs(uint16_t local_port, int timeout_ms, int *laten
     return 0;
 }
 
-static int ProxyGetViaTempCoreMs(const char *uri, int timeout_ms, int attempts, int *latency_ms) {
+static int ProxyGetViaTempCoreMs(const char *uri, const char *xray_version,
+                                 int timeout_ms, int attempts, int *latency_ms) {
     if (!uri || !*uri) return -1;
     if (attempts <= 0) attempts = 1;
 
     int port = pick_free_loopback_port();
     if (port <= 0 || port > 65535) return -2;
 
-    pid_t pid = spawn_temp_core_for_ping(uri, (uint16_t)port);
+    pid_t pid = spawn_temp_core_for_ping(uri, (uint16_t)port, xray_version);
     if (pid <= 0) return -3;
 
     int rc = -4;
@@ -2785,6 +2835,13 @@ typedef NS_ENUM(NSInteger, VCMainListCellKind) {
 @property (nonatomic, assign) id<SettingsVCDelegate> delegate;
 @end
 
+@interface XrayVersionSpoofVC : UIViewController <UITableViewDataSource, UITableViewDelegate, UITextFieldDelegate> {
+    UITableView *_tableView;
+    UISwitch *_enabledSwitch;
+    UITextField *_versionField;
+}
+@end
+
 @interface SettingsNavController : UINavigationController
 @end
 
@@ -3906,6 +3963,219 @@ commitEditingStyle:(UITableViewCellEditingStyle)editingStyle
 
 @end
 
+@implementation XrayVersionSpoofVC
+
+- (void)dealloc {
+    [_tableView release];
+    [_enabledSwitch release];
+    [_versionField release];
+    [super dealloc];
+}
+
+- (BOOL)saveVersion {
+    NSString *value = [_versionField.text
+        stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
+    if (!VCXrayVersionIsValid(value)) {
+        _versionField.text = VCSelectedXrayVersion();
+        UIAlertView *error = [[[UIAlertView alloc] initWithTitle:@"Invalid version"
+                                                        message:@"Use x.y.z; each number must be from 0 to 255."
+                                                       delegate:nil
+                                              cancelButtonTitle:@"OK"
+                                              otherButtonTitles:nil] autorelease];
+        [error show];
+        return NO;
+    }
+
+    _versionField.text = value;
+    NSUserDefaults *defaults = [NSUserDefaults standardUserDefaults];
+    [defaults setObject:value forKey:kDefaultsXrayVersionKey];
+    [defaults synchronize];
+    return YES;
+}
+
+- (void)enabledSwitchChanged:(UISwitch *)sender {
+    if ([sender isOn] && ![self saveVersion]) {
+        [sender setOn:NO animated:YES];
+    }
+    NSUserDefaults *defaults = [NSUserDefaults standardUserDefaults];
+    [defaults setBool:[sender isOn] forKey:kDefaultsXrayVersionSpoofEnabledKey];
+    [defaults synchronize];
+}
+
+- (BOOL)textFieldShouldReturn:(UITextField *)textField {
+    [textField resignFirstResponder];
+    return YES;
+}
+
+- (void)textFieldDidEndEditing:(UITextField *)textField {
+    (void)textField;
+    [self saveVersion];
+}
+
+- (void)applyTheme {
+    self.view.backgroundColor = VCBackgroundColor();
+    VCAppearanceApplyNavigationBar(self.navigationController.navigationBar);
+    VCAppearanceApplyStatusBar();
+    VCAppearanceApplyTable(_tableView);
+    _enabledSwitch.onTintColor = VCAccentColor();
+    _versionField.textColor = VCPrimaryTextColor();
+    [_tableView reloadData];
+    VCAppearanceScheduleVisibleTableHeadersRefresh(_tableView);
+}
+
+- (void)viewDidLoad {
+    [super viewDidLoad];
+    self.title = @"Xray version spoof";
+
+    _tableView = [[UITableView alloc] initWithFrame:self.view.bounds style:UITableViewStyleGrouped];
+    _tableView.dataSource = self;
+    _tableView.delegate = self;
+    _tableView.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
+    [self.view addSubview:_tableView];
+
+    _enabledSwitch = [[UISwitch alloc] initWithFrame:CGRectZero];
+    [_enabledSwitch setOn:VCXrayVersionSpoofEnabled() animated:NO];
+    [_enabledSwitch addTarget:self
+                       action:@selector(enabledSwitchChanged:)
+             forControlEvents:UIControlEventValueChanged];
+
+    CGFloat fieldWidth = IsPadDevice() ? 220.0f : 150.0f;
+    _versionField = [[UITextField alloc] initWithFrame:CGRectMake(0.0f, 0.0f, fieldWidth, 30.0f)];
+    _versionField.borderStyle = UITextBorderStyleNone;
+    _versionField.backgroundColor = [UIColor clearColor];
+    _versionField.textAlignment = NSTextAlignmentRight;
+    _versionField.contentVerticalAlignment = UIControlContentVerticalAlignmentCenter;
+    _versionField.text = VCSelectedXrayVersion();
+    _versionField.keyboardType = UIKeyboardTypeNumbersAndPunctuation;
+    _versionField.returnKeyType = UIReturnKeyDone;
+    _versionField.autocorrectionType = UITextAutocorrectionTypeNo;
+    _versionField.autocapitalizationType = UITextAutocapitalizationTypeNone;
+    _versionField.clearButtonMode = UITextFieldViewModeNever;
+    _versionField.delegate = self;
+
+    [self applyTheme];
+}
+
+- (NSInteger)numberOfSectionsInTableView:(UITableView *)tableView {
+    (void)tableView;
+    return 1;
+}
+
+- (NSInteger)tableView:(UITableView *)tableView numberOfRowsInSection:(NSInteger)section {
+    (void)tableView;
+    (void)section;
+    return 2;
+}
+
+- (NSString *)tableView:(UITableView *)tableView titleForHeaderInSection:(NSInteger)section {
+    (void)tableView;
+    (void)section;
+    return @"Xray version";
+}
+
+- (NSString *)tableView:(UITableView *)tableView titleForFooterInSection:(NSInteger)section {
+    (void)tableView;
+    (void)section;
+    return [NSString stringWithFormat:
+            @"When disabled, vless-core-cli reports Xray version %@. Changes apply on the next connection.",
+            kDefaultXrayVersion];
+}
+
+- (UIView *)tableView:(UITableView *)tableView viewForHeaderInSection:(NSInteger)section {
+    UIView *header = [[[UIView alloc] initWithFrame:
+                       CGRectMake(0.0f, 0.0f, tableView.bounds.size.width, 32.0f)] autorelease];
+    header.backgroundColor = [UIColor clearColor];
+
+    UILabel *label = [[[UILabel alloc] initWithFrame:
+                       CGRectMake(18.0f, 0.0f, tableView.bounds.size.width - 36.0f, 32.0f)] autorelease];
+    label.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
+    label.backgroundColor = [UIColor clearColor];
+    label.font = [UIFont boldSystemFontOfSize:17.0f];
+    label.text = [self tableView:tableView titleForHeaderInSection:section];
+    [header addSubview:label];
+    VCAppearanceApplyHeaderView(header);
+    return header;
+}
+
+- (CGFloat)tableView:(UITableView *)tableView heightForFooterInSection:(NSInteger)section {
+    NSString *text = [self tableView:tableView titleForFooterInSection:section];
+    CGFloat width = MAX(1.0f, tableView.bounds.size.width - 36.0f);
+    CGSize size = [text sizeWithFont:[UIFont systemFontOfSize:14.0f]
+                   constrainedToSize:CGSizeMake(width, 1000.0f)
+                       lineBreakMode:NSLineBreakByWordWrapping];
+    return ceilf(size.height) + 14.0f;
+}
+
+- (UIView *)tableView:(UITableView *)tableView viewForFooterInSection:(NSInteger)section {
+    NSString *text = [self tableView:tableView titleForFooterInSection:section];
+    CGFloat height = [self tableView:tableView heightForFooterInSection:section];
+    UIView *footer = [[[UIView alloc] initWithFrame:
+                       CGRectMake(0.0f, 0.0f, tableView.bounds.size.width, height)] autorelease];
+    footer.backgroundColor = [UIColor clearColor];
+
+    UILabel *label = [[[UILabel alloc] initWithFrame:
+                       CGRectMake(18.0f, 4.0f, tableView.bounds.size.width - 36.0f, height - 8.0f)] autorelease];
+    label.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
+    label.backgroundColor = [UIColor clearColor];
+    label.font = [UIFont systemFontOfSize:14.0f];
+    label.numberOfLines = 0;
+    label.lineBreakMode = NSLineBreakByWordWrapping;
+    label.text = text;
+    [footer addSubview:label];
+    VCAppearanceApplyHeaderView(footer);
+    return footer;
+}
+
+- (UITableViewCell *)tableView:(UITableView *)tableView cellForRowAtIndexPath:(NSIndexPath *)indexPath {
+    static NSString *cellIdentifier = @"XrayVersionSpoofCell";
+    UITableViewCell *cell = [tableView dequeueReusableCellWithIdentifier:cellIdentifier];
+    if (!cell) {
+        cell = [[[UITableViewCell alloc] initWithStyle:UITableViewCellStyleDefault
+                                      reuseIdentifier:cellIdentifier] autorelease];
+    }
+    cell.selectionStyle = UITableViewCellSelectionStyleNone;
+    cell.accessoryType = UITableViewCellAccessoryNone;
+    cell.textLabel.text = (indexPath.row == 0) ? @"Enabled" : @"Version";
+    cell.accessoryView = (indexPath.row == 0) ? (UIView *)_enabledSwitch : (UIView *)_versionField;
+    VCAppearanceApplyCell(cell);
+    return cell;
+}
+
+- (void)tableView:(UITableView *)tableView willDisplayCell:(UITableViewCell *)cell forRowAtIndexPath:(NSIndexPath *)indexPath {
+    (void)tableView;
+    (void)indexPath;
+    VCAppearanceApplyCell(cell);
+}
+
+- (void)tableView:(UITableView *)tableView willDisplayHeaderView:(UIView *)view forSection:(NSInteger)section {
+    (void)tableView;
+    (void)section;
+    VCAppearanceApplyHeaderView(view);
+}
+
+- (void)tableView:(UITableView *)tableView willDisplayFooterView:(UIView *)view forSection:(NSInteger)section {
+    (void)tableView;
+    (void)section;
+    VCAppearanceApplyHeaderView(view);
+}
+
+- (BOOL)shouldAutorotateToInterfaceOrientation:(UIInterfaceOrientation)interfaceOrientation {
+    return IsPadDevice() ? (UIInterfaceOrientationIsPortrait(interfaceOrientation) ||
+                            UIInterfaceOrientationIsLandscape(interfaceOrientation))
+                         : interfaceOrientation == UIInterfaceOrientationPortrait;
+}
+
+- (BOOL)shouldAutorotate {
+    return IsPadDevice();
+}
+
+- (NSUInteger)supportedInterfaceOrientations {
+    return IsPadDevice() ? UIInterfaceOrientationMaskAllButUpsideDown
+                         : UIInterfaceOrientationMaskPortrait;
+}
+
+@end
+
 @implementation SettingsVC
 @synthesize autoUpdate = _autoUpdate;
 @synthesize preserveCustomNames = _preserveCustomNames;
@@ -4062,6 +4332,21 @@ commitEditingStyle:(UITableViewCellEditingStyle)editingStyle
     [self applyTheme];
 }
 
+- (void)viewDidAppear:(BOOL)animated {
+    [super viewDidAppear:animated];
+
+    [_tableView reloadData];
+    [_tableView layoutIfNeeded];
+
+    for (NSIndexPath *indexPath in [_tableView indexPathsForVisibleRows]) {
+        UITableViewCell *cell = [_tableView cellForRowAtIndexPath:indexPath];
+        if (!cell) continue;
+        [self applySettingsMarqueesToCell:cell
+                                    title:[self settingsTitleTextForIndexPath:indexPath]
+                                   detail:[self settingsDetailTextForIndexPath:indexPath]];
+    }
+}
+
 - (NSInteger)numberOfSectionsInTableView:(UITableView *)tableView {
     (void)tableView;
     return 5;
@@ -4070,7 +4355,8 @@ commitEditingStyle:(UITableViewCellEditingStyle)editingStyle
 - (NSInteger)tableView:(UITableView *)tableView numberOfRowsInSection:(NSInteger)section {
     (void)tableView;
     if (section == 0) return 3;
-    if (section == 1 || section == 2 || section == 3) return 2;
+    if (section == 1) return 3;
+    if (section == 2 || section == 3) return 2;
     return 4;
 }
 
@@ -4160,6 +4446,9 @@ commitEditingStyle:(UITableViewCellEditingStyle)editingStyle
     if (indexPath.section == 1 && indexPath.row == 1) {
         return @"Ping type";
     }
+    if (indexPath.section == 1 && indexPath.row == 2) {
+        return @"Xray version spoof";
+    }
     if (indexPath.section == 2 && indexPath.row == 0) {
         return @"Light";
     }
@@ -4202,6 +4491,9 @@ commitEditingStyle:(UITableViewCellEditingStyle)editingStyle
     }
     if (indexPath.section == 1 && indexPath.row == 1) {
         return VCSelectedPingTypeText();
+    }
+    if (indexPath.section == 1 && indexPath.row == 2) {
+        return VCSelectedXrayVersionText();
     }
     if (indexPath.section == 2 && indexPath.row == 0) {
         return @"Use the light color scheme";
@@ -4287,11 +4579,18 @@ commitEditingStyle:(UITableViewCellEditingStyle)editingStyle
         cell.selectionStyle = UITableViewCellSelectionStyleBlue;
         cell.accessoryType = UITableViewCellAccessoryNone;
         cell.accessoryView = VCCreateDisclosureAccessoryView();
+        NSString *title = @"Xray version spoof";
+        NSString *detail = VCSelectedXrayVersionText();
+        if (indexPath.row == 0) {
+            title = @"Routing";
+            detail = @"Proxy, Direct and Block rules";
+        } else if (indexPath.row == 1) {
+            title = @"Ping type";
+            detail = VCSelectedPingTypeText();
+        }
         [self applySettingsMarqueesToCell:cell
-                                    title:(indexPath.row == 0 ? @"Routing" : @"Ping type")
-                                   detail:(indexPath.row == 0
-                                       ? @"Proxy, Direct and Block rules"
-                                       : VCSelectedPingTypeText())];
+                                    title:title
+                                   detail:detail];
         return cell;
     }
 
@@ -4439,6 +4738,9 @@ commitEditingStyle:(UITableViewCellEditingStyle)editingStyle
                                                     otherButtonTitles:@"Proxy GET", @"TCP", @"ICMP", nil] autorelease];
         sheet.tag = kVCSettingsPingTypeActionSheetTag;
         [sheet showInView:self.view];
+    } else if (indexPath.section == 1 && indexPath.row == 2) {
+        XrayVersionSpoofVC *spoof = [[[XrayVersionSpoofVC alloc] init] autorelease];
+        [self.navigationController pushViewController:spoof animated:YES];
     } else if (indexPath.section == 2) {
         BOOL dark = (indexPath.row == 1);
         if (_darkTheme != dark) {
@@ -7512,7 +7814,9 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
         int rc = -1;
 
         if (pingType == VCPingTypeProxyGET) {
-            rc = ProxyGetViaTempCoreMs([uri UTF8String], 5000, 2, &latencyMs);
+            NSString *xrayVersion = VCActiveXrayVersion();
+            rc = ProxyGetViaTempCoreMs([uri UTF8String], [xrayVersion UTF8String],
+                                       5000, 2, &latencyMs);
         } else if (pingType == VCPingTypeTCP) {
             rc = ConnectLatencyBestOfNMs([host UTF8String], port, 3500, 2, &latencyMs);
         } else if (pingType == VCPingTypeICMP) {

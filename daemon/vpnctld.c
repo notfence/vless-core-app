@@ -635,6 +635,14 @@ static int is_supported_config_uri(const char *uri) {
     return starts_with_ci(uri, "vless://") || starts_with_ci(uri, "socks5://");
 }
 
+static int xray_version_valid(const char *value) {
+    unsigned int x = 0, y = 0, z = 0;
+    char trailing = '\0';
+    return value &&
+           sscanf(value, "%u.%u.%u%c", &x, &y, &z, &trailing) == 3 &&
+           x <= 255 && y <= 255 && z <= 255;
+}
+
 static int parse_server_host(const char *uri, char *out, size_t out_cap) {
     size_t scheme_len = 0;
     if (starts_with_ci(uri, "vless://")) {
@@ -1136,7 +1144,7 @@ static int spawn_logged(const char *bin, char *const argv[], pid_t *pid_out) {
     return 0;
 }
 
-static int spawn_core(const char *uri, int port, pid_t *pid_out) {
+static int spawn_core(const char *uri, const char *xray_version, int port, pid_t *pid_out) {
     const char *core_bin = find_vless_core_bin();
     if (!core_bin) return -2;
 
@@ -1145,18 +1153,22 @@ static int spawn_core(const char *uri, int port, pid_t *pid_out) {
     snprintf(port_str, sizeof(port_str), "%d", port);
     snprintf(control_port_str, sizeof(control_port_str), "%d", g_control_port);
 
-    char *argv[] = {
-        (char *)core_bin,
-        "--uri",
-        (char *)uri,
-        "--listen-port",
-        port_str,
-        "--routing",
-        g.routing,
-        "--route-control-port",
-        control_port_str,
-        NULL,
-    };
+    char *argv[12];
+    size_t argc = 0;
+    argv[argc++] = (char *)core_bin;
+    argv[argc++] = "--uri";
+    argv[argc++] = (char *)uri;
+    argv[argc++] = "--listen-port";
+    argv[argc++] = port_str;
+    argv[argc++] = "--routing";
+    argv[argc++] = g.routing;
+    argv[argc++] = "--route-control-port";
+    argv[argc++] = control_port_str;
+    if (xray_version && *xray_version) {
+        argv[argc++] = "--xray-version";
+        argv[argc++] = (char *)xray_version;
+    }
+    argv[argc] = NULL;
 
     return spawn_logged(core_bin, argv, pid_out);
 }
@@ -2173,7 +2185,8 @@ static void finish_failed_protected_connect(void) {
     g.protect_logs = 0;
 }
 
-static int connect_all(const char *uri, int requested_port, int protect_logs, char *msg, size_t msg_cap) {
+static int connect_all(const char *uri, const char *xray_version, int requested_port,
+                       int protect_logs, char *msg, size_t msg_cap) {
     if (g.connected) {
         if (g.protect_logs != (protect_logs ? 1 : 0)) {
             snprintf(msg, msg_cap, "ERR already connected with different log protection");
@@ -2187,6 +2200,9 @@ static int connect_all(const char *uri, int requested_port, int protect_logs, ch
     g.protect_logs = protect_logs ? 1 : 0;
     if (g.protect_logs) {
         clear_logs();
+    }
+    if (xray_version && *xray_version) {
+        log_msg("Xray version spoof enabled: %s", xray_version);
     }
 
     int port = pick_port(requested_port);
@@ -2220,7 +2236,7 @@ static int connect_all(const char *uri, int requested_port, int protect_logs, ch
 
     log_msg("resolved server host %s -> %s in %lldms", host, g.server_ips, now_ms() - resolve_start_ms);
 
-    if (spawn_core(uri, port, &g.core_pid) != 0) {
+    if (spawn_core(uri, xray_version, port, &g.core_pid) != 0) {
         snprintf(msg, msg_cap, "ERR failed to start vless-core binary");
         disconnect_all();
         return -1;
@@ -2314,14 +2330,27 @@ static void handle_client(int cfd) {
             *tab = '\0';
             int port = atoi(p);
 
-            char *uri = tab + 1;
-            char *nl = strchr(uri, '\n');
+            char *payload = tab + 1;
+            char *nl = strchr(payload, '\n');
             if (nl) *nl = '\0';
 
-            if (!is_supported_config_uri(uri)) {
+            char *xray_version = NULL;
+            char *uri = payload;
+            if (!is_supported_config_uri(payload)) {
+                char *version_tab = strchr(payload, '\t');
+                if (version_tab) {
+                    *version_tab = '\0';
+                    xray_version = payload;
+                    uri = version_tab + 1;
+                }
+            }
+
+            if (xray_version && !xray_version_valid(xray_version)) {
+                snprintf(reply, sizeof(reply), "ERR invalid Xray version\n");
+            } else if (!is_supported_config_uri(uri)) {
                 snprintf(reply, sizeof(reply), "ERR uri must start with vless:// or socks5://\n");
             } else {
-                connect_all(uri, port, protect_logs, reply, sizeof(reply));
+                connect_all(uri, xray_version, port, protect_logs, reply, sizeof(reply));
                 strncat(reply, "\n", sizeof(reply) - strlen(reply) - 1);
             }
         }
