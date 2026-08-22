@@ -125,7 +125,7 @@ Package uses `gzip` compression for old iOS 6 `dpkg` compatibility.
 ## Runtime paths
 
 - App: `/Applications/vless-core.app`
-- Daemon API: `127.0.0.1:9093`
+- Daemon API: authenticated Unix socket at `/var/run/vpnctld.sock`
 - Core binary: `/usr/bin/vless-core-darwin-armv7`
 - Subscription fetch binary: `/usr/bin/vless-core-curl`
 - CA bundle: `/usr/share/vless-core/cacert.pem`

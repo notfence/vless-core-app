@@ -11,6 +11,7 @@
 #include <sys/types.h>
 #include <sys/time.h>
 #include <sys/select.h>
+#include <sys/un.h>
 #include <netinet/in.h>
 #include <arpa/inet.h>
 #include <netdb.h>
@@ -20,11 +21,13 @@
 #include <string.h>
 #include <math.h>
 #include <limits.h>
+#include <stdint.h>
 #include <stdlib.h>
 #include <stdio.h>
 #include <signal.h>
 #include <sys/wait.h>
 #include <spawn.h>
+#include "../daemon/vpnctld_protocol.h"
 
 extern char **environ;
 
@@ -68,10 +71,7 @@ static NSString *const kDefaultXrayVersion = @"26.3.27";
 static NSString *const kUpdateAPIURL = @"https://api.github.com/repos/notfence/vless-core-app/releases/latest";
 static NSString *const kUpdateReleasesURL = @"https://github.com/notfence/vless-core-app/releases";
 static const NSTimeInterval kAutomaticUpdateCheckInterval = 24.0 * 60.0 * 60.0;
-static const char *kDaemonPortPath = "/var/run/vpnctld.port";
 static NSString *const kImportDirectoryPath = @"/var/mobile/vless-core-import";
-static const int kDaemonDefaultPort = 9093;
-static const int kDaemonPortMax = 9113;
 static const CGFloat kVCMainContentStartY = 246.0f;
 static const CGFloat kVCMainCompactContentStartY = 112.0f;
 
@@ -298,34 +298,6 @@ static int TryBootstrapDaemon(void) {
     return (rc == 0) ? 0 : -1;
 }
 
-static int ReadDaemonPort(void) {
-    FILE *fp = fopen(kDaemonPortPath, "r");
-    if (!fp) return kDaemonDefaultPort;
-
-    int port = 0;
-    if (fscanf(fp, "%d", &port) != 1 || port <= 0 || port > 65535) {
-        port = kDaemonDefaultPort;
-    }
-    fclose(fp);
-    return port;
-}
-
-static int BuildDaemonPortList(int *ports, int cap) {
-    if (!ports || cap <= 0) return 0;
-
-    int count = 0;
-    int preferred = ReadDaemonPort();
-    if (preferred > 0 && preferred <= 65535) {
-        ports[count++] = preferred;
-    }
-
-    for (int p = kDaemonDefaultPort; p <= kDaemonPortMax && count < cap; p++) {
-        if (p == preferred) continue;
-        ports[count++] = p;
-    }
-    return count;
-}
-
 static int ConnectWithTimeout(int fd, const struct sockaddr *sa, socklen_t sa_len, int timeout_ms) {
     int flags = fcntl(fd, F_GETFL, 0);
     if (flags < 0) {
@@ -376,13 +348,8 @@ static int ConnectWithTimeout(int fd, const struct sockaddr *sa, socklen_t sa_le
     return 0;
 }
 
-static int OpenDaemonSocketForPort(int port, const struct timeval *rw_tv, int connect_timeout_ms, int *fd_out, int *last_errno_out) {
-    if (port <= 0 || port > 65535) {
-        if (last_errno_out) *last_errno_out = EINVAL;
-        return -1;
-    }
-
-    int fd = socket(AF_INET, SOCK_STREAM, 0);
+static int OpenDaemonSocket(const struct timeval *rw_tv, int connect_timeout_ms, int *fd_out, int *last_errno_out) {
+    int fd = socket(AF_UNIX, SOCK_STREAM, 0);
     if (fd < 0) {
         if (last_errno_out) *last_errno_out = errno;
         return -1;
@@ -391,13 +358,13 @@ static int OpenDaemonSocketForPort(int port, const struct timeval *rw_tv, int co
     setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, rw_tv, sizeof(*rw_tv));
     setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, rw_tv, sizeof(*rw_tv));
 
-    struct sockaddr_in sa;
+    struct sockaddr_un sa;
     memset(&sa, 0, sizeof(sa));
-    sa.sin_family = AF_INET;
-    sa.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
-    sa.sin_port = htons((uint16_t)port);
+    sa.sun_family = AF_UNIX;
+    snprintf(sa.sun_path, sizeof(sa.sun_path), "%s", VC_DAEMON_SOCKET_PATH);
+    sa.sun_len = (uint8_t)SUN_LEN(&sa);
 
-    if (ConnectWithTimeout(fd, (struct sockaddr *)&sa, (socklen_t)sizeof(sa), connect_timeout_ms) == 0) {
+    if (ConnectWithTimeout(fd, (struct sockaddr *)&sa, (socklen_t)sa.sun_len, connect_timeout_ms) == 0) {
         *fd_out = fd;
         if (last_errno_out) *last_errno_out = 0;
         return 0;
@@ -408,21 +375,38 @@ static int OpenDaemonSocketForPort(int port, const struct timeval *rw_tv, int co
     return -1;
 }
 
-static int ProbeDaemonPort(int port, int connect_timeout_ms, int io_timeout_ms, int *last_errno_out) {
+static int WriteAll(int fd, const void *bytes, size_t length) {
+    const unsigned char *data = (const unsigned char *)bytes;
+    size_t written = 0;
+    while (written < length) {
+        ssize_t count = write(fd, data + written, length - written);
+        if (count < 0) {
+            if (errno == EINTR) continue;
+            return -1;
+        }
+        if (count == 0) {
+            errno = EPIPE;
+            return -1;
+        }
+        written += (size_t)count;
+    }
+    return 0;
+}
+
+static int ProbeDaemon(int connect_timeout_ms, int io_timeout_ms, int *last_errno_out) {
     struct timeval tv;
     tv.tv_sec = io_timeout_ms / 1000;
     tv.tv_usec = (io_timeout_ms % 1000) * 1000;
 
     int fd = -1;
     int last_errno = 0;
-    if (OpenDaemonSocketForPort(port, &tv, connect_timeout_ms, &fd, &last_errno) != 0 || fd < 0) {
+    if (OpenDaemonSocket(&tv, connect_timeout_ms, &fd, &last_errno) != 0 || fd < 0) {
         if (last_errno_out) *last_errno_out = last_errno;
         return -1;
     }
 
     const char probe[] = "STATUS\n";
-    ssize_t wr = write(fd, probe, (size_t)(sizeof(probe) - 1));
-    if (wr < 0) {
+    if (WriteAll(fd, probe, (size_t)(sizeof(probe) - 1)) != 0) {
         last_errno = errno;
         close(fd);
         if (last_errno_out) *last_errno_out = last_errno;
@@ -449,37 +433,15 @@ static int ProbeDaemonPort(int port, int connect_timeout_ms, int io_timeout_ms, 
     return -1;
 }
 
-static int FindResponsiveDaemonPort(int connect_timeout_ms, int io_timeout_ms, int *port_out, int *last_errno_out) {
-    int ports[64];
-    int port_count = BuildDaemonPortList(ports, (int)(sizeof(ports) / sizeof(ports[0])));
-    if (port_count <= 0) {
-        if (last_errno_out) *last_errno_out = EINVAL;
-        return -1;
-    }
-
-    int last_errno = ETIMEDOUT;
-    for (int i = 0; i < port_count; i++) {
-        if (ProbeDaemonPort(ports[i], connect_timeout_ms, io_timeout_ms, &last_errno) == 0) {
-            *port_out = ports[i];
-            if (last_errno_out) *last_errno_out = 0;
-            return 0;
-        }
-    }
-
-    if (last_errno_out) *last_errno_out = last_errno;
-    return -1;
-}
-
-static ssize_t SendRawCommandToPort(int port, NSData *outData, const struct timeval *rw_tv, int connect_timeout_ms, char *buf, size_t buf_cap, int *last_errno_out) {
+static ssize_t SendRawCommand(NSData *outData, const struct timeval *rw_tv, int connect_timeout_ms, char *buf, size_t buf_cap, int *last_errno_out) {
     int fd = -1;
     int last_errno = 0;
-    if (OpenDaemonSocketForPort(port, rw_tv, connect_timeout_ms, &fd, &last_errno) != 0 || fd < 0) {
+    if (OpenDaemonSocket(rw_tv, connect_timeout_ms, &fd, &last_errno) != 0 || fd < 0) {
         if (last_errno_out) *last_errno_out = last_errno;
         return -1;
     }
 
-    ssize_t wr = write(fd, [outData bytes], [outData length]);
-    if (wr < 0) {
+    if (WriteAll(fd, [outData bytes], [outData length]) != 0) {
         last_errno = errno;
         close(fd);
         if (last_errno_out) *last_errno_out = last_errno;
@@ -517,10 +479,11 @@ static NSString *SendCommand(NSString *cmdLine) {
             (void)TryBootstrapDaemon();
         }
 
-        int port = -1;
+        BOOL daemonReady = NO;
         int ready_attempts = (phase == 1) ? 10 : 1;
         for (int attempt = 0; attempt < ready_attempts; attempt++) {
-            if (FindResponsiveDaemonPort(250, 300, &port, &last_errno) == 0 && port > 0) {
+            if (ProbeDaemon(250, 300, &last_errno) == 0) {
+                daemonReady = YES;
                 break;
             }
             if (attempt + 1 < ready_attempts) {
@@ -528,12 +491,12 @@ static NSString *SendCommand(NSString *cmdLine) {
             }
         }
 
-        if (port <= 0) {
+        if (!daemonReady) {
             continue;
         }
 
         char buf[65536];
-        ssize_t rd = SendRawCommandToPort(port, outData, &cmd_tv, 500, buf, sizeof(buf), &last_errno);
+        ssize_t rd = SendRawCommand(outData, &cmd_tv, 500, buf, sizeof(buf), &last_errno);
         if (rd > 0) {
             return [NSString stringWithUTF8String:buf];
         }

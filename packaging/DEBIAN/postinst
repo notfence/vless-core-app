@@ -22,14 +22,14 @@ done
 chmod 4755 /usr/bin/vpnctld-bootstrap || true
 launchctl unload /Library/LaunchDaemons/com.vlesscore.vpnctld.plist >/dev/null 2>&1 || true
 killall vpnctld >/dev/null 2>&1 || true
-rm -f /var/run/vpnctld.port >/dev/null 2>&1 || true
+rm -f /var/run/vpnctld.port /var/run/vpnctld.sock >/dev/null 2>&1 || true
 rm -f /Library/MobileSubstrate/DynamicLibraries/vlesscorevpnicon.dylib \
       /Library/MobileSubstrate/DynamicLibraries/vlesscorevpnicon.plist \
       /var/mobile/Library/Preferences/com.vlesscore.vpnicon.state \
       /var/mobile/Library/vlesscore-vpnicon.log || true
 launchctl load /Library/LaunchDaemons/com.vlesscore.vpnctld.plist >/dev/null 2>&1 || true
 sleep 1
-if [ ! -s /var/run/vpnctld.port ]; then
+if [ ! -S /var/run/vpnctld.sock ]; then
   (/usr/bin/vpnctld >>/var/log/vpnctld.log 2>&1 </dev/null &)
   sleep 1
 fi

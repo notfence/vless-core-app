@@ -1,51 +1,22 @@
 #define _POSIX_C_SOURCE 200809L
+#define _DARWIN_C_SOURCE 1
 
-#include <arpa/inet.h>
 #include <errno.h>
 #include <fcntl.h>
 #include <spawn.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <stdint.h>
 #include <string.h>
-#include <netinet/in.h>
 #include <sys/select.h>
 #include <sys/socket.h>
 #include <sys/types.h>
+#include <sys/un.h>
 #include <unistd.h>
 
+#include "vpnctld_protocol.h"
+
 extern char **environ;
-
-static const char *kDaemonPortPath = "/var/run/vpnctld.port";
-static const int kDaemonDefaultPort = 9093;
-static const int kDaemonPortMax = 9113;
-
-static int read_daemon_port(void) {
-    FILE *fp = fopen(kDaemonPortPath, "r");
-    if (!fp) return kDaemonDefaultPort;
-
-    int port = 0;
-    if (fscanf(fp, "%d", &port) != 1 || port <= 0 || port > 65535) {
-        port = kDaemonDefaultPort;
-    }
-    fclose(fp);
-    return port;
-}
-
-static int build_daemon_port_list(int *ports, int cap) {
-    if (!ports || cap <= 0) return 0;
-
-    int count = 0;
-    int preferred = read_daemon_port();
-    if (preferred > 0 && preferred <= 65535) {
-        ports[count++] = preferred;
-    }
-
-    for (int p = kDaemonDefaultPort; p <= kDaemonPortMax && count < cap; p++) {
-        if (p == preferred) continue;
-        ports[count++] = p;
-    }
-    return count;
-}
 
 static int connect_with_timeout(int fd, const struct sockaddr *sa, socklen_t sa_len, int timeout_ms) {
     int flags = fcntl(fd, F_GETFL, 0);
@@ -94,50 +65,39 @@ static int connect_with_timeout(int fd, const struct sockaddr *sa, socklen_t sa_
 }
 
 static int daemon_online(void) {
-    int ports[64];
-    int port_count = build_daemon_port_list(ports, (int)(sizeof(ports) / sizeof(ports[0])));
+    int fd = socket(AF_UNIX, SOCK_STREAM, 0);
+    if (fd < 0) return 0;
 
-    for (int i = 0; i < port_count; i++) {
-        int fd = socket(AF_INET, SOCK_STREAM, 0);
-        if (fd < 0) continue;
+    struct sockaddr_un sa;
+    memset(&sa, 0, sizeof(sa));
+    sa.sun_family = AF_UNIX;
+    snprintf(sa.sun_path, sizeof(sa.sun_path), "%s", VC_DAEMON_SOCKET_PATH);
+    sa.sun_len = (uint8_t)SUN_LEN(&sa);
 
-        struct sockaddr_in sa;
-        memset(&sa, 0, sizeof(sa));
-        sa.sin_family = AF_INET;
-        sa.sin_addr.s_addr = inet_addr("127.0.0.1");
-        sa.sin_port = htons((uint16_t)ports[i]);
-
-        if (connect_with_timeout(fd, (struct sockaddr *)&sa, (socklen_t)sizeof(sa), 300) != 0) {
-            close(fd);
-            continue;
-        }
-
-        struct timeval tv;
-        tv.tv_sec = 1;
-        tv.tv_usec = 0;
-        (void)setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
-        (void)setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv));
-
-        const char probe[] = "STATUS\n";
-        ssize_t wr = write(fd, probe, (size_t)(sizeof(probe) - 1));
-        if (wr < 0) {
-            close(fd);
-            continue;
-        }
-
-        char reply[64];
-        ssize_t rd = read(fd, reply, sizeof(reply) - 1);
+    if (connect_with_timeout(fd, (struct sockaddr *)&sa, (socklen_t)sa.sun_len, 300) != 0) {
         close(fd);
-        if (rd <= 0) {
-            continue;
-        }
-
-        reply[rd] = '\0';
-        if (strncmp(reply, "OK ", 3) == 0) {
-            return 1;
-        }
+        return 0;
     }
-    return 0;
+
+    struct timeval tv;
+    tv.tv_sec = 1;
+    tv.tv_usec = 0;
+    (void)setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
+    (void)setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv));
+
+    const char probe[] = "STATUS\n";
+    if (write(fd, probe, (size_t)(sizeof(probe) - 1)) < 0) {
+        close(fd);
+        return 0;
+    }
+
+    char reply[64];
+    ssize_t rd = read(fd, reply, sizeof(reply) - 1);
+    close(fd);
+    if (rd <= 0) return 0;
+
+    reply[rd] = '\0';
+    return strncmp(reply, "OK ", 3) == 0;
 }
 
 static int spawn_direct_daemon(void) {

@@ -1,4 +1,5 @@
 #define _POSIX_C_SOURCE 200809L
+#define _DARWIN_C_SOURCE 1
 
 #include <arpa/inet.h>
 #include <ctype.h>
@@ -19,12 +20,15 @@
 #include <fcntl.h>
 #include <sys/socket.h>
 #include <sys/stat.h>
+#include <sys/sysctl.h>
 #include <sys/time.h>
 #include <sys/types.h>
+#include <sys/un.h>
 #include <sys/wait.h>
 #include <unistd.h>
 
 #include "vpnicon_statusbar.h"
+#include "vpnctld_protocol.h"
 
 extern char **environ;
 
@@ -57,14 +61,17 @@ typedef struct {
 } vpn_state_t;
 
 static vpn_state_t g;
-static const char *kDaemonPortPath = "/var/run/vpnctld.port";
-static const int kDaemonPortDefault = 9093;
-static const int kDaemonPortMax = 9113;
 static const int kConnectResolveTimeoutMs = 8000;
 static volatile sig_atomic_t g_terminate = 0;
 static int g_listen_fd = -1;
-static int g_control_port = 0;
 static int g_vpn_icon_publisher_logged = 0;
+
+typedef enum {
+    CONTROL_CLIENT_UNAUTHORIZED = 0,
+    CONTROL_CLIENT_APP = 1,
+    CONTROL_CLIENT_BOOTSTRAP = 2,
+    CONTROL_CLIENT_CORE = 3,
+} control_client_t;
 
 static void stop_pid(pid_t *p);
 static void truncate_log_file(const char *path);
@@ -254,6 +261,65 @@ static int find_cmd_path(const char *cmd, char *out, size_t out_cap) {
 static int path_exists(const char *path) {
     struct stat st;
     return stat(path, &st) == 0;
+}
+
+static int process_executable_path(pid_t pid, char *path, size_t path_cap) {
+    if (pid <= 0 || !path || path_cap == 0) return -1;
+
+    int argmax_mib[2] = { CTL_KERN, KERN_ARGMAX };
+    int argmax = 0;
+    size_t argmax_size = sizeof(argmax);
+    if (sysctl(argmax_mib, 2, &argmax, &argmax_size, NULL, 0) != 0 ||
+        argmax <= (int)sizeof(int) || argmax > 1024 * 1024) {
+        return -1;
+    }
+
+    char *arguments = (char *)calloc(1, (size_t)argmax);
+    if (!arguments) return -1;
+
+    int process_mib[3] = { CTL_KERN, KERN_PROCARGS2, pid };
+    size_t arguments_size = (size_t)argmax;
+    int rc = sysctl(process_mib, 3, arguments, &arguments_size, NULL, 0);
+    if (rc != 0 || arguments_size <= sizeof(int)) {
+        free(arguments);
+        return -1;
+    }
+
+    const char *executable = arguments + sizeof(int);
+    size_t available = arguments_size - sizeof(int);
+    const char *terminator = (const char *)memchr(executable, '\0', available);
+    if (!terminator) {
+        free(arguments);
+        return -1;
+    }
+
+    size_t length = (size_t)(terminator - executable);
+    if (length == 0 || length >= path_cap) {
+        free(arguments);
+        return -1;
+    }
+    memcpy(path, executable, length);
+    path[length] = '\0';
+    free(arguments);
+    return 0;
+}
+
+static control_client_t control_client_type(int client_fd) {
+    pid_t peer_pid = 0;
+    socklen_t peer_pid_size = (socklen_t)sizeof(peer_pid);
+    if (getsockopt(client_fd, SOL_LOCAL, LOCAL_PEERPID, &peer_pid, &peer_pid_size) != 0 ||
+        peer_pid_size != sizeof(peer_pid) || peer_pid <= 0) {
+        return CONTROL_CLIENT_UNAUTHORIZED;
+    }
+
+    char executable[PATH_MAX];
+    if (process_executable_path(peer_pid, executable, sizeof(executable)) != 0) {
+        return CONTROL_CLIENT_UNAUTHORIZED;
+    }
+    if (strcmp(executable, VC_APP_EXECUTABLE_PATH) == 0) return CONTROL_CLIENT_APP;
+    if (strcmp(executable, VC_BOOTSTRAP_EXECUTABLE_PATH) == 0) return CONTROL_CLIENT_BOOTSTRAP;
+    if (strcmp(executable, VC_CORE_EXECUTABLE_PATH) == 0) return CONTROL_CLIENT_CORE;
+    return CONTROL_CLIENT_UNAUTHORIZED;
 }
 
 static const char *mode_name(vpn_mode_t mode) {
@@ -910,9 +976,7 @@ static int spawn_core(const char *uri, const char *xray_version, int port, pid_t
     if (!core_bin) return -2;
 
     char port_str[16];
-    char control_port_str[16];
     snprintf(port_str, sizeof(port_str), "%d", port);
-    snprintf(control_port_str, sizeof(control_port_str), "%d", g_control_port);
 
     char *argv[12];
     size_t argc = 0;
@@ -923,8 +987,8 @@ static int spawn_core(const char *uri, const char *xray_version, int port, pid_t
     argv[argc++] = port_str;
     argv[argc++] = "--routing";
     argv[argc++] = g.routing;
-    argv[argc++] = "--route-control-port";
-    argv[argc++] = control_port_str;
+    argv[argc++] = "--route-control-socket";
+    argv[argc++] = VC_DAEMON_SOCKET_PATH;
     if (xray_version && *xray_version) {
         argv[argc++] = "--xray-version";
         argv[argc++] = (char *)xray_version;
@@ -1340,51 +1404,40 @@ static void update_vpn_icon_state(int enabled) {
     }
 }
 
-static void write_daemon_port_file(int port) {
-    int fd = open(kDaemonPortPath, O_WRONLY | O_CREAT | O_TRUNC, 0644);
-    if (fd < 0) {
-        log_msg("cannot write %s errno=%d", kDaemonPortPath, errno);
-        return;
-    }
-
-    char buf[32];
-    int n = snprintf(buf, sizeof(buf), "%d\n", port);
-    if (n > 0) {
-        (void)write(fd, buf, (size_t)n);
-    }
-    close(fd);
-}
-
-static int try_bind_listen(int port, int *lfd_out) {
-    int lfd = socket(AF_INET, SOCK_STREAM, 0);
+static int bind_control_socket(void) {
+    int lfd = socket(AF_UNIX, SOCK_STREAM, 0);
     if (lfd < 0) {
-        log_msg("socket() failed errno=%d", errno);
+        log_msg("control socket() failed errno=%d", errno);
         return -1;
     }
 
-    int one = 1;
-    (void)setsockopt(lfd, SOL_SOCKET, SO_REUSEADDR, &one, sizeof(one));
-
-    struct sockaddr_in sa;
+    struct sockaddr_un sa;
     memset(&sa, 0, sizeof(sa));
-    sa.sin_family = AF_INET;
-    sa.sin_addr.s_addr = inet_addr("127.0.0.1");
-    sa.sin_port = htons((uint16_t)port);
+    sa.sun_family = AF_UNIX;
+    snprintf(sa.sun_path, sizeof(sa.sun_path), "%s", VC_DAEMON_SOCKET_PATH);
+    sa.sun_len = (uint8_t)SUN_LEN(&sa);
+    unlink(VC_DAEMON_SOCKET_PATH);
 
-    if (bind(lfd, (struct sockaddr *)&sa, sizeof(sa)) != 0) {
-        log_msg("bind(127.0.0.1:%d) failed errno=%d", port, errno);
+    if (bind(lfd, (struct sockaddr *)&sa, (socklen_t)sa.sun_len) != 0) {
+        log_msg("bind(%s) failed errno=%d", VC_DAEMON_SOCKET_PATH, errno);
         close(lfd);
+        return -1;
+    }
+    if (chmod(VC_DAEMON_SOCKET_PATH, 0666) != 0) {
+        log_msg("chmod(%s) failed errno=%d", VC_DAEMON_SOCKET_PATH, errno);
+        close(lfd);
+        unlink(VC_DAEMON_SOCKET_PATH);
         return -1;
     }
 
     if (listen(lfd, 16) != 0) {
-        log_msg("listen(%d) failed errno=%d", port, errno);
+        log_msg("listen(%s) failed errno=%d", VC_DAEMON_SOCKET_PATH, errno);
         close(lfd);
+        unlink(VC_DAEMON_SOCKET_PATH);
         return -1;
     }
 
-    *lfd_out = lfd;
-    return 0;
+    return lfd;
 }
 
 static void stop_pid(pid_t *p) {
@@ -2018,7 +2071,7 @@ static int connect_all(const char *uri, const char *xray_version, int requested_
     return -1;
 }
 
-static void handle_client(int cfd) {
+static void handle_client(int cfd, control_client_t client_type) {
     char buf[sizeof(g.routing) + 32];
     ssize_t n = read(cfd, buf, sizeof(buf) - 1);
     if (n <= 0) {
@@ -2028,6 +2081,19 @@ static void handle_client(int cfd) {
 
     char reply[512];
     memset(reply, 0, sizeof(reply));
+
+    if (client_type == CONTROL_CLIENT_BOOTSTRAP && strncmp(buf, "STATUS", 6) != 0) {
+        snprintf(reply, sizeof(reply), "ERR unauthorized command\n");
+        write(cfd, reply, strlen(reply));
+        return;
+    }
+    if (client_type == CONTROL_CLIENT_CORE &&
+        strncmp(buf, "ROUTE_DIRECT_ADD\t", 17) != 0 &&
+        strncmp(buf, "ROUTE_DIRECT_REMOVE\t", 20) != 0) {
+        snprintf(reply, sizeof(reply), "ERR unauthorized command\n");
+        write(cfd, reply, strlen(reply));
+        return;
+    }
 
     if (strncmp(buf, "STATUS", 6) == 0) {
         if (g.connected) {
@@ -2123,27 +2189,13 @@ int main(void) {
     g.routing_bypass_lan = 1;
     update_vpn_icon_state(0);
 
-    int lfd = -1;
-    int bound_port = 0;
-    for (int port = kDaemonPortDefault; port <= kDaemonPortMax; port++) {
-        if (try_bind_listen(port, &lfd) == 0) {
-            bound_port = port;
-            break;
-        }
-    }
+    int lfd = bind_control_socket();
     if (lfd < 0) {
-        log_msg("fatal: cannot bind daemon API port range %d-%d", kDaemonPortDefault, kDaemonPortMax);
+        log_msg("fatal: cannot bind daemon control socket");
         return 1;
     }
     g_listen_fd = lfd;
-    g_control_port = bound_port;
-
-    if (bound_port != kDaemonPortDefault) {
-        log_msg("daemon API moved to fallback port=%d", bound_port);
-    } else {
-        log_msg("daemon API listening on default port=%d", bound_port);
-    }
-    write_daemon_port_file(bound_port);
+    log_msg("daemon control socket ready");
 
     for (;;) {
         if (g_terminate) break;
@@ -2154,12 +2206,25 @@ int main(void) {
             break;
         }
 
-        handle_client(cfd);
+        control_client_t client_type = control_client_type(cfd);
+        if (client_type == CONTROL_CLIENT_UNAUTHORIZED) {
+            static const char denied[] = "ERR unauthorized client\n";
+            (void)write(cfd, denied, sizeof(denied) - 1);
+            close(cfd);
+            continue;
+        }
+
+        struct timeval timeout;
+        timeout.tv_sec = 2;
+        timeout.tv_usec = 0;
+        (void)setsockopt(cfd, SOL_SOCKET, SO_RCVTIMEO, &timeout, sizeof(timeout));
+        (void)setsockopt(cfd, SOL_SOCKET, SO_SNDTIMEO, &timeout, sizeof(timeout));
+        handle_client(cfd, client_type);
         close(cfd);
     }
 
     disconnect_all();
-    unlink(kDaemonPortPath);
+    unlink(VC_DAEMON_SOCKET_PATH);
     if (lfd >= 0) {
         close(lfd);
     }

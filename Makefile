@@ -54,8 +54,9 @@ ZBAR_OBJ := $(patsubst $(ZBAR_DIR)/%.c,$(BUILD_DIR)/zbar/%.o,$(ZBAR_SRC))
 ZBAR_LIB := $(BUILD_DIR)/libzbar-qr.a
 
 APP_SRC := app/main.m integrations/happ/happ_crypto.c integrations/karing/karing_backup.m
-APP_HEADERS := integrations/happ/happ_crypto.h integrations/karing/karing_backup.h
+APP_HEADERS := integrations/happ/happ_crypto.h integrations/karing/karing_backup.h daemon/vpnctld_protocol.h
 DAEMON_SRC := daemon/vpnctld.c daemon/vpnicon_statusbar.c
+DAEMON_HEADERS := daemon/vpnctld_protocol.h
 BOOTSTRAP_SRC := daemon/vpnctld_bootstrap.c
 
 APP_CFLAGS := -fno-objc-arc -Wall -Wextra -O2 -arch armv7 -miphoneos-version-min=6.0 -isysroot $(IOS_SDK) -Iintegrations/happ -Iintegrations/karing -I$(ZBAR_DIR) -I$(OPENSSL_IOS_INCLUDE)
@@ -111,11 +112,11 @@ $(APP_BIN): check-ios-toolchain $(APP_SRC) $(APP_HEADERS) $(ZBAR_LIB)
 	mkdir -p $(BUILD_DIR)
 	PATH="$(IOS_BIN):$$PATH" $(IOS_RUNTIME_ENV) $(IOS_CC) $(APP_CFLAGS) $(APP_SRC) $(ZBAR_LIB) -o $@ $(APP_LDFLAGS)
 
-$(DAEMON_BIN): check-ios-toolchain $(DAEMON_SRC)
+$(DAEMON_BIN): check-ios-toolchain $(DAEMON_SRC) $(DAEMON_HEADERS)
 	mkdir -p $(BUILD_DIR)
 	PATH="$(IOS_BIN):$$PATH" $(IOS_RUNTIME_ENV) $(IOS_CC) $(DAEMON_CFLAGS) $(DAEMON_SRC) -o $@
 
-$(BOOTSTRAP_BIN): check-ios-toolchain $(BOOTSTRAP_SRC)
+$(BOOTSTRAP_BIN): check-ios-toolchain $(BOOTSTRAP_SRC) $(DAEMON_HEADERS)
 	mkdir -p $(BUILD_DIR)
 	PATH="$(IOS_BIN):$$PATH" $(IOS_RUNTIME_ENV) $(IOS_CC) $(DAEMON_CFLAGS) $(BOOTSTRAP_SRC) -o $@
 
