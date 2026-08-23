@@ -72,6 +72,9 @@ static NSString *const kUpdateAPIURL = @"https://api.github.com/repos/notfence/v
 static NSString *const kUpdateReleasesURL = @"https://github.com/notfence/vless-core-app/releases";
 static const NSTimeInterval kAutomaticUpdateCheckInterval = 24.0 * 60.0 * 60.0;
 static NSString *const kImportDirectoryPath = @"/var/mobile/vless-core-import";
+static const NSUInteger kVCMaximumConfigURIBytes = 4095;
+static const NSUInteger kVCMaximumConfigQueryParameters = 128;
+static const NSUInteger kVCMaximumConfigQueryKeyBytes = 127;
 static const CGFloat kVCMainContentStartY = 246.0f;
 static const CGFloat kVCMainCompactContentStartY = 112.0f;
 
@@ -79,6 +82,12 @@ static CGFloat VCClampUnit(CGFloat value) {
     if (value < 0.0f) return 0.0f;
     if (value > 1.0f) return 1.0f;
     return value;
+}
+
+static BOOL VCIsASCIIHexDigit(unichar value) {
+    return (value >= '0' && value <= '9') ||
+           (value >= 'a' && value <= 'f') ||
+           (value >= 'A' && value <= 'F');
 }
 
 static CGRect VCInterpolateRect(CGRect from, CGRect to, CGFloat progress) {
@@ -6423,6 +6432,115 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
     return [self safeTrim:decoded];
 }
 
+- (NSString *)strictDecodedConfigQueryComponent:(NSString *)component {
+    if (![component isKindOfClass:[NSString class]]) return nil;
+
+    NSUInteger length = [component length];
+    for (NSUInteger i = 0; i < length; i++) {
+        if ([component characterAtIndex:i] != '%') continue;
+        if (i + 2 >= length ||
+            !VCIsASCIIHexDigit([component characterAtIndex:(i + 1)]) ||
+            !VCIsASCIIHexDigit([component characterAtIndex:(i + 2)])) {
+            return nil;
+        }
+        i += 2;
+    }
+
+    NSString *escaped = [component stringByReplacingOccurrencesOfString:@"+" withString:@"%20"];
+    NSString *decoded = [escaped stringByReplacingPercentEscapesUsingEncoding:NSUTF8StringEncoding];
+    if (![decoded isKindOfClass:[NSString class]]) return nil;
+    for (NSUInteger i = 0; i < [decoded length]; i++) {
+        unichar value = [decoded characterAtIndex:i];
+        if (value < 0x20 || value == 0x7f) return nil;
+    }
+    return decoded;
+}
+
+- (NSString *)canonicalConfigQueryKey:(NSString *)encodedKey {
+    NSString *decoded = [self strictDecodedConfigQueryComponent:encodedKey];
+    NSData *bytes = [decoded dataUsingEncoding:NSUTF8StringEncoding];
+    if (![decoded isKindOfClass:[NSString class]] || [decoded length] == 0 ||
+        !bytes || [bytes length] > kVCMaximumConfigQueryKeyBytes) {
+        return nil;
+    }
+
+    for (NSUInteger i = 0; i < [decoded length]; i++) {
+        unichar c = [decoded characterAtIndex:i];
+        if (c <= 0x20 || c >= 0x7f || c == '&' || c == '=' || c == '#') return nil;
+    }
+
+    NSString *key = [decoded lowercaseString];
+    if ([key isEqualToString:@"type"] || [key isEqualToString:@"network"] ||
+        [key isEqualToString:@"transport"] || [key isEqualToString:@"net"]) {
+        return @"transport";
+    }
+    if ([key isEqualToString:@"allowinsecure"] || [key isEqualToString:@"insecure"]) {
+        return @"allowinsecure";
+    }
+    if ([key isEqualToString:@"servicename"] || [key isEqualToString:@"service_name"]) {
+        return @"servicename";
+    }
+    if ([key isEqualToString:@"xpaddingbytes"] || [key isEqualToString:@"x_padding_bytes"]) {
+        return @"xpaddingbytes";
+    }
+    if ([key isEqualToString:@"scmaxeachpostbytes"] || [key isEqualToString:@"sc_max_each_post_bytes"]) {
+        return @"scmaxeachpostbytes";
+    }
+    return key;
+}
+
+- (NSString *)configURIQueryValidationReason:(NSString *)uri {
+    if (![uri isKindOfClass:[NSString class]] || [uri length] == 0) {
+        return @"empty configuration URI";
+    }
+
+    NSData *uriBytes = [uri dataUsingEncoding:NSUTF8StringEncoding];
+    if (!uriBytes || [uriBytes length] > kVCMaximumConfigURIBytes) {
+        return @"configuration URI is too long";
+    }
+    if (![[self schemeFromURIString:uri] isEqualToString:@"vless"]) return nil;
+
+    NSRange question = [uri rangeOfString:@"?"];
+    NSRange fragment = [uri rangeOfString:@"#"];
+    if (question.location == NSNotFound ||
+        (fragment.location != NSNotFound && question.location > fragment.location) ||
+        question.location + 1 >= [uri length]) {
+        return nil;
+    }
+    NSUInteger queryEnd = fragment.location == NSNotFound ? [uri length] : fragment.location;
+    NSString *query = [uri substringWithRange:NSMakeRange(question.location + 1,
+                                                           queryEnd - question.location - 1)];
+    if ([query length] == 0) return nil;
+
+    NSArray *pairs = [query componentsSeparatedByString:@"&"];
+    if ([pairs count] > kVCMaximumConfigQueryParameters) return @"too many query parameters";
+
+    NSMutableSet *seen = [NSMutableSet setWithCapacity:[pairs count]];
+    for (id object in pairs) {
+        if (![object isKindOfClass:[NSString class]] || [(NSString *)object length] == 0) {
+            return @"invalid query parameter";
+        }
+        NSString *pair = (NSString *)object;
+        NSRange equals = [pair rangeOfString:@"="];
+        if (equals.location == NSNotFound || equals.location == 0) {
+            return @"invalid query parameter";
+        }
+
+        NSString *key = [self canonicalConfigQueryKey:[pair substringToIndex:equals.location]];
+        if (![key isKindOfClass:[NSString class]] || [key length] == 0) {
+            return @"invalid query parameter name";
+        }
+        if ([seen containsObject:key]) return @"duplicate query parameter";
+        [seen addObject:key];
+
+        NSString *value = [pair substringFromIndex:(equals.location + 1)];
+        if (![self strictDecodedConfigQueryComponent:value]) {
+            return @"invalid query parameter encoding";
+        }
+    }
+    return nil;
+}
+
 - (NSString *)queryValueForURLString:(NSString *)urlString key:(NSString *)key {
     if (![urlString isKindOfClass:[NSString class]] || [urlString length] == 0) return nil;
     if (![key isKindOfClass:[NSString class]] || [key length] == 0) return nil;
@@ -6437,7 +6555,8 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
     }
 
     NSArray *pairs = [query componentsSeparatedByString:@"&"];
-    NSString *wanted = [[self decodedURLComponent:key] lowercaseString];
+    NSString *wanted = [self canonicalConfigQueryKey:key];
+    if ([wanted length] == 0) return nil;
     for (NSString *pair in pairs) {
         if (![pair isKindOfClass:[NSString class]] || [pair length] == 0) continue;
 
@@ -6452,10 +6571,11 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
             rawValue = [pair substringFromIndex:(eq.location + 1)];
         }
 
-        NSString *decodedKey = [[self decodedURLComponent:rawKey] lowercaseString];
+        NSString *decodedKey = [self canonicalConfigQueryKey:rawKey];
         if (![decodedKey isEqualToString:wanted]) continue;
 
-        NSString *decodedValue = [self decodedURLComponent:rawValue];
+        NSString *decodedValue = [self strictDecodedConfigQueryComponent:rawValue];
+        decodedValue = [self safeTrim:decodedValue];
         if ([decodedValue length] > 0) return decodedValue;
     }
 
@@ -7297,6 +7417,9 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
 }
 
 - (NSString *)unsupportedConfigReasonForURI:(NSString *)uri {
+    NSString *queryReason = [self configURIQueryValidationReason:uri];
+    if ([queryReason length] > 0) return queryReason;
+
     NSString *scheme = [[self schemeFromURIString:uri] lowercaseString];
     NSString *transport = [[self transportTypeFromURI:uri] lowercaseString];
     NSString *security = [[self securityTypeFromURI:uri] lowercaseString];
@@ -9621,6 +9744,10 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
         [self showStatus:@"Invalid configuration link" ok:NO];
         return;
     }
+    if (![self isSupportedConfigTupleForURI:normalizedURI]) {
+        [self showStatus:[self unsupportedConfigStatusTextForURI:normalizedURI] ok:NO];
+        return;
+    }
 
     NSInteger existing = [self existingConfigIndexForURI:normalizedURI];
     if (existing >= 0) {
@@ -9929,6 +10056,10 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
             }
 
             if ([self isDirectConfigURI:importLink]) {
+                if (![self isSupportedConfigTupleForURI:importLink]) {
+                    skippedConfigs++;
+                    continue;
+                }
                 if ([self existingConfigIndexForURI:importLink] >= 0) {
                     skippedConfigs++;
                     continue;
