@@ -7856,83 +7856,6 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
     return @"Error: TOFU pin mismatch (clear old entry in xhttp-pins.txt)";
 }
 
-- (BOOL)removeXHTTPPinKey:(NSString *)pinKey fromFile:(NSString *)path removed:(BOOL *)removedOut {
-    if (removedOut) *removedOut = NO;
-    if (![pinKey isKindOfClass:[NSString class]] || [pinKey length] == 0) return NO;
-    if (![path isKindOfClass:[NSString class]] || [path length] == 0) return NO;
-
-    NSString *content = ReadTextFileBestEffort(path);
-    if (![content isKindOfClass:[NSString class]]) {
-        return YES;
-    }
-
-    NSArray *lines = [content componentsSeparatedByString:@"\n"];
-    NSMutableArray *kept = [NSMutableArray arrayWithCapacity:[lines count]];
-    NSCharacterSet *ws = [NSCharacterSet whitespaceCharacterSet];
-    NSCharacterSet *trimSet = [NSCharacterSet whitespaceAndNewlineCharacterSet];
-    NSString *lowerPinKey = [pinKey lowercaseString];
-    BOOL removed = NO;
-
-    for (NSString *line in lines) {
-        if (![line isKindOfClass:[NSString class]]) continue;
-
-        NSString *trimmed = [line stringByTrimmingCharactersInSet:trimSet];
-        if ([trimmed length] == 0 || [trimmed hasPrefix:@"#"]) {
-            [kept addObject:line];
-            continue;
-        }
-
-        NSRange wsRange = [trimmed rangeOfCharacterFromSet:ws];
-        NSString *lineKey = (wsRange.location == NSNotFound) ? trimmed : [trimmed substringToIndex:wsRange.location];
-        if ([[lineKey lowercaseString] isEqualToString:lowerPinKey]) {
-            removed = YES;
-            continue;
-        }
-
-        [kept addObject:line];
-    }
-
-    if (!removed) {
-        return YES;
-    }
-
-    NSString *newContent = [kept componentsJoinedByString:@"\n"];
-    if ([content hasSuffix:@"\n"] && ![newContent hasSuffix:@"\n"]) {
-        newContent = [newContent stringByAppendingString:@"\n"];
-    }
-
-    BOOL ok = [newContent writeToFile:path atomically:YES encoding:NSUTF8StringEncoding error:nil];
-    if (!ok) {
-        ok = [newContent writeToFile:path atomically:YES encoding:NSISOLatin1StringEncoding error:nil];
-    }
-    if (ok && removedOut) *removedOut = YES;
-    return ok;
-}
-
-- (BOOL)clearXHTTPPinForURI:(NSString *)uri removedAny:(BOOL *)removedAnyOut {
-    if (removedAnyOut) *removedAnyOut = NO;
-
-    NSString *pinKey = [self xhttpPinKeyFromURI:uri];
-    if (![pinKey isKindOfClass:[NSString class]] || [pinKey length] == 0) return NO;
-
-    NSArray *paths = [NSArray arrayWithObjects:
-                      @"/var/mobile/Library/Preferences/vless-core/xhttp-pins.txt",
-                      @"/tmp/vless-core-xhttp-pins.txt",
-                      nil];
-
-    BOOL anyRemoved = NO;
-    for (NSString *path in paths) {
-        BOOL removed = NO;
-        if (![self removeXHTTPPinKey:pinKey fromFile:path removed:&removed]) {
-            return NO;
-        }
-        if (removed) anyRemoved = YES;
-    }
-
-    if (removedAnyOut) *removedAnyOut = anyRemoved;
-    return YES;
-}
-
 - (NSInteger)socksPortFromDaemonStatusText:(NSString *)statusText {
     if (![statusText isKindOfClass:[NSString class]] || [statusText length] == 0) return -1;
     NSRange marker = [statusText rangeOfString:@"socks="];
@@ -8002,20 +7925,6 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
         return;
     }
 
-    NSString *uri = [payload objectForKey:@"uri"];
-    if (![uri isKindOfClass:[NSString class]] || [uri length] == 0) {
-        [self showStatus:reason ok:NO];
-        return;
-    }
-
-    BOOL removedAny = NO;
-    BOOL clearOK = [self clearXHTTPPinForURI:uri removedAny:&removedAny];
-    if (!clearOK) {
-        [self showStatus:[NSString stringWithFormat:@"%@ (auto-fix failed: pin file write error)", reason] ok:NO];
-        return;
-    }
-
-    BOOL protectLogs = _connectedWithProtectedLogs;
     NSString *discResp = [self sanitizeDaemonText:SendCommand(@"DISCONNECT\n")];
     if (![discResp hasPrefix:@"OK"]) {
         [self showStatus:[NSString stringWithFormat:@"%@ (disconnect failed: %@)", reason, discResp] ok:NO];
@@ -8025,28 +7934,7 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
     _connectedWithProtectedLogs = NO;
     [self stopUptimeTimer];
     [self updateConnectButton];
-
-    NSString *routingResp = [self sanitizeDaemonText:SyncRoutingPolicyToDaemon()];
-    if (![routingResp hasPrefix:@"OK"]) {
-        [self showStatus:[NSString stringWithFormat:@"%@ (routing sync failed: %@)", reason, routingResp] ok:NO];
-        return;
-    }
-    NSString *cmd = ConnectCommandForURI(uri, protectLogs);
-    NSString *resp = [self sanitizeDaemonText:SendCommand(cmd)];
-    if ([resp hasPrefix:@"OK"]) {
-        _connected = YES;
-        _connectedWithProtectedLogs = protectLogs;
-        [self startUptimeTimer];
-        [self updateConnectButton];
-        if (removedAny) {
-            [self showStatus:@"Connected (xhttp pin refreshed)" ok:YES];
-        } else {
-            [self showStatus:@"Connected (xhttp reconnected)" ok:YES];
-        }
-    } else {
-        _connectedWithProtectedLogs = NO;
-        [self showStatus:[NSString stringWithFormat:@"%@ (reconnect failed: %@)", reason, resp] ok:NO];
-    }
+    [self showStatus:reason ok:NO];
 }
 
 - (void)scheduleXHTTPConnectHealthCheckForURI:(NSString *)uri {
