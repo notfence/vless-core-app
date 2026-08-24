@@ -8,6 +8,8 @@
 #include <net/if.h>
 #include <netinet/in.h>
 #include <pthread.h>
+#include <pwd.h>
+#include <grp.h>
 #include <signal.h>
 #include <spawn.h>
 #include <stdbool.h>
@@ -24,17 +26,87 @@
 #include <sys/time.h>
 #include <sys/types.h>
 #include <sys/un.h>
+#include <sys/ioctl.h>
 #include <sys/wait.h>
 #include <unistd.h>
 
 #include "vpnicon_statusbar.h"
 #include "vpnctld_protocol.h"
 
-static char *const kSafeChildEnvironment[] = {
+#if __has_include(<net/pfvar.h>)
+#include <net/pfvar.h>
+#else
+struct pf_addr {
+    union {
+        struct in_addr v4;
+        struct in6_addr v6;
+        uint8_t addr8[16];
+        uint16_t addr16[8];
+        uint32_t addr32[4];
+    } pfa;
+};
+#ifndef v4
+#define v4 pfa.v4
+#endif
+union pf_state_xport {
+    uint16_t port;
+    uint16_t call_id;
+    uint32_t spi;
+};
+struct pfioc_natlook {
+    struct pf_addr saddr;
+    struct pf_addr daddr;
+    struct pf_addr rsaddr;
+    struct pf_addr rdaddr;
+    union pf_state_xport sxport;
+    union pf_state_xport dxport;
+    union pf_state_xport rsxport;
+    union pf_state_xport rdxport;
+    sa_family_t af;
+    uint8_t proto;
+    uint8_t proto_variant;
+    uint8_t direction;
+};
+#define PF_NATLOOK_USES_XPORT 1
+#ifndef PF_IN
+#define PF_IN 1
+#endif
+#ifndef PF_OUT
+#define PF_OUT 2
+#endif
+#ifndef DIOCNATLOOK
+#define DIOCNATLOOK _IOWR('D', 23, struct pfioc_natlook)
+#endif
+#endif
+
+#if defined(PF_NATLOOK_USES_XPORT)
+#define VC_NL_SET_SPORT(nl, value) ((nl).sxport.port = (value))
+#define VC_NL_SET_DPORT(nl, value) ((nl).dxport.port = (value))
+#define VC_NL_GET_RDPORT(nl) ((nl).rdxport.port)
+#define VC_NL_GET_DPORT(nl) ((nl).dxport.port)
+#define VC_NL_GET_RSPORT(nl) ((nl).rsxport.port)
+#else
+#define VC_NL_SET_SPORT(nl, value) ((nl).sport = (value))
+#define VC_NL_SET_DPORT(nl, value) ((nl).dport = (value))
+#define VC_NL_GET_RDPORT(nl) ((nl).rdport)
+#define VC_NL_GET_DPORT(nl) ((nl).dport)
+#define VC_NL_GET_RSPORT(nl) ((nl).rsport)
+#endif
+
+static char *const kSafeRootEnvironment[] = {
     "PATH=/usr/bin:/bin:/usr/sbin:/sbin",
     "HOME=/var/root",
     "TMPDIR=/private/var/tmp",
     "LANG=C",
+    NULL
+};
+
+static char *const kSafeHelperEnvironment[] = {
+    "PATH=/usr/bin:/bin:/usr/sbin:/sbin",
+    "HOME=/var/mobile",
+    "TMPDIR=/private/var/tmp",
+    "LANG=C",
+    "REDSOCKS_PF_BROKER=/var/run/vpnctld.sock",
     NULL
 };
 
@@ -71,12 +143,15 @@ static const int kConnectResolveTimeoutMs = 8000;
 static volatile sig_atomic_t g_terminate = 0;
 static int g_listen_fd = -1;
 static int g_vpn_icon_publisher_logged = 0;
+static uid_t g_helper_uid = (uid_t)-1;
+static gid_t g_helper_gid = (gid_t)-1;
 
 typedef enum {
     CONTROL_CLIENT_UNAUTHORIZED = 0,
     CONTROL_CLIENT_APP = 1,
     CONTROL_CLIENT_BOOTSTRAP = 2,
     CONTROL_CLIENT_CORE = 3,
+    CONTROL_CLIENT_REDSOCKS = 4,
 } control_client_t;
 
 static void stop_pid(pid_t *p);
@@ -96,6 +171,21 @@ static void close_inherited_descriptors(void) {
     long maximum = sysconf(_SC_OPEN_MAX);
     if (maximum < 0 || maximum > 4096) maximum = 4096;
     for (int fd = STDERR_FILENO + 1; fd < maximum; fd++) close(fd);
+}
+
+static int load_helper_identity(void) {
+    struct passwd *account = getpwnam("mobile");
+    if (account == NULL || account->pw_uid == 0 || account->pw_gid == 0) return -1;
+    g_helper_uid = account->pw_uid;
+    g_helper_gid = account->pw_gid;
+    return 0;
+}
+
+static int drop_helper_privileges(void) {
+    if (g_helper_uid == (uid_t)-1 || g_helper_gid == (gid_t)-1) return -1;
+    gid_t groups[1] = {g_helper_gid};
+    if (setgroups(1, groups) != 0 || setgid(g_helper_gid) != 0 || setuid(g_helper_uid) != 0) return -1;
+    return geteuid() == g_helper_uid && getegid() == g_helper_gid ? 0 : -1;
 }
 
 static void log_msg(const char *fmt, ...) {
@@ -161,7 +251,7 @@ static int run_argv(char *const argv[]) {
     posix_spawn_file_actions_addopen(&actions, STDERR_FILENO, "/dev/null", O_WRONLY, 0);
 
     pid_t pid = 0;
-    int rc = posix_spawn(&pid, argv[0], &actions, NULL, argv, kSafeChildEnvironment);
+    int rc = posix_spawn(&pid, argv[0], &actions, NULL, argv, kSafeRootEnvironment);
     posix_spawn_file_actions_destroy(&actions);
     if (rc != 0) {
         log_msg("run: spawn errno=%d", rc);
@@ -191,7 +281,7 @@ static int run_argv_capture(char *const argv[], char *out, size_t out_cap) {
     posix_spawn_file_actions_addopen(&actions, STDERR_FILENO, "/dev/null", O_WRONLY, 0);
 
     pid_t pid = 0;
-    int rc = posix_spawn(&pid, argv[0], &actions, NULL, argv, kSafeChildEnvironment);
+    int rc = posix_spawn(&pid, argv[0], &actions, NULL, argv, kSafeRootEnvironment);
     posix_spawn_file_actions_destroy(&actions);
     close(pipefd[1]);
 
@@ -294,6 +384,7 @@ static control_client_t control_client_type(int client_fd) {
     if (strcmp(executable, VC_APP_EXECUTABLE_PATH) == 0) return CONTROL_CLIENT_APP;
     if (strcmp(executable, VC_BOOTSTRAP_EXECUTABLE_PATH) == 0) return CONTROL_CLIENT_BOOTSTRAP;
     if (strcmp(executable, VC_CORE_EXECUTABLE_PATH) == 0) return CONTROL_CLIENT_CORE;
+    if (strcmp(executable, VC_REDSOCKS_EXECUTABLE_PATH) == 0) return CONTROL_CLIENT_REDSOCKS;
     return CONTROL_CLIENT_UNAUTHORIZED;
 }
 
@@ -925,35 +1016,63 @@ static int write_all_fd(int fd, const void *data, size_t length) {
     return 0;
 }
 
+static void send_log_tail(int client_fd, const char *path) {
+    static const size_t maximum_tail = 32768;
+    int fd = open(path, O_RDONLY | O_NOFOLLOW);
+    struct stat st;
+    if (fd < 0 || fstat(fd, &st) != 0 || !S_ISREG(st.st_mode) || st.st_uid != 0) {
+        if (fd >= 0) close(fd);
+        (void)write_all_fd(client_fd, "ERR cannot read log\n", 20);
+        return;
+    }
+
+    off_t start = st.st_size > (off_t)maximum_tail ? st.st_size - (off_t)maximum_tail : 0;
+    if (lseek(fd, start, SEEK_SET) < 0 || write_all_fd(client_fd, "OK\n", 3) != 0) {
+        close(fd);
+        return;
+    }
+
+    char buffer[2048];
+    for (;;) {
+        ssize_t count = read(fd, buffer, sizeof(buffer));
+        if (count < 0 && errno == EINTR) continue;
+        if (count <= 0 || write_all_fd(client_fd, buffer, (size_t)count) != 0) break;
+    }
+    close(fd);
+}
+
 static int spawn_logged(const char *bin, char *const argv[], const char *stdin_data, pid_t *pid_out) {
     int input_pipe[2] = {-1, -1};
     if (stdin_data != NULL && pipe(input_pipe) != 0) return -1;
 
-    posix_spawn_file_actions_t actions;
-    posix_spawn_file_actions_init(&actions);
+    const char *output_path = g.protect_logs ? "/dev/null" : "/var/log/vless-core.log";
+    int output_flags = g.protect_logs ? O_WRONLY : (O_WRONLY | O_CREAT | O_APPEND | O_NOFOLLOW);
+    int output_fd = open(output_path, output_flags, 0600);
+    int input_fd = stdin_data != NULL ? input_pipe[0] : open("/dev/null", O_RDONLY);
+    if (output_fd < 0 || input_fd < 0) {
+        if (output_fd >= 0) close(output_fd);
+        if (input_fd >= 0 && input_fd != input_pipe[0]) close(input_fd);
+        if (input_pipe[0] >= 0) close(input_pipe[0]);
+        if (input_pipe[1] >= 0) close(input_pipe[1]);
+        return -1;
+    }
+    if (!g.protect_logs) (void)fchmod(output_fd, 0600);
 
-    if (stdin_data != NULL) {
-        posix_spawn_file_actions_addclose(&actions, input_pipe[1]);
-        if (input_pipe[0] != STDIN_FILENO) {
-            posix_spawn_file_actions_adddup2(&actions, input_pipe[0], STDIN_FILENO);
-            posix_spawn_file_actions_addclose(&actions, input_pipe[0]);
-        }
-    } else {
-        posix_spawn_file_actions_addopen(&actions, STDIN_FILENO, "/dev/null", O_RDONLY, 0);
+    pid_t pid = fork();
+    if (pid == 0) {
+        if (dup2(input_fd, STDIN_FILENO) < 0 || dup2(output_fd, STDOUT_FILENO) < 0 || dup2(output_fd, STDERR_FILENO) < 0) _exit(126);
+        long maximum = sysconf(_SC_OPEN_MAX);
+        if (maximum < 0 || maximum > 4096) maximum = 4096;
+        for (int fd = STDERR_FILENO + 1; fd < maximum; fd++) close(fd);
+        if (drop_helper_privileges() != 0) _exit(126);
+        execve(bin, argv, kSafeHelperEnvironment);
+        _exit(127);
     }
 
-    const char *output_path = g.protect_logs ? "/dev/null" : "/var/log/vless-core.log";
-    int output_flags = g.protect_logs ? O_WRONLY : (O_WRONLY | O_CREAT | O_APPEND);
-    mode_t output_mode = g.protect_logs ? 0 : 0600;
-    posix_spawn_file_actions_addopen(&actions, STDOUT_FILENO, output_path, output_flags, output_mode);
-    posix_spawn_file_actions_addopen(&actions, STDERR_FILENO, output_path, output_flags, output_mode);
-
-    pid_t pid = 0;
-    int rc = posix_spawn(&pid, bin, &actions, NULL, argv, kSafeChildEnvironment);
-
-    posix_spawn_file_actions_destroy(&actions);
-    if (input_pipe[0] >= 0) close(input_pipe[0]);
-    if (rc != 0) {
+    close(output_fd);
+    if (input_fd >= 0) close(input_fd);
+    if (input_pipe[0] >= 0 && input_pipe[0] != input_fd) close(input_pipe[0]);
+    if (pid < 0) {
         if (input_pipe[1] >= 0) close(input_pipe[1]);
         return -1;
     }
@@ -1000,8 +1119,16 @@ static int spawn_core(const char *uri, const char *xray_version, int port, pid_t
 }
 
 static int write_redsocks_conf(int socks_port, int redir_port, const char *redirector) {
-    FILE *fp = fopen("/var/run/vlesscore-redsocks.conf", "w");
-    if (!fp) return -1;
+    int fd = open("/var/run/vlesscore-redsocks.conf", O_WRONLY | O_CREAT | O_TRUNC | O_NOFOLLOW, 0600);
+    if (fd < 0 || fchmod(fd, 0600) != 0 || fchown(fd, g_helper_uid, g_helper_gid) != 0) {
+        if (fd >= 0) close(fd);
+        return -1;
+    }
+    FILE *fp = fdopen(fd, "w");
+    if (!fp) {
+        close(fd);
+        return -1;
+    }
 
     int rc = fprintf(
         fp,
@@ -1026,8 +1153,8 @@ static int write_redsocks_conf(int socks_port, int redir_port, const char *redir
         socks_port
     );
 
-    fclose(fp);
-    return (rc > 0) ? 0 : -1;
+    int close_rc = fclose(fp);
+    return (rc > 0 && close_rc == 0) ? 0 : -1;
 }
 
 static int pid_alive(pid_t pid) {
@@ -1051,51 +1178,40 @@ static int pid_alive(pid_t pid) {
     return 0;
 }
 
-static int spawn_redsocks(int socks_port, const char *const *redirectors, size_t redirector_count, int *redir_port_out, pid_t *pid_out) {
+static int spawn_redsocks(int socks_port, int *redir_port_out, pid_t *pid_out) {
     const char *bin = find_redsocks_bin();
     if (!bin) return -2;
 
     int redir_port = pick_free_port_range(12080, 12180);
     if (redir_port <= 0) return -3;
 
-    const char *fallback_redirectors[] = {"generic"};
-    if (!redirectors || redirector_count == 0) {
-        redirectors = fallback_redirectors;
-        redirector_count = sizeof(fallback_redirectors) / sizeof(fallback_redirectors[0]);
+    if (write_redsocks_conf(socks_port, redir_port, "pf") != 0) {
+        return -4;
     }
 
-    for (size_t i = 0; i < redirector_count; i++) {
-        const char *redir = redirectors[i];
-        if (write_redsocks_conf(socks_port, redir_port, redir) != 0) {
-            return -4;
-        }
+    char *argv[] = {
+        (char *)bin,
+        "-c",
+        "/var/run/vlesscore-redsocks.conf",
+        NULL,
+    };
 
-        char *argv[] = {
-            (char *)bin,
-            "-c",
-            "/var/run/vlesscore-redsocks.conf",
-            NULL,
-        };
-
-        pid_t pid = 0;
-        if (spawn_logged(bin, argv, NULL, &pid) != 0) {
-            continue;
-        }
-
-        usleep(300000);
-        if (!pid_alive(pid)) {
-            stop_pid(&pid);
-            log_msg("redsocks failed with redirector=%s, trying next", redir);
-            continue;
-        }
-
-        log_msg("redsocks started pid=%d redirector=%s port=%d", (int)pid, redir, redir_port);
-        *pid_out = pid;
-        *redir_port_out = redir_port;
-        return 0;
+    pid_t pid = 0;
+    if (spawn_logged(bin, argv, NULL, &pid) != 0) {
+        return -5;
     }
 
-    return -6;
+    usleep(300000);
+    if (!pid_alive(pid)) {
+        stop_pid(&pid);
+        log_msg("redsocks failed with redirector=pf");
+        return -6;
+    }
+
+    log_msg("redsocks started pid=%d redirector=pf port=%d", (int)pid, redir_port);
+    *pid_out = pid;
+    *redir_port_out = redir_port;
+    return 0;
 }
 
 #define DNS_PROXY_UPSTREAM_IP "1.1.1.1"
@@ -1359,10 +1475,13 @@ static int spawn_dns_proxy(int socks_port, int *dns_port_out, pid_t *pid_out) {
     }
 
     if (pid == 0) {
-        if (g_listen_fd >= 0) {
-            close(g_listen_fd);
-            g_listen_fd = -1;
+        long maximum = sysconf(_SC_OPEN_MAX);
+        if (maximum < 0 || maximum > 4096) maximum = 4096;
+        for (int fd = STDERR_FILENO + 1; fd < maximum; fd++) {
+            if (fd != udp_fd) close(fd);
         }
+        g_listen_fd = -1;
+        if (drop_helper_privileges() != 0) _exit(126);
         dns_proxy_loop(udp_fd, socks_port);
         _exit(0);
     }
@@ -2000,14 +2119,7 @@ static void disconnect_all(void) {
 
 static int try_connect_pf(int socks_port) {
     int redir_port = 0;
-    const char *pf_redirectors[] = {"pf", "generic"};
-    int rc = spawn_redsocks(
-        socks_port,
-        pf_redirectors,
-        sizeof(pf_redirectors) / sizeof(pf_redirectors[0]),
-        &redir_port,
-        &g.redsocks_pid
-    );
+    int rc = spawn_redsocks(socks_port, &redir_port, &g.redsocks_pid);
     if (rc != 0) {
         return -30 + rc;
     }
@@ -2116,6 +2228,128 @@ static int connect_all(const char *uri, const char *xray_version, int requested_
     return -1;
 }
 
+static int natlook_endpoint_is_usable(const struct sockaddr_in *endpoint,
+                                      const struct sockaddr_in *redirected) {
+    uint32_t address = ntohl(endpoint->sin_addr.s_addr);
+    return endpoint->sin_port != 0 &&
+           (address >> 24) != 127 && address != 0 &&
+           !(endpoint->sin_port == redirected->sin_port &&
+             endpoint->sin_addr.s_addr == redirected->sin_addr.s_addr);
+}
+
+static int pf_original_destination(const struct sockaddr_in *client,
+                                   const struct sockaddr_in *redirected,
+                                   struct sockaddr_in *destination) {
+    int pf_fd = open("/dev/pf", O_RDWR | O_NOFOLLOW);
+    if (pf_fd < 0) return -1;
+
+    struct stat device_stat;
+    if (fstat(pf_fd, &device_stat) != 0 || !S_ISCHR(device_stat.st_mode)) {
+        close(pf_fd);
+        return -1;
+    }
+
+    struct pfioc_natlook lookup;
+    memset(&lookup, 0, sizeof(lookup));
+    lookup.saddr.v4 = client->sin_addr;
+    VC_NL_SET_SPORT(lookup, client->sin_port);
+    lookup.daddr.v4 = redirected->sin_addr;
+    VC_NL_SET_DPORT(lookup, redirected->sin_port);
+    lookup.af = AF_INET;
+    lookup.proto = IPPROTO_TCP;
+#if defined(PF_NATLOOK_USES_XPORT)
+    lookup.proto_variant = 0;
+#endif
+    lookup.direction = PF_OUT;
+
+    if (ioctl(pf_fd, DIOCNATLOOK, &lookup) != 0) {
+        if (errno != ENOENT) {
+            close(pf_fd);
+            return -1;
+        }
+        lookup.direction = PF_IN;
+        if (ioctl(pf_fd, DIOCNATLOOK, &lookup) != 0) {
+            close(pf_fd);
+            return -1;
+        }
+    }
+    close(pf_fd);
+
+    struct sockaddr_in candidates[3];
+    memset(candidates, 0, sizeof(candidates));
+    candidates[0].sin_family = AF_INET;
+    candidates[0].sin_port = VC_NL_GET_RDPORT(lookup);
+    candidates[0].sin_addr = lookup.rdaddr.v4;
+    candidates[1].sin_family = AF_INET;
+    candidates[1].sin_port = VC_NL_GET_DPORT(lookup);
+    candidates[1].sin_addr = lookup.daddr.v4;
+    candidates[2].sin_family = AF_INET;
+    candidates[2].sin_port = VC_NL_GET_RSPORT(lookup);
+    candidates[2].sin_addr = lookup.rsaddr.v4;
+
+    for (size_t i = 0; i < sizeof(candidates) / sizeof(candidates[0]); i++) {
+        if (natlook_endpoint_is_usable(&candidates[i], redirected)) {
+            *destination = candidates[i];
+            return 0;
+        }
+    }
+    return -1;
+}
+
+static void handle_redsocks_natlook(int client_fd, char *command) {
+    char *newline = strchr(command, '\n');
+    if (!newline || newline[1] != '\0') {
+        (void)write_all_fd(client_fd, "ERR malformed NATLOOK\n", 22);
+        return;
+    }
+    *newline = '\0';
+
+    char client_ip[INET_ADDRSTRLEN];
+    char redirected_ip[INET_ADDRSTRLEN];
+    unsigned client_port = 0;
+    unsigned redirected_port = 0;
+    char trailing = '\0';
+    int parsed = sscanf(command, "NATLOOK\t%15[0-9.]\t%u\t%15[0-9.]\t%u%c",
+                        client_ip, &client_port, redirected_ip, &redirected_port, &trailing);
+    if (parsed != 4 || client_port == 0 || client_port > 65535 ||
+        redirected_port == 0 || redirected_port > 65535) {
+        (void)write_all_fd(client_fd, "ERR malformed NATLOOK\n", 22);
+        return;
+    }
+
+    struct sockaddr_in client;
+    struct sockaddr_in redirected;
+    struct sockaddr_in destination;
+    memset(&client, 0, sizeof(client));
+    memset(&redirected, 0, sizeof(redirected));
+    memset(&destination, 0, sizeof(destination));
+    client.sin_family = AF_INET;
+    client.sin_port = htons((uint16_t)client_port);
+    redirected.sin_family = AF_INET;
+    redirected.sin_port = htons((uint16_t)redirected_port);
+    if (inet_pton(AF_INET, client_ip, &client.sin_addr) != 1 ||
+        inet_pton(AF_INET, redirected_ip, &redirected.sin_addr) != 1 ||
+        (ntohl(client.sin_addr.s_addr) >> 24) != 127 ||
+        (ntohl(redirected.sin_addr.s_addr) >> 24) != 127 ||
+        redirected_port < 12080 || redirected_port > 12180 ||
+        pf_original_destination(&client, &redirected, &destination) != 0) {
+        (void)write_all_fd(client_fd, "ERR NATLOOK failed\n", 19);
+        return;
+    }
+
+    char destination_ip[INET_ADDRSTRLEN];
+    if (!inet_ntop(AF_INET, &destination.sin_addr, destination_ip, sizeof(destination_ip))) {
+        (void)write_all_fd(client_fd, "ERR NATLOOK failed\n", 19);
+        return;
+    }
+    char response[80];
+    int response_length = snprintf(response, sizeof(response), "OK\t%s\t%u\n",
+                                   destination_ip, (unsigned)ntohs(destination.sin_port));
+    if (response_length > 0 && (size_t)response_length < sizeof(response)) {
+        (void)write_all_fd(client_fd, response, (size_t)response_length);
+    }
+}
+
 static void handle_client(int cfd, control_client_t client_type) {
     char buf[sizeof(g.routing) + 32];
     ssize_t n = read(cfd, buf, sizeof(buf) - 1);
@@ -2137,6 +2371,28 @@ static void handle_client(int cfd, control_client_t client_type) {
         strncmp(buf, "ROUTE_DIRECT_REMOVE\t", 20) != 0) {
         snprintf(reply, sizeof(reply), "ERR unauthorized command\n");
         write(cfd, reply, strlen(reply));
+        return;
+    }
+    if (client_type == CONTROL_CLIENT_REDSOCKS) {
+        if (strncmp(buf, "NATLOOK\t", 8) == 0) {
+            handle_redsocks_natlook(cfd, buf);
+        } else {
+            (void)write_all_fd(cfd, "ERR unauthorized command\n", 25);
+        }
+        return;
+    }
+
+    if (client_type == CONTROL_CLIENT_APP && strncmp(buf, "LOG\t", 4) == 0) {
+        char *name = buf + 4;
+        char *newline = strchr(name, '\n');
+        if (newline) *newline = '\0';
+        if (strcmp(name, "core") == 0) {
+            send_log_tail(cfd, "/var/log/vless-core.log");
+        } else if (strcmp(name, "daemon") == 0) {
+            send_log_tail(cfd, "/var/log/vpnctld.log");
+        } else {
+            (void)write_all_fd(cfd, "ERR invalid log\n", 16);
+        }
         return;
     }
 
@@ -2223,6 +2479,7 @@ int main(void) {
     umask(0077);
     if (geteuid() != 0 || chdir("/") != 0) return 1;
     close_inherited_descriptors();
+    if (load_helper_identity() != 0) return 1;
     (void)chmod("/var/log/vpnctld.log", 0600);
     (void)chmod("/var/log/vless-core.log", 0600);
 

@@ -14,6 +14,16 @@ chown root:wheel /usr/bin/vpnctld-bootstrap || true
 mkdir -p /var/mobile/vless-core-import
 chown mobile:mobile /var/mobile/vless-core-import || true
 chmod 700 /var/mobile/vless-core-import || true
+mkdir -p /private/var/mobile/Library/Preferences/vless-core
+chown mobile:mobile /private/var/mobile/Library/Preferences/vless-core || true
+chmod 700 /private/var/mobile/Library/Preferences/vless-core || true
+for pin_file in xhttp-pins.txt xhttp-pins.txt.lock; do
+  pin_path="/private/var/mobile/Library/Preferences/vless-core/$pin_file"
+  if [ -f "$pin_path" ] && [ ! -L "$pin_path" ]; then
+    chown mobile:mobile "$pin_path" || true
+    chmod 600 "$pin_path" || true
+  fi
+done
 chmod 644 /Library/LaunchDaemons/com.vlesscore.vpnctld.plist || true
 chmod 755 /Applications/vless-core.app/vless-core || true
 for log in /var/log/vpnctld.log /var/log/vless-core.log; do

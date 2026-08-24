@@ -457,18 +457,32 @@ static ssize_t SendRawCommand(NSData *outData, const struct timeval *rw_tv, int 
         return -1;
     }
 
-    ssize_t rd = read(fd, buf, buf_cap - 1);
-    if (rd <= 0) {
-        last_errno = (rd < 0) ? errno : ECONNRESET;
-        close(fd);
-        if (last_errno_out) *last_errno_out = last_errno;
+    size_t used = 0;
+    for (;;) {
+        if (used + 1 >= buf_cap) {
+            close(fd);
+            if (last_errno_out) *last_errno_out = EMSGSIZE;
+            return -1;
+        }
+        ssize_t rd = read(fd, buf + used, buf_cap - used - 1);
+        if (rd < 0 && errno == EINTR) continue;
+        if (rd < 0) {
+            last_errno = errno;
+            close(fd);
+            if (last_errno_out) *last_errno_out = last_errno;
+            return -1;
+        }
+        if (rd == 0) break;
+        used += (size_t)rd;
+    }
+    close(fd);
+    if (used == 0) {
+        if (last_errno_out) *last_errno_out = ECONNRESET;
         return -1;
     }
-
-    buf[rd] = '\0';
-    close(fd);
+    buf[used] = '\0';
     if (last_errno_out) *last_errno_out = 0;
-    return rd;
+    return (ssize_t)used;
 }
 
 static NSString *SendCommand(NSString *cmdLine) {
@@ -1862,24 +1876,19 @@ static NSString *ClearLogsViaDaemon(void) {
     return SendCommand(@"CLEAR_LOGS\n");
 }
 
-static NSString *ReadFileTail(NSString *path, NSUInteger maxBytes) {
-    NSFileHandle *fh = [NSFileHandle fileHandleForReadingAtPath:path];
-    if (!fh) {
-        return [NSString stringWithFormat:@"(cannot open %@)\n", path];
+static NSString *ReadDaemonLog(NSInteger index, NSUInteger maxBytes) {
+    NSString *name = index == 1 ? @"core" : @"daemon";
+    NSString *response = SendCommand([NSString stringWithFormat:@"LOG\t%@\n", name]);
+    if (![response hasPrefix:@"OK\n"]) {
+        return [NSString stringWithFormat:@"(cannot read %@ log: %@)\n", name, response ? response : @"no response"];
     }
 
-    unsigned long long sz = [fh seekToEndOfFile];
-    if (sz > maxBytes) {
-        [fh seekToFileOffset:(sz - maxBytes)];
-    } else {
-        [fh seekToFileOffset:0];
-    }
-
-    NSData *data = [fh readDataToEndOfFile];
-    [fh closeFile];
-
+    NSData *data = [[response substringFromIndex:3] dataUsingEncoding:NSUTF8StringEncoding];
     if (!data || [data length] == 0) {
         return @"(empty)\n";
+    }
+    if (maxBytes > 0 && [data length] > maxBytes) {
+        data = [data subdataWithRange:NSMakeRange([data length] - maxBytes, maxBytes)];
     }
 
     NSString *txt = [[[NSString alloc] initWithData:data encoding:NSUTF8StringEncoding] autorelease];
@@ -1893,8 +1902,7 @@ static NSString *ReadFileTail(NSString *path, NSUInteger maxBytes) {
 }
 
 static NSString *ReadLogAtIndex(NSInteger index) {
-    NSString *path = (index == 1) ? @"/var/log/vless-core.log" : @"/var/log/vpnctld.log";
-    return ReadFileTail(path, 8192);
+    return ReadDaemonLog(index, 8192);
 }
 
 static int Base64Value(unsigned char c) {
@@ -7856,7 +7864,7 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
 }
 
 - (NSString *)xhttpTOFUPinMismatchStatusForURI:(NSString *)uri {
-    NSString *tail = ReadFileTail(@"/var/log/vless-core.log", 12288);
+    NSString *tail = ReadDaemonLog(1, 12288);
     if (![tail isKindOfClass:[NSString class]] || [tail length] == 0) return nil;
 
     NSString *lowerTail = [tail lowercaseString];
