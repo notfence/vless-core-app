@@ -30,7 +30,13 @@
 #include "vpnicon_statusbar.h"
 #include "vpnctld_protocol.h"
 
-extern char **environ;
+static char *const kSafeChildEnvironment[] = {
+    "PATH=/usr/bin:/bin:/usr/sbin:/sbin",
+    "HOME=/var/root",
+    "TMPDIR=/private/var/tmp",
+    "LANG=C",
+    NULL
+};
 
 typedef enum {
     MODE_NONE = 0,
@@ -84,6 +90,12 @@ static void handle_term_signal(int sig) {
         close(g_listen_fd);
         g_listen_fd = -1;
     }
+}
+
+static void close_inherited_descriptors(void) {
+    long maximum = sysconf(_SC_OPEN_MAX);
+    if (maximum < 0 || maximum > 4096) maximum = 4096;
+    for (int fd = STDERR_FILENO + 1; fd < maximum; fd++) close(fd);
 }
 
 static void log_msg(const char *fmt, ...) {
@@ -149,7 +161,7 @@ static int run_argv(char *const argv[]) {
     posix_spawn_file_actions_addopen(&actions, STDERR_FILENO, "/dev/null", O_WRONLY, 0);
 
     pid_t pid = 0;
-    int rc = posix_spawn(&pid, argv[0], &actions, NULL, argv, environ);
+    int rc = posix_spawn(&pid, argv[0], &actions, NULL, argv, kSafeChildEnvironment);
     posix_spawn_file_actions_destroy(&actions);
     if (rc != 0) {
         log_msg("run: spawn errno=%d", rc);
@@ -179,7 +191,7 @@ static int run_argv_capture(char *const argv[], char *out, size_t out_cap) {
     posix_spawn_file_actions_addopen(&actions, STDERR_FILENO, "/dev/null", O_WRONLY, 0);
 
     pid_t pid = 0;
-    int rc = posix_spawn(&pid, argv[0], &actions, NULL, argv, environ);
+    int rc = posix_spawn(&pid, argv[0], &actions, NULL, argv, kSafeChildEnvironment);
     posix_spawn_file_actions_destroy(&actions);
     close(pipefd[1]);
 
@@ -219,43 +231,6 @@ static int run_argv_capture(char *const argv[], char *out, size_t out_cap) {
 
 static int can_exec(const char *path) {
     return access(path, X_OK) == 0;
-}
-
-static int find_cmd_path(const char *cmd, char *out, size_t out_cap) {
-    if (!cmd || !*cmd || strchr(cmd, '/') || !out || out_cap == 0) return -1;
-
-    const char *path = getenv("PATH");
-    if (!path || !*path) {
-        path = "/sbin:/usr/sbin:/bin:/usr/bin:/usr/local/sbin:/usr/local/bin";
-    }
-
-    const char *p = path;
-    while (p && *p) {
-        const char *colon = strchr(p, ':');
-        size_t dir_len = colon ? (size_t)(colon - p) : strlen(p);
-
-        char candidate[PATH_MAX];
-        if (dir_len == 0) {
-            if (snprintf(candidate, sizeof(candidate), "./%s", cmd) < 0) return -1;
-        } else {
-            if (dir_len >= sizeof(candidate)) return -1;
-            char dir[PATH_MAX];
-            memcpy(dir, p, dir_len);
-            dir[dir_len] = '\0';
-            if (snprintf(candidate, sizeof(candidate), "%s/%s", dir, cmd) < 0) return -1;
-        }
-
-        if (can_exec(candidate)) {
-            if (strlen(candidate) >= out_cap) return -1;
-            snprintf(out, out_cap, "%s", candidate);
-            return 0;
-        }
-
-        if (!colon) break;
-        p = colon + 1;
-    }
-
-    return -1;
 }
 
 static int path_exists(const char *path) {
@@ -335,11 +310,6 @@ static const char *find_pfctl_bin(void) {
     if (can_exec("/bin/pfctl")) return "/bin/pfctl";
     if (can_exec("/usr/bin/pfctl")) return "/usr/bin/pfctl";
 
-    static char resolved[PATH_MAX];
-    if (find_cmd_path("pfctl", resolved, sizeof(resolved)) == 0 && can_exec(resolved)) {
-        return resolved;
-    }
-
     return NULL;
 }
 
@@ -349,11 +319,6 @@ static const char *find_route_bin(void) {
     if (can_exec("/bin/route")) return "/bin/route";
     if (can_exec("/usr/bin/route")) return "/usr/bin/route";
 
-    static char resolved[PATH_MAX];
-    if (find_cmd_path("route", resolved, sizeof(resolved)) == 0 && can_exec(resolved)) {
-        return resolved;
-    }
-
     return NULL;
 }
 
@@ -362,11 +327,6 @@ static const char *find_ifconfig_bin(void) {
     if (can_exec("/usr/sbin/ifconfig")) return "/usr/sbin/ifconfig";
     if (can_exec("/bin/ifconfig")) return "/bin/ifconfig";
     if (can_exec("/usr/bin/ifconfig")) return "/usr/bin/ifconfig";
-
-    static char resolved[PATH_MAX];
-    if (find_cmd_path("ifconfig", resolved, sizeof(resolved)) == 0 && can_exec(resolved)) {
-        return resolved;
-    }
 
     return NULL;
 }
@@ -959,12 +919,12 @@ static int spawn_logged(const char *bin, char *const argv[], pid_t *pid_out) {
 
     const char *output_path = g.protect_logs ? "/dev/null" : "/var/log/vless-core.log";
     int output_flags = g.protect_logs ? O_WRONLY : (O_WRONLY | O_CREAT | O_APPEND);
-    mode_t output_mode = g.protect_logs ? 0 : 0644;
+    mode_t output_mode = g.protect_logs ? 0 : 0600;
     posix_spawn_file_actions_addopen(&actions, STDOUT_FILENO, output_path, output_flags, output_mode);
     posix_spawn_file_actions_addopen(&actions, STDERR_FILENO, output_path, output_flags, output_mode);
 
     pid_t pid = 0;
-    int rc = posix_spawn(&pid, bin, &actions, NULL, argv, environ);
+    int rc = posix_spawn(&pid, bin, &actions, NULL, argv, kSafeChildEnvironment);
 
     posix_spawn_file_actions_destroy(&actions);
     if (rc != 0) return -1;
@@ -1382,8 +1342,9 @@ static int spawn_dns_proxy(int socks_port, int *dns_port_out, pid_t *pid_out) {
 }
 
 static void truncate_log_file(const char *path) {
-    int fd = open(path, O_WRONLY | O_CREAT | O_TRUNC, 0644);
+    int fd = open(path, O_WRONLY | O_CREAT | O_TRUNC, 0600);
     if (fd >= 0) {
+        (void)fchmod(fd, 0600);
         close(fd);
     }
 }
@@ -2220,6 +2181,12 @@ static void handle_client(int cfd, control_client_t client_type) {
 }
 
 int main(void) {
+    umask(0077);
+    if (geteuid() != 0 || chdir("/") != 0) return 1;
+    close_inherited_descriptors();
+    (void)chmod("/var/log/vpnctld.log", 0600);
+    (void)chmod("/var/log/vless-core.log", 0600);
+
     struct sigaction sa;
     memset(&sa, 0, sizeof(sa));
     sa.sa_handler = handle_term_signal;

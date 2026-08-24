@@ -16,6 +16,9 @@ chown mobile:mobile /var/mobile/vless-core-import || true
 chmod 700 /var/mobile/vless-core-import || true
 chmod 644 /Library/LaunchDaemons/com.vlesscore.vpnctld.plist || true
 chmod 755 /Applications/vless-core.app/vless-core || true
+for log in /var/log/vpnctld.log /var/log/vless-core.log; do
+  [ -e "$log" ] && chmod 600 "$log" || true
+done
 for bin in /usr/bin/vpnctld /usr/bin/vless-core-darwin-armv7 /usr/bin/vless-core-curl /usr/bin/redsocks-vless-core; do
   [ -e "$bin" ] && chmod 755 "$bin" || true
 done

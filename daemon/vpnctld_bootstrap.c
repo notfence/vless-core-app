@@ -4,19 +4,37 @@
 #include <errno.h>
 #include <fcntl.h>
 #include <spawn.h>
+#include <signal.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <stdint.h>
 #include <string.h>
 #include <sys/select.h>
 #include <sys/socket.h>
+#include <sys/stat.h>
 #include <sys/types.h>
 #include <sys/un.h>
 #include <unistd.h>
 
 #include "vpnctld_protocol.h"
 
-extern char **environ;
+#ifndef VPNCTLD_EXECUTABLE_PATH
+#define VPNCTLD_EXECUTABLE_PATH "/usr/bin/vpnctld"
+#endif
+
+static char *const kSafeDaemonEnvironment[] = {
+    "PATH=/usr/bin:/bin:/usr/sbin:/sbin",
+    "HOME=/var/root",
+    "TMPDIR=/private/var/tmp",
+    "LANG=C",
+    NULL
+};
+
+static void close_inherited_descriptors(void) {
+    long maximum = sysconf(_SC_OPEN_MAX);
+    if (maximum < 0 || maximum > 4096) maximum = 4096;
+    for (int fd = STDERR_FILENO + 1; fd < maximum; fd++) close(fd);
+}
 
 static int connect_with_timeout(int fd, const struct sockaddr *sa, socklen_t sa_len, int timeout_ms) {
     int flags = fcntl(fd, F_GETFL, 0);
@@ -103,23 +121,39 @@ static int daemon_online(void) {
 static int spawn_direct_daemon(void) {
     posix_spawn_file_actions_t actions;
     posix_spawn_file_actions_init(&actions);
-    posix_spawn_file_actions_addopen(&actions, STDOUT_FILENO, "/var/log/vpnctld.log", O_WRONLY | O_CREAT | O_APPEND, 0644);
-    posix_spawn_file_actions_addopen(&actions, STDERR_FILENO, "/var/log/vpnctld.log", O_WRONLY | O_CREAT | O_APPEND, 0644);
+    posix_spawn_file_actions_addopen(&actions, STDIN_FILENO, "/dev/null", O_RDONLY, 0);
+    posix_spawn_file_actions_addopen(&actions, STDOUT_FILENO, "/var/log/vpnctld.log", O_WRONLY | O_CREAT | O_APPEND, 0600);
+    posix_spawn_file_actions_addopen(&actions, STDERR_FILENO, "/var/log/vpnctld.log", O_WRONLY | O_CREAT | O_APPEND, 0600);
+
+    posix_spawnattr_t attributes;
+    posix_spawnattr_init(&attributes);
+    sigset_t empty_signals;
+    sigset_t default_signals;
+    sigemptyset(&empty_signals);
+    sigfillset(&default_signals);
+    sigdelset(&default_signals, SIGKILL);
+    sigdelset(&default_signals, SIGSTOP);
+    posix_spawnattr_setsigmask(&attributes, &empty_signals);
+    posix_spawnattr_setsigdefault(&attributes, &default_signals);
+    posix_spawnattr_setflags(&attributes, POSIX_SPAWN_SETSIGMASK | POSIX_SPAWN_SETSIGDEF);
 
     char *argv[] = {
-        "/usr/bin/vpnctld",
+        VPNCTLD_EXECUTABLE_PATH,
         NULL
     };
 
     pid_t pid = 0;
-    int rc = posix_spawn(&pid, "/usr/bin/vpnctld", &actions, NULL, argv, environ);
+    int rc = posix_spawn(&pid, VPNCTLD_EXECUTABLE_PATH, &actions, &attributes, argv, kSafeDaemonEnvironment);
+    posix_spawnattr_destroy(&attributes);
     posix_spawn_file_actions_destroy(&actions);
     return rc == 0 ? 0 : -1;
 }
 
 int main(void) {
-    (void)setgid(0);
-    (void)setuid(0);
+    umask(0077);
+    if (setgid(0) != 0 || setuid(0) != 0 || getegid() != 0 || geteuid() != 0) return 1;
+    if (chdir("/") != 0) return 1;
+    close_inherited_descriptors();
 
     if (daemon_online()) {
         return 0;
