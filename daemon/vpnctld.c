@@ -913,9 +913,34 @@ static int interface_list_has_prefix(char ifnames[][32], size_t if_count, const 
     return 0;
 }
 
-static int spawn_logged(const char *bin, char *const argv[], pid_t *pid_out) {
+static int write_all_fd(int fd, const void *data, size_t length) {
+    const uint8_t *cursor = (const uint8_t *)data;
+    while (length > 0) {
+        ssize_t written = write(fd, cursor, length);
+        if (written < 0 && errno == EINTR) continue;
+        if (written <= 0) return -1;
+        cursor += (size_t)written;
+        length -= (size_t)written;
+    }
+    return 0;
+}
+
+static int spawn_logged(const char *bin, char *const argv[], const char *stdin_data, pid_t *pid_out) {
+    int input_pipe[2] = {-1, -1};
+    if (stdin_data != NULL && pipe(input_pipe) != 0) return -1;
+
     posix_spawn_file_actions_t actions;
     posix_spawn_file_actions_init(&actions);
+
+    if (stdin_data != NULL) {
+        posix_spawn_file_actions_addclose(&actions, input_pipe[1]);
+        if (input_pipe[0] != STDIN_FILENO) {
+            posix_spawn_file_actions_adddup2(&actions, input_pipe[0], STDIN_FILENO);
+            posix_spawn_file_actions_addclose(&actions, input_pipe[0]);
+        }
+    } else {
+        posix_spawn_file_actions_addopen(&actions, STDIN_FILENO, "/dev/null", O_RDONLY, 0);
+    }
 
     const char *output_path = g.protect_logs ? "/dev/null" : "/var/log/vless-core.log";
     int output_flags = g.protect_logs ? O_WRONLY : (O_WRONLY | O_CREAT | O_APPEND);
@@ -927,7 +952,21 @@ static int spawn_logged(const char *bin, char *const argv[], pid_t *pid_out) {
     int rc = posix_spawn(&pid, bin, &actions, NULL, argv, kSafeChildEnvironment);
 
     posix_spawn_file_actions_destroy(&actions);
-    if (rc != 0) return -1;
+    if (input_pipe[0] >= 0) close(input_pipe[0]);
+    if (rc != 0) {
+        if (input_pipe[1] >= 0) close(input_pipe[1]);
+        return -1;
+    }
+    if (stdin_data != NULL) {
+        size_t length = strlen(stdin_data);
+        int write_result = write_all_fd(input_pipe[1], stdin_data, length);
+        close(input_pipe[1]);
+        if (write_result != 0) {
+            kill(pid, SIGTERM);
+            (void)waitpid(pid, NULL, 0);
+            return -1;
+        }
+    }
 
     *pid_out = pid;
     return 0;
@@ -943,8 +982,8 @@ static int spawn_core(const char *uri, const char *xray_version, int port, pid_t
     char *argv[12];
     size_t argc = 0;
     argv[argc++] = (char *)core_bin;
-    argv[argc++] = "--uri";
-    argv[argc++] = (char *)uri;
+    argv[argc++] = "--uri-fd";
+    argv[argc++] = "0";
     argv[argc++] = "--listen-port";
     argv[argc++] = port_str;
     argv[argc++] = "--routing";
@@ -957,7 +996,7 @@ static int spawn_core(const char *uri, const char *xray_version, int port, pid_t
     }
     argv[argc] = NULL;
 
-    return spawn_logged(core_bin, argv, pid_out);
+    return spawn_logged(core_bin, argv, uri, pid_out);
 }
 
 static int write_redsocks_conf(int socks_port, int redir_port, const char *redirector) {
@@ -1039,7 +1078,7 @@ static int spawn_redsocks(int socks_port, const char *const *redirectors, size_t
         };
 
         pid_t pid = 0;
-        if (spawn_logged(bin, argv, &pid) != 0) {
+        if (spawn_logged(bin, argv, NULL, &pid) != 0) {
             continue;
         }
 

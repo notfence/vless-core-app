@@ -782,17 +782,35 @@ static void stop_child_process(pid_t pid) {
 
 static pid_t spawn_temp_core_for_ping(const char *uri, uint16_t port, const char *xray_version) {
     if (!uri || !*uri) return -1;
+    size_t uri_length = strlen(uri);
+    if (uri_length > kVCMaximumConfigURIBytes) return -1;
     const char *core = "/usr/bin/vless-core-darwin-armv7";
     if (access(core, X_OK) != 0) {
         return -1;
     }
 
+    int uri_pipe[2];
+    if (pipe(uri_pipe) != 0) return -1;
+    if (write_all(uri_pipe[1], uri, uri_length) != 0) {
+        close(uri_pipe[0]);
+        close(uri_pipe[1]);
+        return -1;
+    }
+    close(uri_pipe[1]);
+
     char port_str[16];
     snprintf(port_str, sizeof(port_str), "%u", (unsigned)port);
 
     pid_t pid = fork();
-    if (pid < 0) return -1;
+    if (pid < 0) {
+        close(uri_pipe[0]);
+        return -1;
+    }
     if (pid == 0) {
+        if (uri_pipe[0] != STDIN_FILENO) {
+            if (dup2(uri_pipe[0], STDIN_FILENO) < 0) _exit(126);
+            close(uri_pipe[0]);
+        }
         int dn = open("/dev/null", O_RDWR);
         if (dn >= 0) {
             (void)dup2(dn, STDOUT_FILENO);
@@ -800,14 +818,15 @@ static pid_t spawn_temp_core_for_ping(const char *uri, uint16_t port, const char
             if (dn > STDERR_FILENO) close(dn);
         }
         if (xray_version && *xray_version) {
-            execl(core, "vless-core-darwin-armv7", "--uri", uri, "--listen-port", port_str,
+            execl(core, "vless-core-darwin-armv7", "--uri-fd", "0", "--listen-port", port_str,
                   "--xray-version", xray_version, (char *)NULL);
         } else {
-            execl(core, "vless-core-darwin-armv7", "--uri", uri, "--listen-port", port_str,
+            execl(core, "vless-core-darwin-armv7", "--uri-fd", "0", "--listen-port", port_str,
                   (char *)NULL);
         }
         _exit(127);
     }
+    close(uri_pipe[0]);
     return pid;
 }
 
