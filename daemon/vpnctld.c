@@ -1041,6 +1041,100 @@ static void send_log_tail(int client_fd, const char *path) {
     close(fd);
 }
 
+static int read_exact_fd(int fd, void *data, size_t length) {
+    uint8_t *cursor = (uint8_t *)data;
+    while (length > 0) {
+        ssize_t count = read(fd, cursor, length);
+        if (count < 0 && errno == EINTR) continue;
+        if (count <= 0) return -1;
+        cursor += (size_t)count;
+        length -= (size_t)count;
+    }
+    return 0;
+}
+
+static void secure_zero(void *data, size_t length) {
+    volatile unsigned char *cursor = (volatile unsigned char *)data;
+    while (length-- > 0) *cursor++ = 0;
+}
+
+static int read_secure_store_key(unsigned char key[32]) {
+    const char *path = "/private/var/root/Library/Preferences/vless-core/store.key";
+    int fd = open(path, O_RDONLY | O_NOFOLLOW);
+    if (fd < 0) return errno == ENOENT ? 1 : -1;
+    struct stat st;
+    int result = -1;
+    if (fstat(fd, &st) == 0 && S_ISREG(st.st_mode) && st.st_uid == 0 && st.st_nlink == 1 && st.st_size == 32 &&
+        ((st.st_mode & 0077) == 0 || fchmod(fd, 0600) == 0) && read_exact_fd(fd, key, 32) == 0) {
+        result = 0;
+    }
+    close(fd);
+    return result;
+}
+
+static int load_or_create_secure_store_key(unsigned char key[32]) {
+    int result = read_secure_store_key(key);
+    if (result <= 0) return result;
+
+    const char *directory = "/private/var/root/Library/Preferences/vless-core";
+    struct stat directory_stat;
+    if ((mkdir(directory, 0700) != 0 && errno != EEXIST) || lstat(directory, &directory_stat) != 0 ||
+        !S_ISDIR(directory_stat.st_mode) || S_ISLNK(directory_stat.st_mode) || directory_stat.st_uid != 0 ||
+        chmod(directory, 0700) != 0) {
+        return -1;
+    }
+
+    int random_fd = open("/dev/urandom", O_RDONLY);
+    if (random_fd < 0 || read_exact_fd(random_fd, key, 32) != 0) {
+        if (random_fd >= 0) close(random_fd);
+        return -1;
+    }
+    close(random_fd);
+
+    char temporary[PATH_MAX];
+    int length = snprintf(temporary, sizeof(temporary), "%s/store.key.tmp.XXXXXX", directory);
+    if (length <= 0 || (size_t)length >= sizeof(temporary)) return -1;
+    int temporary_fd = mkstemp(temporary);
+    if (temporary_fd < 0) return -1;
+    int write_result = fchmod(temporary_fd, 0600) == 0 && write_all_fd(temporary_fd, key, 32) == 0 && fsync(temporary_fd) == 0 ? 0 : -1;
+    if (close(temporary_fd) != 0) write_result = -1;
+    if (write_result == 0 && link(temporary, "/private/var/root/Library/Preferences/vless-core/store.key") != 0) {
+        write_result = errno == EEXIST ? 1 : -1;
+    }
+    unlink(temporary);
+    if (write_result == 1) return read_secure_store_key(key) == 0 ? 0 : -1;
+    if (write_result == 0) {
+        int directory_fd = open(directory, O_RDONLY | O_NOFOLLOW);
+        if (directory_fd >= 0) {
+            (void)fsync(directory_fd);
+            close(directory_fd);
+        }
+    }
+    return write_result;
+}
+
+static void send_secure_store_key(int client_fd, int create_if_missing) {
+    unsigned char key[32];
+    int result = create_if_missing ? load_or_create_secure_store_key(key) : read_secure_store_key(key);
+    if (result != 0) {
+        secure_zero(key, sizeof(key));
+        (void)write_all_fd(client_fd, "ERR secure store unavailable\n", 29);
+        return;
+    }
+    char response[69];
+    memcpy(response, "OK ", 3);
+    static const char hex[] = "0123456789abcdef";
+    for (size_t i = 0; i < sizeof(key); i++) {
+        response[3 + i * 2] = hex[key[i] >> 4];
+        response[4 + i * 2] = hex[key[i] & 0x0f];
+    }
+    response[67] = '\n';
+    response[68] = '\0';
+    (void)write_all_fd(client_fd, response, 68);
+    secure_zero(key, sizeof(key));
+    secure_zero(response, sizeof(response));
+}
+
 static int spawn_logged(const char *bin, char *const argv[], const char *stdin_data, pid_t *pid_out) {
     int input_pipe[2] = {-1, -1};
     if (stdin_data != NULL && pipe(input_pipe) != 0) return -1;
@@ -2393,6 +2487,11 @@ static void handle_client(int cfd, control_client_t client_type) {
         } else {
             (void)write_all_fd(cfd, "ERR invalid log\n", 16);
         }
+        return;
+    }
+    if (client_type == CONTROL_CLIENT_APP &&
+        (strcmp(buf, "STORE_KEY\tGET\n") == 0 || strcmp(buf, "STORE_KEY\tCREATE\n") == 0)) {
+        send_secure_store_key(cfd, strstr(buf, "\tCREATE") != NULL);
         return;
     }
 

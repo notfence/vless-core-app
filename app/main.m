@@ -6,11 +6,15 @@
 #include "happ_crypto.h"
 #include "karing_backup.h"
 #include <zbar.h>
+#include <openssl/crypto.h>
+#include <openssl/evp.h>
+#include <openssl/rand.h>
 
 #include <sys/socket.h>
 #include <sys/types.h>
 #include <sys/time.h>
 #include <sys/select.h>
+#include <sys/stat.h>
 #include <sys/un.h>
 #include <netinet/in.h>
 #include <arpa/inet.h>
@@ -72,11 +76,15 @@ static NSString *const kUpdateAPIURL = @"https://api.github.com/repos/notfence/v
 static NSString *const kUpdateReleasesURL = @"https://github.com/notfence/vless-core-app/releases";
 static const NSTimeInterval kAutomaticUpdateCheckInterval = 24.0 * 60.0 * 60.0;
 static NSString *const kImportDirectoryPath = @"/var/mobile/vless-core-import";
+static NSString *const kSecureStoreDirectoryPath = @"/private/var/mobile/Library/Application Support/vless-core";
+static NSString *const kSecureStoreFilePath = @"/private/var/mobile/Library/Application Support/vless-core/configs.dat";
 static const NSUInteger kVCMaximumConfigURIBytes = 4095;
 static const NSUInteger kVCMaximumConfigQueryParameters = 128;
 static const NSUInteger kVCMaximumConfigQueryKeyBytes = 127;
 static const CGFloat kVCMainContentStartY = 246.0f;
 static const CGFloat kVCMainCompactContentStartY = 112.0f;
+static BOOL gVCSecureStoreWritable = YES;
+static NSString *SendCommand(NSString *cmdLine);
 
 static CGFloat VCClampUnit(CGFloat value) {
     if (value < 0.0f) return 0.0f;
@@ -88,6 +96,244 @@ static BOOL VCIsASCIIHexDigit(unichar value) {
     return (value >= '0' && value <= '9') ||
            (value >= 'a' && value <= 'f') ||
            (value >= 'A' && value <= 'F');
+}
+
+static const unsigned char kVCSecureStoreMagic[8] = {'V', 'C', 'S', 'A', 'F', 'E', '0', '1'};
+static const size_t kVCSecureStoreKeyLength = 32;
+static const size_t kVCSecureStoreNonceLength = 12;
+static const size_t kVCSecureStoreTagLength = 16;
+static const NSUInteger kVCSecureStoreMaximumBytes = 64U * 1024U * 1024U;
+
+static BOOL VCWriteAllToFileDescriptor(int fd, const void *bytes, size_t length) {
+    const uint8_t *cursor = (const uint8_t *)bytes;
+    while (length > 0) {
+        ssize_t written = write(fd, cursor, length);
+        if (written < 0 && errno == EINTR) continue;
+        if (written <= 0) return NO;
+        cursor += (size_t)written;
+        length -= (size_t)written;
+    }
+    return YES;
+}
+
+static BOOL VCEnsureSecureStoreDirectory(void) {
+    NSFileManager *manager = [NSFileManager defaultManager];
+    NSDictionary *attributes = [NSDictionary dictionaryWithObject:[NSNumber numberWithUnsignedLong:0700]
+                                                             forKey:NSFilePosixPermissions];
+    if (![manager createDirectoryAtPath:kSecureStoreDirectoryPath
+            withIntermediateDirectories:YES
+                             attributes:attributes
+                                  error:nil]) {
+        return NO;
+    }
+
+    struct stat st;
+    const char *path = [kSecureStoreDirectoryPath fileSystemRepresentation];
+    if (lstat(path, &st) != 0 || !S_ISDIR(st.st_mode) || S_ISLNK(st.st_mode) || st.st_uid != geteuid()) return NO;
+    return chmod(path, 0700) == 0;
+}
+
+static NSData *VCReadSecureStoreFile(BOOL *existsOut) {
+    if (existsOut) *existsOut = NO;
+    const char *path = [kSecureStoreFilePath fileSystemRepresentation];
+    struct stat before;
+    if (lstat(path, &before) != 0) return nil;
+    if (existsOut) *existsOut = YES;
+    if (!S_ISREG(before.st_mode) || S_ISLNK(before.st_mode) || before.st_uid != geteuid() || before.st_nlink != 1 ||
+        before.st_size < 0 || (uint64_t)before.st_size > kVCSecureStoreMaximumBytes) {
+        return nil;
+    }
+
+    int fd = open(path, O_RDONLY | O_NOFOLLOW);
+    if (fd < 0) return nil;
+    struct stat after;
+    if (fstat(fd, &after) != 0 || !S_ISREG(after.st_mode) || after.st_uid != geteuid() || after.st_nlink != 1 ||
+        after.st_dev != before.st_dev || after.st_ino != before.st_ino || after.st_size != before.st_size) {
+        close(fd);
+        return nil;
+    }
+    if ((after.st_mode & 0077) != 0 && fchmod(fd, 0600) != 0) {
+        close(fd);
+        return nil;
+    }
+
+    NSMutableData *data = [NSMutableData dataWithLength:(NSUInteger)after.st_size];
+    uint8_t *output = (uint8_t *)[data mutableBytes];
+    size_t remaining = (size_t)after.st_size;
+    while (remaining > 0) {
+        ssize_t count = read(fd, output, remaining);
+        if (count < 0 && errno == EINTR) continue;
+        if (count <= 0) {
+            close(fd);
+            return nil;
+        }
+        output += (size_t)count;
+        remaining -= (size_t)count;
+    }
+    close(fd);
+    return data;
+}
+
+static BOOL VCWriteSecureStoreFile(NSData *data) {
+    if (![data isKindOfClass:[NSData class]] || [data length] == 0 || [data length] > kVCSecureStoreMaximumBytes ||
+        !VCEnsureSecureStoreDirectory()) {
+        return NO;
+    }
+
+    char temporary[PATH_MAX];
+    int length = snprintf(temporary, sizeof(temporary), "%s/configs.dat.tmp.XXXXXX",
+                          [kSecureStoreDirectoryPath fileSystemRepresentation]);
+    if (length <= 0 || (size_t)length >= sizeof(temporary)) return NO;
+    int fd = mkstemp(temporary);
+    if (fd < 0) return NO;
+
+    BOOL ok = fchmod(fd, 0600) == 0 && VCWriteAllToFileDescriptor(fd, [data bytes], [data length]) && fsync(fd) == 0;
+    if (close(fd) != 0) ok = NO;
+    NSString *temporaryPath = [NSString stringWithUTF8String:temporary];
+    NSDictionary *attributes = [NSDictionary dictionaryWithObjectsAndKeys:
+                                [NSNumber numberWithUnsignedLong:0600], NSFilePosixPermissions,
+                                NSFileProtectionComplete, NSFileProtectionKey,
+                                nil];
+    if (ok) ok = temporaryPath != nil && [[NSFileManager defaultManager] setAttributes:attributes
+                                                                                 ofItemAtPath:temporaryPath
+                                                                                        error:nil];
+    if (ok) ok = rename(temporary, [kSecureStoreFilePath fileSystemRepresentation]) == 0;
+    if (!ok) {
+        unlink(temporary);
+        return NO;
+    }
+    int directoryFD = open([kSecureStoreDirectoryPath fileSystemRepresentation], O_RDONLY | O_NOFOLLOW);
+    if (directoryFD >= 0) {
+        (void)fsync(directoryFD);
+        close(directoryFD);
+    }
+    return YES;
+}
+
+static BOOL VCLoadSecureStoreKey(unsigned char key[32], BOOL createIfMissing) {
+    NSString *response = SendCommand(createIfMissing ? @"STORE_KEY\tCREATE\n" : @"STORE_KEY\tGET\n");
+    if (![response hasPrefix:@"OK "]) return NO;
+    NSString *hex = [response substringFromIndex:3];
+    hex = [hex stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
+    if ([hex length] != kVCSecureStoreKeyLength * 2) return NO;
+    for (NSUInteger i = 0; i < kVCSecureStoreKeyLength; i++) {
+        unichar high = [hex characterAtIndex:i * 2];
+        unichar low = [hex characterAtIndex:i * 2 + 1];
+        if (!VCIsASCIIHexDigit(high) || !VCIsASCIIHexDigit(low)) return NO;
+        int highValue = high >= '0' && high <= '9' ? (int)(high - '0') : (int)((high | 0x20) - 'a' + 10);
+        int lowValue = low >= '0' && low <= '9' ? (int)(low - '0') : (int)((low | 0x20) - 'a' + 10);
+        key[i] = (unsigned char)((highValue << 4) | lowValue);
+    }
+    return YES;
+}
+
+static NSData *VCEncryptSecureStorePayload(NSData *plaintext, const unsigned char key[32]) {
+    if (![plaintext isKindOfClass:[NSData class]] || [plaintext length] == 0 || [plaintext length] > INT_MAX) return nil;
+    unsigned char nonce[12];
+    unsigned char tag[16];
+    if (RAND_bytes(nonce, sizeof(nonce)) != 1) return nil;
+
+    NSMutableData *ciphertext = [NSMutableData dataWithLength:[plaintext length] + 16];
+    EVP_CIPHER_CTX *context = EVP_CIPHER_CTX_new();
+    int count = 0;
+    int total = 0;
+    BOOL ok = context != NULL &&
+              EVP_EncryptInit_ex(context, EVP_aes_256_gcm(), NULL, NULL, NULL) == 1 &&
+              EVP_CIPHER_CTX_ctrl(context, EVP_CTRL_GCM_SET_IVLEN, sizeof(nonce), NULL) == 1 &&
+              EVP_EncryptInit_ex(context, NULL, NULL, key, nonce) == 1 &&
+              EVP_EncryptUpdate(context, NULL, &count, kVCSecureStoreMagic, sizeof(kVCSecureStoreMagic)) == 1 &&
+              EVP_EncryptUpdate(context, [ciphertext mutableBytes], &count, [plaintext bytes], (int)[plaintext length]) == 1;
+    if (ok) {
+        total = count;
+        ok = EVP_EncryptFinal_ex(context, (unsigned char *)[ciphertext mutableBytes] + total, &count) == 1;
+        total += count;
+    }
+    if (ok) ok = EVP_CIPHER_CTX_ctrl(context, EVP_CTRL_GCM_GET_TAG, sizeof(tag), tag) == 1;
+    if (context) EVP_CIPHER_CTX_free(context);
+    if (!ok) return nil;
+    [ciphertext setLength:(NSUInteger)total];
+
+    NSMutableData *output = [NSMutableData dataWithCapacity:sizeof(kVCSecureStoreMagic) + sizeof(nonce) + sizeof(tag) + [ciphertext length]];
+    [output appendBytes:kVCSecureStoreMagic length:sizeof(kVCSecureStoreMagic)];
+    [output appendBytes:nonce length:sizeof(nonce)];
+    [output appendBytes:tag length:sizeof(tag)];
+    [output appendData:ciphertext];
+    return output;
+}
+
+static NSData *VCDecryptSecureStorePayload(NSData *encrypted, const unsigned char key[32]) {
+    NSUInteger headerLength = sizeof(kVCSecureStoreMagic) + kVCSecureStoreNonceLength + kVCSecureStoreTagLength;
+    if (![encrypted isKindOfClass:[NSData class]] || [encrypted length] <= headerLength ||
+        [encrypted length] - headerLength > INT_MAX) return nil;
+    const unsigned char *bytes = (const unsigned char *)[encrypted bytes];
+    if (memcmp(bytes, kVCSecureStoreMagic, sizeof(kVCSecureStoreMagic)) != 0) return nil;
+    const unsigned char *nonce = bytes + sizeof(kVCSecureStoreMagic);
+    const unsigned char *tag = nonce + kVCSecureStoreNonceLength;
+    const unsigned char *ciphertext = tag + kVCSecureStoreTagLength;
+    NSUInteger ciphertextLength = [encrypted length] - headerLength;
+
+    NSMutableData *plaintext = [NSMutableData dataWithLength:ciphertextLength];
+    EVP_CIPHER_CTX *context = EVP_CIPHER_CTX_new();
+    int count = 0;
+    int total = 0;
+    BOOL ok = context != NULL &&
+              EVP_DecryptInit_ex(context, EVP_aes_256_gcm(), NULL, NULL, NULL) == 1 &&
+              EVP_CIPHER_CTX_ctrl(context, EVP_CTRL_GCM_SET_IVLEN, (int)kVCSecureStoreNonceLength, NULL) == 1 &&
+              EVP_DecryptInit_ex(context, NULL, NULL, key, nonce) == 1 &&
+              EVP_DecryptUpdate(context, NULL, &count, kVCSecureStoreMagic, sizeof(kVCSecureStoreMagic)) == 1 &&
+              EVP_DecryptUpdate(context, [plaintext mutableBytes], &count, ciphertext, (int)ciphertextLength) == 1;
+    if (ok) {
+        total = count;
+        ok = EVP_CIPHER_CTX_ctrl(context, EVP_CTRL_GCM_SET_TAG, (int)kVCSecureStoreTagLength, (void *)tag) == 1 &&
+             EVP_DecryptFinal_ex(context, (unsigned char *)[plaintext mutableBytes] + total, &count) == 1;
+        total += count;
+    }
+    if (context) EVP_CIPHER_CTX_free(context);
+    if (!ok) return nil;
+    [plaintext setLength:(NSUInteger)total];
+    return plaintext;
+}
+
+static BOOL VCSaveProtectedConfigurationData(NSArray *configs, NSArray *subscriptions) {
+    NSDictionary *payload = [NSDictionary dictionaryWithObjectsAndKeys:
+                             configs ? configs : [NSArray array], @"configs",
+                             subscriptions ? subscriptions : [NSArray array], @"subscriptions",
+                             nil];
+    NSString *serializationError = nil;
+    NSData *plaintext = [NSPropertyListSerialization dataFromPropertyList:payload
+                                                                    format:NSPropertyListBinaryFormat_v1_0
+                                                          errorDescription:&serializationError];
+    [serializationError release];
+    if (!plaintext) return NO;
+
+    unsigned char key[32];
+    if (!VCLoadSecureStoreKey(key, YES)) return NO;
+    NSData *encrypted = VCEncryptSecureStorePayload(plaintext, key);
+    OPENSSL_cleanse(key, sizeof(key));
+    return encrypted != nil && VCWriteSecureStoreFile(encrypted);
+}
+
+static NSDictionary *VCLoadProtectedConfigurationData(BOOL *fileExistsOut) {
+    NSData *encrypted = VCReadSecureStoreFile(fileExistsOut);
+    if (!encrypted) return nil;
+    unsigned char key[32];
+    if (!VCLoadSecureStoreKey(key, NO)) return nil;
+    NSData *plaintext = VCDecryptSecureStorePayload(encrypted, key);
+    OPENSSL_cleanse(key, sizeof(key));
+    if (!plaintext) return nil;
+
+    NSPropertyListFormat format = NSPropertyListBinaryFormat_v1_0;
+    NSString *serializationError = nil;
+    id payload = [NSPropertyListSerialization propertyListFromData:plaintext
+                                                   mutabilityOption:NSPropertyListImmutable
+                                                             format:&format
+                                                   errorDescription:&serializationError];
+    [serializationError release];
+    if (![payload isKindOfClass:[NSDictionary class]]) return nil;
+    NSArray *configs = [payload objectForKey:@"configs"];
+    NSArray *subscriptions = [payload objectForKey:@"subscriptions"];
+    if (![configs isKindOfClass:[NSArray class]] || ![subscriptions isKindOfClass:[NSArray class]]) return nil;
+    return payload;
 }
 
 static CGRect VCInterpolateRect(CGRect from, CGRect to, CGFloat progress) {
@@ -2924,7 +3170,7 @@ typedef NS_ENUM(NSInteger, VCMainListCellKind) {
         [self question:@"Where can I find the logs?"
                  answer:@"Tap the terminal button on the main screen. The vpnctld log covers daemon and device-routing work; the vless-core log covers the selected proxy transport and server connection. The logs update live, and the trash button clears them. Logs are unavailable for encrypted HAPP subscriptions."],
         [self question:@"What does Stealth mode hide?"
-                 answer:@"Stealth mode masks configuration and subscription links in the interface. It does not change the connection and does not encrypt stored links or redact technical logs. Encrypted HAPP subscriptions are protected separately and never expose their links or connection logs."],
+                 answer:@"Stealth mode masks configuration and subscription links in the interface. It does not change the connection or redact technical logs. Configurations and subscriptions are encrypted in the protected local store regardless of Stealth mode. Encrypted HAPP subscriptions are protected separately and never expose their links or connection logs."],
         nil];
 
     NSArray *compatibility = [NSArray arrayWithObject:
@@ -7079,8 +7325,10 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
 
 - (void)saveData {
     NSUserDefaults *ud = [NSUserDefaults standardUserDefaults];
-    [ud setObject:_configs forKey:kDefaultsConfigsKey];
-    [ud setObject:_subscriptions forKey:kDefaultsSubsKey];
+    if (gVCSecureStoreWritable && VCSaveProtectedConfigurationData(_configs, _subscriptions)) {
+        [ud removeObjectForKey:kDefaultsConfigsKey];
+        [ud removeObjectForKey:kDefaultsSubsKey];
+    }
     [ud setBool:_autoUpdateSubscriptions forKey:kDefaultsAutoUpdateSubsKey];
     [ud setBool:_preserveCustomSubscriptionNames forKey:kDefaultsPreserveCustomSubscriptionNamesKey];
     [ud setBool:_stealthModeEnabled forKey:kDefaultsStealthModeKey];
@@ -7092,19 +7340,41 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
 
 - (void)loadData {
     NSUserDefaults *ud = [NSUserDefaults standardUserDefaults];
+    BOOL secureFileExists = NO;
+    NSDictionary *protectedData = VCLoadProtectedConfigurationData(&secureFileExists);
+    NSArray *legacyConfigs = [ud objectForKey:kDefaultsConfigsKey];
+    NSArray *legacySubscriptions = [ud objectForKey:kDefaultsSubsKey];
+    NSArray *cfg = [protectedData objectForKey:@"configs"];
+    NSArray *subs = [protectedData objectForKey:@"subscriptions"];
+    if (![protectedData isKindOfClass:[NSDictionary class]]) {
+        cfg = [legacyConfigs isKindOfClass:[NSArray class]] ? legacyConfigs : nil;
+        subs = [legacySubscriptions isKindOfClass:[NSArray class]] ? legacySubscriptions : nil;
+        if (secureFileExists && cfg == nil && subs == nil) gVCSecureStoreWritable = NO;
+    }
 
-    NSArray *cfg = [ud objectForKey:kDefaultsConfigsKey];
     if ([cfg isKindOfClass:[NSArray class]]) {
         _configs = [[NSMutableArray alloc] initWithArray:cfg];
     } else {
         _configs = [[NSMutableArray alloc] init];
     }
 
-    NSArray *subs = [ud objectForKey:kDefaultsSubsKey];
     if ([subs isKindOfClass:[NSArray class]]) {
         _subscriptions = [[NSMutableArray alloc] initWithArray:subs];
     } else {
         _subscriptions = [[NSMutableArray alloc] init];
+    }
+
+    if ([protectedData isKindOfClass:[NSDictionary class]] &&
+        ([legacyConfigs isKindOfClass:[NSArray class]] || [legacySubscriptions isKindOfClass:[NSArray class]])) {
+        [ud removeObjectForKey:kDefaultsConfigsKey];
+        [ud removeObjectForKey:kDefaultsSubsKey];
+        [ud synchronize];
+    } else if (![protectedData isKindOfClass:[NSDictionary class]] &&
+        ([legacyConfigs isKindOfClass:[NSArray class]] || [legacySubscriptions isKindOfClass:[NSArray class]]) &&
+        VCSaveProtectedConfigurationData(_configs, _subscriptions)) {
+        [ud removeObjectForKey:kDefaultsConfigsKey];
+        [ud removeObjectForKey:kDefaultsSubsKey];
+        [ud synchronize];
     }
 
     if ([ud objectForKey:kDefaultsAutoUpdateSubsKey] == nil) {
