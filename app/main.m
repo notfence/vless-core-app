@@ -31,6 +31,7 @@
 #include <stdio.h>
 #include <signal.h>
 #include <sys/wait.h>
+#include <sys/utsname.h>
 #include <spawn.h>
 #include "../daemon/vpnctld_protocol.h"
 
@@ -1547,6 +1548,93 @@ static NSString *AppShortVersion(void) {
     return ver;
 }
 
+static NSString *AppUserAgent(void) {
+    return [NSString stringWithFormat:@"vless-core-app/%@/iOS", AppShortVersion()];
+}
+
+typedef struct {
+    const char *identifier;
+    const char *name;
+} VCDeviceModelEntry;
+
+static NSString *DeviceModelName(void) {
+    struct utsname info;
+    if (uname(&info) != 0 || info.machine[0] == '\0') {
+        return TrimSimpleString([[UIDevice currentDevice] model]);
+    }
+
+    static const VCDeviceModelEntry models[] = {
+        { "iPhone1,1", "iPhone" },
+        { "iPhone1,2", "iPhone 3G" },
+        { "iPhone2,1", "iPhone 3GS" },
+        { "iPhone3,1", "iPhone 4" },
+        { "iPhone3,2", "iPhone 4" },
+        { "iPhone3,3", "iPhone 4" },
+        { "iPhone4,1", "iPhone 4s" },
+        { "iPhone5,1", "iPhone 5" },
+        { "iPhone5,2", "iPhone 5" },
+        { "iPhone5,3", "iPhone 5c" },
+        { "iPhone5,4", "iPhone 5c" },
+        { "iPhone6,1", "iPhone 5s" },
+        { "iPhone6,2", "iPhone 5s" },
+        { "iPhone7,1", "iPhone 6 Plus" },
+        { "iPhone7,2", "iPhone 6" },
+        { "iPhone8,1", "iPhone 6s" },
+        { "iPhone8,2", "iPhone 6s Plus" },
+        { "iPhone8,4", "iPhone SE" },
+        { "iPhone9,1", "iPhone 7" },
+        { "iPhone9,2", "iPhone 7 Plus" },
+        { "iPhone9,3", "iPhone 7" },
+        { "iPhone9,4", "iPhone 7 Plus" },
+        { "iPad1,1", "iPad" },
+        { "iPad2,1", "iPad 2" },
+        { "iPad2,2", "iPad 2" },
+        { "iPad2,3", "iPad 2" },
+        { "iPad2,4", "iPad 2" },
+        { "iPad2,5", "iPad mini" },
+        { "iPad2,6", "iPad mini" },
+        { "iPad2,7", "iPad mini" },
+        { "iPad3,1", "iPad 3" },
+        { "iPad3,2", "iPad 3" },
+        { "iPad3,3", "iPad 3" },
+        { "iPad3,4", "iPad 4" },
+        { "iPad3,5", "iPad 4" },
+        { "iPad3,6", "iPad 4" },
+        { "iPad4,1", "iPad Air" },
+        { "iPad4,2", "iPad Air" },
+        { "iPad4,3", "iPad Air" },
+        { "iPad4,4", "iPad mini 2" },
+        { "iPad4,5", "iPad mini 2" },
+        { "iPad4,6", "iPad mini 2" },
+        { "iPad4,7", "iPad mini 3" },
+        { "iPad4,8", "iPad mini 3" },
+        { "iPad4,9", "iPad mini 3" },
+        { "iPad5,1", "iPad mini 4" },
+        { "iPad5,2", "iPad mini 4" },
+        { "iPad5,3", "iPad Air 2" },
+        { "iPad5,4", "iPad Air 2" },
+        { "iPad6,3", "iPad Pro (9.7-inch)" },
+        { "iPad6,4", "iPad Pro (9.7-inch)" },
+        { "iPad6,7", "iPad Pro (12.9-inch)" },
+        { "iPad6,8", "iPad Pro (12.9-inch)" },
+        { "iPad6,11", "iPad (5th generation)" },
+        { "iPad6,12", "iPad (5th generation)" },
+        { "iPod1,1", "iPod touch" },
+        { "iPod2,1", "iPod touch (2nd generation)" },
+        { "iPod3,1", "iPod touch (3rd generation)" },
+        { "iPod4,1", "iPod touch (4th generation)" },
+        { "iPod5,1", "iPod touch (5th generation)" },
+        { "iPod7,1", "iPod touch (6th generation)" }
+    };
+
+    for (size_t i = 0; i < sizeof(models) / sizeof(models[0]); i++) {
+        if (strcmp(info.machine, models[i].identifier) == 0) {
+            return [NSString stringWithUTF8String:models[i].name];
+        }
+    }
+    return [NSString stringWithUTF8String:info.machine];
+}
+
 static NSString *AppBuildVersion(void) {
     NSString *build = [[[NSBundle mainBundle] infoDictionary] objectForKey:@"CFBundleVersion"];
     if (![build isKindOfClass:[NSString class]] || [build length] == 0) {
@@ -1794,30 +1882,32 @@ static NSData *FetchURLViaVlessCoreCurl(NSString *urlString,
     }
 
     char happ_locale_header[256];
-    char happ_os_header[64];
-    char happ_os_version_header[128];
-    char happ_model_header[256];
+    char device_os_header[64];
+    char device_os_version_header[128];
+    char device_model_header[256];
     memset(happ_locale_header, 0, sizeof(happ_locale_header));
-    memset(happ_os_header, 0, sizeof(happ_os_header));
-    memset(happ_os_version_header, 0, sizeof(happ_os_version_header));
-    memset(happ_model_header, 0, sizeof(happ_model_header));
-    if (useHappHeaders) {
+    memset(device_os_header, 0, sizeof(device_os_header));
+    memset(device_os_version_header, 0, sizeof(device_os_version_header));
+    memset(device_model_header, 0, sizeof(device_model_header));
+    if (sendSubscriptionHWID || useHappHeaders) {
         UIDevice *device = [UIDevice currentDevice];
-        NSString *locale = [[NSLocale currentLocale] objectForKey:NSLocaleLanguageCode];
         NSString *systemVersion = TrimSimpleString([device systemVersion]);
-        NSString *model = TrimSimpleString([device model]);
-        const char *locale_c = [locale UTF8String];
+        NSString *model = DeviceModelName();
         const char *system_version_c = [systemVersion UTF8String];
         const char *model_c = [model UTF8String];
-        if (locale_c && *locale_c) {
-            snprintf(happ_locale_header, sizeof(happ_locale_header), "X-Device-Locale: %s", locale_c);
-        }
-        snprintf(happ_os_header, sizeof(happ_os_header), "%s", "X-Device-OS: iOS");
+        snprintf(device_os_header, sizeof(device_os_header), "%s", "X-Device-OS: iOS");
         if (system_version_c && *system_version_c) {
-            snprintf(happ_os_version_header, sizeof(happ_os_version_header), "X-Ver-OS: %s", system_version_c);
+            snprintf(device_os_version_header, sizeof(device_os_version_header), "X-Ver-OS: %s", system_version_c);
         }
         if (model_c && *model_c) {
-            snprintf(happ_model_header, sizeof(happ_model_header), "X-Device-Model: %s", model_c);
+            snprintf(device_model_header, sizeof(device_model_header), "X-Device-Model: %s", model_c);
+        }
+        if (useHappHeaders) {
+            NSString *locale = [[NSLocale currentLocale] objectForKey:NSLocaleLanguageCode];
+            const char *locale_c = [locale UTF8String];
+            if (locale_c && *locale_c) {
+                snprintf(happ_locale_header, sizeof(happ_locale_header), "X-Device-Locale: %s", locale_c);
+            }
         }
     }
 
@@ -1925,21 +2015,22 @@ static NSData *FetchURLViaVlessCoreCurl(NSString *urlString,
                 argv[argc++] = (char *)"-H";
                 argv[argc++] = happ_locale_header;
             }
-            if (happ_os_header[0] != '\0') {
-                argv[argc++] = (char *)"-H";
-                argv[argc++] = happ_os_header;
-            }
-            if (happ_os_version_header[0] != '\0') {
-                argv[argc++] = (char *)"-H";
-                argv[argc++] = happ_os_version_header;
-            }
-            if (happ_model_header[0] != '\0') {
-                argv[argc++] = (char *)"-H";
-                argv[argc++] = happ_model_header;
-            }
         } else if (user_agent_c && *user_agent_c) {
             argv[argc++] = (char *)"--user-agent";
             argv[argc++] = (char *)user_agent_c;
+        }
+
+        if (device_os_header[0] != '\0') {
+            argv[argc++] = (char *)"-H";
+            argv[argc++] = device_os_header;
+        }
+        if (device_os_version_header[0] != '\0') {
+            argv[argc++] = (char *)"-H";
+            argv[argc++] = device_os_version_header;
+        }
+        if (device_model_header[0] != '\0') {
+            argv[argc++] = (char *)"-H";
+            argv[argc++] = device_model_header;
         }
 
         if (allowInsecureFetch) {
@@ -2114,7 +2205,7 @@ static NSComparisonResult VCCompareVersions(NSString *left, NSString *right) {
 }
 
 static NSDictionary *VCPerformUpdateCheck(void) {
-    NSString *userAgent = [NSString stringWithFormat:@"vless-core-app/%@", AppShortVersion()];
+    NSString *userAgent = AppUserAgent();
     NSString *fetchError = nil;
     NSData *data = FetchURLViaVlessCoreCurl(kUpdateAPIURL,
                                             NO,
@@ -3212,6 +3303,7 @@ typedef NS_ENUM(NSInteger, VCMainListCellKind) {
     BOOL _stealthMode;
     BOOL _darkTheme;
     BOOL _automaticUpdateChecks;
+    CGFloat _footerWidth;
     id<SettingsVCDelegate> _delegate;
 }
 @property (nonatomic, assign) BOOL autoUpdate;
@@ -4614,6 +4706,54 @@ commitEditingStyle:(UITableViewCellEditingStyle)editingStyle
     return [NSString stringWithFormat:@"Installed version %@", AppShortVersion()];
 }
 
+- (NSString *)displaySubscriptionHWID {
+    NSString *hwid = SubscriptionHWID();
+    NSRange separator = [hwid rangeOfString:@"-" options:NSBackwardsSearch];
+    if (separator.location == NSNotFound) {
+        return ([hwid length] > 12) ? [hwid substringFromIndex:([hwid length] - 12)] : hwid;
+    }
+    if (NSMaxRange(separator) >= [hwid length]) return hwid;
+    return [hwid substringFromIndex:NSMaxRange(separator)];
+}
+
+- (void)copySubscriptionHWID {
+    [[UIPasteboard generalPasteboard] setString:SubscriptionHWID()];
+    UIAlertView *alert = [[[UIAlertView alloc] initWithTitle:@"HWID copied"
+                                                     message:nil
+                                                    delegate:nil
+                                           cancelButtonTitle:@"OK"
+                                           otherButtonTitles:nil] autorelease];
+    [alert show];
+}
+
+- (UIView *)settingsFooterForWidth:(CGFloat)width {
+    UIView *footer = [[[UIView alloc] initWithFrame:CGRectMake(0.0f, 0.0f, width, 64.0f)] autorelease];
+    footer.backgroundColor = [UIColor clearColor];
+    footer.autoresizingMask = UIViewAutoresizingFlexibleWidth;
+
+    UIButton *hwidButton = [UIButton buttonWithType:UIButtonTypeCustom];
+    hwidButton.frame = CGRectMake(16.0f, 6.0f, width - 32.0f, 48.0f);
+    hwidButton.autoresizingMask = UIViewAutoresizingFlexibleWidth;
+    hwidButton.titleLabel.font = [UIFont boldSystemFontOfSize:13.0f];
+    hwidButton.titleLabel.numberOfLines = 2;
+    hwidButton.titleLabel.textAlignment = NSTextAlignmentCenter;
+    [hwidButton setTitleColor:VCSecondaryTextColor() forState:UIControlStateNormal];
+    [hwidButton setTitle:[NSString stringWithFormat:@"HWID:\n%@", [self displaySubscriptionHWID]]
+                 forState:UIControlStateNormal];
+    hwidButton.accessibilityLabel = [NSString stringWithFormat:@"Subscription HWID: %@", SubscriptionHWID()];
+    hwidButton.accessibilityHint = @"Copies the full HWID";
+    [hwidButton addTarget:self action:@selector(copySubscriptionHWID) forControlEvents:UIControlEventTouchUpInside];
+    [footer addSubview:hwidButton];
+
+    return footer;
+}
+
+- (void)updateSettingsFooterForWidth:(CGFloat)width {
+    if (width <= 0.0f) return;
+    _footerWidth = width;
+    _tableView.tableFooterView = [self settingsFooterForWidth:width];
+}
+
 - (void)startManualUpdateCheck {
     if (_updateChecker) return;
 
@@ -4676,6 +4816,7 @@ commitEditingStyle:(UITableViewCellEditingStyle)editingStyle
     _stealthSwitch.onTintColor = VCAccentColor();
     _automaticUpdateChecksSwitch.onTintColor = VCAccentColor();
     [_tableView reloadData];
+    [self updateSettingsFooterForWidth:_tableView.bounds.size.width];
     VCAppearanceRefreshVisibleTableHeaders(_tableView);
 }
 
@@ -4717,6 +4858,15 @@ commitEditingStyle:(UITableViewCellEditingStyle)editingStyle
                            forControlEvents:UIControlEventValueChanged];
 
     [self applyTheme];
+}
+
+- (void)viewDidLayoutSubviews {
+    [super viewDidLayoutSubviews];
+
+    CGFloat width = _tableView.bounds.size.width;
+    if (fabs(_footerWidth - width) > 0.5f) {
+        [self updateSettingsFooterForWidth:width];
+    }
 }
 
 - (void)viewDidAppear:(BOOL)animated {
@@ -9209,13 +9359,14 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
 
     NSString *fetchErr = nil;
     NSString *curlHeaders = nil;
+    NSString *userAgent = AppUserAgent();
     int curlExitCode = -1;
     NSData *data = FetchURLViaVlessCoreCurl(fetchURLString,
                                             allowInsecureFetch,
                                             allowPlainHTTP,
                                             useHappHeaders,
                                             YES,
-                                            nil,
+                                            userAgent,
                                             &fetchErr,
                                             &curlHeaders,
                                             &curlExitCode);
@@ -9243,7 +9394,7 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
             UIDevice *device = [UIDevice currentDevice];
             NSString *locale = [[NSLocale currentLocale] objectForKey:NSLocaleLanguageCode];
             NSString *systemVersion = TrimSimpleString([device systemVersion]);
-            NSString *model = TrimSimpleString([device model]);
+            NSString *model = DeviceModelName();
             if ([locale length] > 0) [req setValue:locale forHTTPHeaderField:@"X-Device-Locale"];
             [req setValue:@"iOS" forHTTPHeaderField:@"X-Device-OS"];
             if ([systemVersion length] > 0) [req setValue:systemVersion forHTTPHeaderField:@"X-Ver-OS"];
