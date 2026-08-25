@@ -9,6 +9,7 @@
 #include <openssl/crypto.h>
 #include <openssl/evp.h>
 #include <openssl/rand.h>
+#include <Block.h>
 
 #include <sys/socket.h>
 #include <sys/types.h>
@@ -54,6 +55,7 @@ static NSString *const kDefaultsRoutingBypassLANKey = @"vlesscore.routing.bypass
 static NSString *const kDefaultsRoutingRulesKey = @"vlesscore.routing.rules";
 static NSString *const kDefaultsSubHWIDKey = @"vlesscore.subscription_hwid";
 static NSString *const kSubscriptionAllowInsecureFetchKey = @"allow_insecure_fetch";
+static NSString *const kSubscriptionAllowPlainHTTPKey = @"allow_plain_http";
 static NSString *const kSubscriptionHappSourceKey = @"happ_source";
 static NSString *const kHappSubscriptionUserAgent = @"Happ/3.26.3/iOS";
 static NSString *const kHappAddPrefix = @"happ://add/";
@@ -81,6 +83,8 @@ static NSString *const kSecureStoreFilePath = @"/private/var/mobile/Library/Appl
 static const NSUInteger kVCMaximumConfigURIBytes = 4095;
 static const NSUInteger kVCMaximumConfigQueryParameters = 128;
 static const NSUInteger kVCMaximumConfigQueryKeyBytes = 127;
+static const NSUInteger kVCMaximumSubscriptionURLBytes = 8192;
+static const NSUInteger kVCMaximumSubscriptionBytes = 32U * 1024U * 1024U;
 static const CGFloat kVCMainContentStartY = 246.0f;
 static const CGFloat kVCMainCompactContentStartY = 112.0f;
 static BOOL gVCSecureStoreWritable = YES;
@@ -427,6 +431,7 @@ typedef NS_ENUM(NSInteger, VCAlertTag) {
     VCAlertTagImportManual = 1001,
     VCAlertTagImportInsecureSubscription = 1002,
     VCAlertTagUpdateAvailable = 1003,
+    VCAlertTagPlainHTTPSubscription = 1004,
 };
 
 typedef NS_ENUM(NSInteger, VCActionSheetTag) {
@@ -1616,6 +1621,19 @@ static BOOL SubscriptionDictionaryAllowsInsecureFetch(NSDictionary *sub) {
     return NO;
 }
 
+static BOOL URLStringUsesPlainHTTP(NSString *urlString) {
+    if (![urlString isKindOfClass:[NSString class]] || [urlString length] == 0) return NO;
+    NSURL *url = [NSURL URLWithString:urlString];
+    NSString *scheme = [[url scheme] lowercaseString];
+    return [scheme isEqualToString:@"http"];
+}
+
+static BOOL SubscriptionDictionaryAllowsPlainHTTP(NSDictionary *sub) {
+    if (![sub isKindOfClass:[NSDictionary class]]) return NO;
+    id value = [sub objectForKey:kSubscriptionAllowPlainHTTPKey];
+    return [value respondsToSelector:@selector(boolValue)] && [value boolValue];
+}
+
 static BOOL HappURLStringIsEncrypted(NSString *urlString) {
     NSString *lower = [urlString isKindOfClass:[NSString class]] ? [urlString lowercaseString] : nil;
     return [lower hasPrefix:@"happ://crypt4/"] || [lower hasPrefix:@"happ://crypt5/"];
@@ -1674,8 +1692,48 @@ static BOOL SubscriptionDataLooksLikeHTML(NSData *data) {
            [lower rangeOfString:@"<body"].location != NSNotFound;
 }
 
+static int CreateCurlURLConfigFD(const char *url) {
+    if (!url || !*url) return -1;
+    size_t urlLength = strlen(url);
+    if (urlLength > kVCMaximumSubscriptionURLBytes || urlLength > (SIZE_MAX - 16) / 2) return -1;
+
+    size_t capacity = urlLength * 2 + 16;
+    char *config = (char *)malloc(capacity);
+    if (!config) return -1;
+
+    size_t used = 0;
+    memcpy(config + used, "url = \"", 7);
+    used += 7;
+    for (size_t i = 0; i < urlLength; i++) {
+        unsigned char value = (unsigned char)url[i];
+        if (value < 0x20 || value == 0x7f) {
+            memset(config, 0, capacity);
+            free(config);
+            return -1;
+        }
+        if (value == '\\' || value == '"') config[used++] = '\\';
+        config[used++] = (char)value;
+    }
+    config[used++] = '"';
+    config[used++] = '\n';
+
+    char path[] = "/tmp/vlesscore-curl-url-XXXXXX";
+    int fd = mkstemp(path);
+    if (fd >= 0) unlink(path);
+    BOOL ok = fd >= 0 && fchmod(fd, 0600) == 0 &&
+              VCWriteAllToFileDescriptor(fd, config, used) && lseek(fd, 0, SEEK_SET) == 0;
+    memset(config, 0, capacity);
+    free(config);
+    if (!ok) {
+        if (fd >= 0) close(fd);
+        return -1;
+    }
+    return fd;
+}
+
 static NSData *FetchURLViaVlessCoreCurl(NSString *urlString,
                                        BOOL allowInsecureFetch,
+                                       BOOL allowPlainHTTP,
                                        BOOL useHappHeaders,
                                        BOOL sendSubscriptionHWID,
                                        NSString *userAgent,
@@ -1698,6 +1756,23 @@ static NSData *FetchURLViaVlessCoreCurl(NSString *urlString,
         if (errOut) *errOut = @"vless-core-curl not found";
         return nil;
     }
+
+    NSURL *parsedURL = [NSURL URLWithString:urlString];
+    NSString *scheme = [[[parsedURL scheme] lowercaseString] copy];
+    BOOL usesHTTPS = [scheme isEqualToString:@"https"];
+    BOOL usesHTTP = [scheme isEqualToString:@"http"];
+    BOOL allowsHTTPTransport = usesHTTP || useHappHeaders;
+    if ((!usesHTTPS && !usesHTTP) || ![[parsedURL host] length]) {
+        [scheme release];
+        if (errOut) *errOut = @"Subscription URL must use HTTP or HTTPS";
+        return nil;
+    }
+    if (usesHTTP && !allowPlainHTTP && !useHappHeaders) {
+        [scheme release];
+        if (errOut) *errOut = @"Plain HTTP subscription requires confirmation";
+        return nil;
+    }
+    [scheme release];
 
     const char *url_c = [urlString UTF8String];
     if (!url_c || !*url_c) {
@@ -1769,20 +1844,40 @@ static NSData *FetchURLViaVlessCoreCurl(NSString *urlString,
     }
     close(hdr_fd);
 
+    int curl_config_fd = -1;
+    if (!useHappHeaders) {
+        curl_config_fd = CreateCurlURLConfigFD(url_c);
+        if (curl_config_fd < 0) {
+            close(out_fd);
+            close(err_fd);
+            CleanupSubscriptionFetchTempFiles(out_tmpl, err_tmpl, hdr_tmpl);
+            if (errOut) *errOut = @"Invalid or excessively long subscription URL";
+            return nil;
+        }
+    }
+
     pid_t pid = fork();
     if (pid < 0) {
         close(out_fd);
         close(err_fd);
+        if (curl_config_fd >= 0) close(curl_config_fd);
         CleanupSubscriptionFetchTempFiles(out_tmpl, err_tmpl, hdr_tmpl);
         if (errOut) *errOut = [NSString stringWithFormat:@"fork failed: %s", strerror(errno)];
         return nil;
     }
 
     if (pid == 0) {
-        int dn = open("/dev/null", O_RDONLY);
-        if (dn >= 0) {
-            (void)dup2(dn, STDIN_FILENO);
-            if (dn > STDERR_FILENO) close(dn);
+        if (curl_config_fd >= 0) {
+            if (curl_config_fd != STDIN_FILENO) {
+                if (dup2(curl_config_fd, STDIN_FILENO) < 0) _exit(126);
+                close(curl_config_fd);
+            }
+        } else {
+            int dn = open("/dev/null", O_RDONLY);
+            if (dn >= 0) {
+                (void)dup2(dn, STDIN_FILENO);
+                if (dn > STDERR_FILENO) close(dn);
+            }
         }
 
         (void)dup2(out_fd, STDOUT_FILENO);
@@ -1798,12 +1893,22 @@ static NSData *FetchURLViaVlessCoreCurl(NSString *urlString,
         argv[argc++] = (char *)"--compressed";
         argv[argc++] = (char *)"--silent";
         argv[argc++] = (char *)"--show-error";
+        if (!useHappHeaders) {
+            argv[argc++] = (char *)"--config";
+            argv[argc++] = (char *)"-";
+        }
         argv[argc++] = (char *)"--connect-timeout";
         argv[argc++] = (char *)"10";
         argv[argc++] = (char *)"--max-time";
         argv[argc++] = (char *)"25";
+        argv[argc++] = (char *)"--max-filesize";
+        argv[argc++] = (char *)"33554432";
+        argv[argc++] = (char *)"--max-redirs";
+        argv[argc++] = (char *)"10";
         argv[argc++] = (char *)"--proto";
-        argv[argc++] = (char *)"=https,http";
+        argv[argc++] = (char *)(allowsHTTPTransport ? "=https,http" : "=https");
+        argv[argc++] = (char *)"--proto-redir";
+        argv[argc++] = (char *)(allowsHTTPTransport ? "=https,http" : "=https");
         argv[argc++] = (char *)"--curves";
         argv[argc++] = (char *)"X25519:P-256:P-384";
         argv[argc++] = (char *)"-D";
@@ -1847,7 +1952,9 @@ static NSData *FetchURLViaVlessCoreCurl(NSString *urlString,
             argv[argc++] = (char *)ca_bundle_path;
         }
 
-        argv[argc++] = (char *)url_c;
+        if (useHappHeaders) {
+            argv[argc++] = (char *)url_c;
+        }
         argv[argc] = NULL;
 
         execv(curl_path, argv);
@@ -1856,6 +1963,7 @@ static NSData *FetchURLViaVlessCoreCurl(NSString *urlString,
 
     close(out_fd);
     close(err_fd);
+    if (curl_config_fd >= 0) close(curl_config_fd);
 
     int status = 0;
     int waited_ms = 0;
@@ -1880,6 +1988,17 @@ static NSData *FetchURLViaVlessCoreCurl(NSString *urlString,
             return nil;
         }
 
+        struct stat partialBodyStat;
+        if (lstat(out_tmpl, &partialBodyStat) == 0 &&
+            S_ISREG(partialBodyStat.st_mode) &&
+            (uint64_t)partialBodyStat.st_size > kVCMaximumSubscriptionBytes) {
+            kill(pid, SIGKILL);
+            waitpid(pid, &status, 0);
+            CleanupSubscriptionFetchTempFiles(out_tmpl, err_tmpl, hdr_tmpl);
+            if (errOut) *errOut = @"Subscription response exceeds 32 MiB";
+            return nil;
+        }
+
         usleep(100 * 1000);
         waited_ms += 100;
     }
@@ -1887,14 +2006,11 @@ static NSData *FetchURLViaVlessCoreCurl(NSString *urlString,
     NSString *out_path = [NSString stringWithUTF8String:out_tmpl];
     NSString *err_path = [NSString stringWithUTF8String:err_tmpl];
     NSString *hdr_path = [NSString stringWithUTF8String:hdr_tmpl];
-    NSData *body = [NSData dataWithContentsOfFile:out_path];
     NSString *curl_err = TrimSimpleString(ReadTextFileBestEffort(err_path));
     NSString *curl_hdr = ReadTextFileBestEffort(hdr_path);
     if ([curl_err length] > 220) {
         curl_err = [curl_err substringToIndex:220];
     }
-
-    CleanupSubscriptionFetchTempFiles(out_tmpl, err_tmpl, hdr_tmpl);
 
     if (headersOut) {
         *headersOut = curl_hdr;
@@ -1913,8 +2029,29 @@ static NSData *FetchURLViaVlessCoreCurl(NSString *urlString,
                 *errOut = @"vless-core-curl terminated unexpectedly";
             }
         }
+        CleanupSubscriptionFetchTempFiles(out_tmpl, err_tmpl, hdr_tmpl);
         return nil;
     }
+
+    struct stat bodyStat;
+    if (lstat(out_tmpl, &bodyStat) != 0 || !S_ISREG(bodyStat.st_mode) || bodyStat.st_nlink != 1) {
+        CleanupSubscriptionFetchTempFiles(out_tmpl, err_tmpl, hdr_tmpl);
+        if (errOut) *errOut = @"Invalid subscription response file";
+        return nil;
+    }
+    if (bodyStat.st_size <= 0) {
+        CleanupSubscriptionFetchTempFiles(out_tmpl, err_tmpl, hdr_tmpl);
+        if (errOut) *errOut = @"Empty subscription response";
+        return nil;
+    }
+    if ((uint64_t)bodyStat.st_size > kVCMaximumSubscriptionBytes) {
+        CleanupSubscriptionFetchTempFiles(out_tmpl, err_tmpl, hdr_tmpl);
+        if (errOut) *errOut = @"Subscription response exceeds 32 MiB";
+        return nil;
+    }
+
+    NSData *body = [NSData dataWithContentsOfFile:out_path];
+    CleanupSubscriptionFetchTempFiles(out_tmpl, err_tmpl, hdr_tmpl);
 
     if (!body || [body length] == 0) {
         if (errOut) *errOut = @"Empty subscription response";
@@ -1976,6 +2113,7 @@ static NSDictionary *VCPerformUpdateCheck(void) {
     NSString *userAgent = [NSString stringWithFormat:@"vless-core-app/%@", AppShortVersion()];
     NSString *fetchError = nil;
     NSData *data = FetchURLViaVlessCoreCurl(kUpdateAPIURL,
+                                            NO,
                                             NO,
                                             NO,
                                             NO,
@@ -5828,6 +5966,7 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
                   delegate:(id<SubscriptionInfoVCDelegate>)delegate;
 - (NSInteger)subscriptionIndex;
 - (void)reloadWithSubscription:(NSDictionary *)subscription;
+- (void)cancelRefresh;
 - (void)finishRefreshWithSubscription:(NSDictionary *)subscription errorText:(NSString *)errorText;
 @end
 
@@ -6246,6 +6385,12 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
     [alert show];
 }
 
+- (void)cancelRefresh {
+    _refreshing = NO;
+    [self buildSections];
+    [_tableView reloadData];
+}
+
 - (BOOL)shouldAutorotateToInterfaceOrientation:(UIInterfaceOrientation)interfaceOrientation {
     if (IsPadDevice()) {
         return UIInterfaceOrientationIsPortrait(interfaceOrientation) || UIInterfaceOrientationIsLandscape(interfaceOrientation);
@@ -6463,6 +6608,8 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
     NSString *_pendingImportDoneStatus;
     NSArray *_pendingImportRefreshIndices;
     NSArray *_pendingInsecureImportURLs;
+    void (^_pendingPlainHTTPConfirmation)(void);
+    void (^_pendingPlainHTTPCancellation)(void);
     NSDictionary *_subscriptionToReexpandAfterReorder;
     VCUpdateChecker *_updateChecker;
     NSString *_availableReleaseURL;
@@ -6519,6 +6666,23 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
 }
 - (NSString *)shortUpdateFailureTextForSubscription:(NSDictionary *)sub errorText:(NSString *)errorText;
 - (void)showSubscriptionUpdateFailures:(NSArray *)failureTexts;
+- (BOOL)subscriptionNeedsPlainHTTPApproval:(NSDictionary *)subscription;
+- (BOOL)approvePlainHTTPForSubscriptionAtIndex:(NSInteger)index;
+- (void)showPlainHTTPSubscriptionWarningForCount:(NSUInteger)count
+                                      confirmation:(void (^)(void))confirmation;
+- (void)showPlainHTTPSubscriptionWarningForCount:(NSUInteger)count
+                                      confirmation:(void (^)(void))confirmation
+                                        cancellation:(void (^)(void))cancellation;
+- (void)startBackgroundSubscriptionImportForURLs:(NSArray *)urlStrings
+                              allowInsecureFetch:(BOOL)allowInsecureFetch
+                                     startStatus:(NSString *)startStatus
+                              importedPrefixPart:(NSString *)importedPrefixPart
+                     fallbackSubscriptionsByURL:(NSDictionary *)fallbackSubscriptionsByURL
+                                  allowPlainHTTP:(BOOL)allowPlainHTTP;
+- (void)importSubscriptionURL:(NSString *)urlString
+           allowInsecureFetch:(BOOL)allowInsecureFetch
+               allowPlainHTTP:(BOOL)allowPlainHTTP
+                   happSource:(BOOL)happSource;
 - (void)applyTheme;
 - (UIView *)accessorySubscriptionHeaderAtIndex:(NSInteger)index expanded:(BOOL)expanded loading:(BOOL)loading;
 - (void)setMainReorderingSection:(NSInteger)section showStatus:(BOOL)showStatus;
@@ -8986,12 +9150,14 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
     NSDictionary *userInfoFromMeta = nil;
     NSDictionary *metadataFromMeta = nil;
     BOOL allowInsecureFetch = SubscriptionDictionaryAllowsInsecureFetch(sub);
+    BOOL allowPlainHTTP = SubscriptionDictionaryAllowsPlainHTTP(sub);
 
     NSString *fetchErr = nil;
     NSString *curlHeaders = nil;
     int curlExitCode = -1;
     NSData *data = FetchURLViaVlessCoreCurl(fetchURLString,
                                             allowInsecureFetch,
+                                            allowPlainHTTP,
                                             useHappHeaders,
                                             YES,
                                             nil,
@@ -9008,7 +9174,8 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
         userInfoFromMeta = [self subscriptionUserInfoFromMetadataText:curlHeaders];
         metadataFromMeta = [self subscriptionMetadataFromMetadataText:curlHeaders];
     }
-    if (!data && !allowInsecureFetch && (!fetchErr || [fetchErr hasPrefix:@"vless-core-curl not found"])) {
+    if (useHappHeaders && !data && !allowInsecureFetch &&
+        (!fetchErr || [fetchErr hasPrefix:@"vless-core-curl not found"])) {
         NSMutableURLRequest *req = [NSMutableURLRequest requestWithURL:url
                                                            cachePolicy:NSURLRequestReloadIgnoringLocalCacheData
                                                        timeoutInterval:20.0];
@@ -9111,10 +9278,41 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
     return [self updatedSubscriptionDictionaryFromSource:sub errorText:errorTextOut insecureRetryAvailable:NULL];
 }
 
+- (BOOL)subscriptionNeedsPlainHTTPApproval:(NSDictionary *)sub {
+    if (![sub isKindOfClass:[NSDictionary class]] || SubscriptionDictionaryUsesHappHeaders(sub)) return NO;
+    return URLStringUsesPlainHTTP([sub objectForKey:@"url"]) &&
+           !SubscriptionDictionaryAllowsPlainHTTP(sub);
+}
+
+- (BOOL)approvePlainHTTPForSubscriptionAtIndex:(NSInteger)index {
+    if (index < 0 || index >= (NSInteger)[_subscriptions count]) return NO;
+    NSDictionary *sub = [_subscriptions objectAtIndex:index];
+    if (![self subscriptionNeedsPlainHTTPApproval:sub]) {
+        return SubscriptionDictionaryAllowsPlainHTTP(sub);
+    }
+
+    NSMutableDictionary *approved = [NSMutableDictionary dictionaryWithDictionary:sub];
+    [approved setObject:[NSNumber numberWithBool:YES] forKey:kSubscriptionAllowPlainHTTPKey];
+    [_subscriptions replaceObjectAtIndex:index withObject:approved];
+    return YES;
+}
+
 - (BOOL)refreshSubscriptionAtIndex:(NSInteger)idx showStatus:(BOOL)showStatus {
     if (idx < 0 || idx >= (NSInteger)[_subscriptions count]) return NO;
 
     NSDictionary *sub = [_subscriptions objectAtIndex:idx];
+    if ([self subscriptionNeedsPlainHTTPApproval:sub]) {
+        [self showPlainHTTPSubscriptionWarningForCount:1 confirmation:^{
+            if ([self approvePlainHTTPForSubscriptionAtIndex:idx]) {
+                [self saveData];
+                if ([self refreshSubscriptionAtIndex:idx showStatus:YES]) {
+                    [self reloadMainTableDataAfterExternalChange];
+                }
+            }
+        }];
+        return NO;
+    }
+
     NSString *errorText = nil;
     NSDictionary *updated = [self updatedSubscriptionDictionaryFromSource:sub errorText:&errorText];
     if (![updated isKindOfClass:[NSDictionary class]]) {
@@ -9192,6 +9390,34 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
             _pendingImportRefreshIndices = nil;
         }
         [self showStatus:@"Subscriptions update is already running" ok:YES];
+        return;
+    }
+
+    NSMutableArray *plainHTTPIndices = [NSMutableArray array];
+    if ([_pendingImportRefreshIndices count] > 0) {
+        for (id indexValue in _pendingImportRefreshIndices) {
+            NSInteger index = [indexValue integerValue];
+            if (index >= 0 && index < (NSInteger)[_subscriptions count] &&
+                [self subscriptionNeedsPlainHTTPApproval:[_subscriptions objectAtIndex:index]]) {
+                [plainHTTPIndices addObject:[NSNumber numberWithInteger:index]];
+            }
+        }
+    } else {
+        for (NSInteger index = 0; index < (NSInteger)[_subscriptions count]; index++) {
+            if ([self subscriptionNeedsPlainHTTPApproval:[_subscriptions objectAtIndex:index]]) {
+                [plainHTTPIndices addObject:[NSNumber numberWithInteger:index]];
+            }
+        }
+    }
+    if ([plainHTTPIndices count] > 0) {
+        [self showPlainHTTPSubscriptionWarningForCount:[plainHTTPIndices count] confirmation:^{
+            BOOL changed = NO;
+            for (NSNumber *indexValue in plainHTTPIndices) {
+                changed |= [self approvePlainHTTPForSubscriptionAtIndex:[indexValue integerValue]];
+            }
+            if (changed) [self saveData];
+            [self startBackgroundSubscriptionRefreshWithStatus:startStatus];
+        }];
         return;
     }
 
@@ -9571,6 +9797,7 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
 
 - (NSDictionary *)subscriptionDictionaryForURL:(NSString *)urlString
                              allowInsecureFetch:(BOOL)allowInsecureFetch
+                                 allowPlainHTTP:(BOOL)allowPlainHTTP
                                      happSource:(BOOL)happSource {
     NSString *name = happSource ? @"HAPP subscription" : [self subscriptionNameFromURLString:urlString];
     NSMutableDictionary *sub = [NSMutableDictionary dictionaryWithObjectsAndKeys:
@@ -9581,10 +9808,22 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
     if (allowInsecureFetch) {
         [sub setObject:[NSNumber numberWithBool:YES] forKey:kSubscriptionAllowInsecureFetchKey];
     }
+    if (allowPlainHTTP && !happSource && URLStringUsesPlainHTTP(urlString)) {
+        [sub setObject:[NSNumber numberWithBool:YES] forKey:kSubscriptionAllowPlainHTTPKey];
+    }
     if (happSource) {
         [sub setObject:[NSNumber numberWithBool:YES] forKey:kSubscriptionHappSourceKey];
     }
     return sub;
+}
+
+- (NSDictionary *)subscriptionDictionaryForURL:(NSString *)urlString
+                             allowInsecureFetch:(BOOL)allowInsecureFetch
+                                     happSource:(BOOL)happSource {
+    return [self subscriptionDictionaryForURL:urlString
+                           allowInsecureFetch:allowInsecureFetch
+                               allowPlainHTTP:NO
+                                   happSource:happSource];
 }
 
 - (NSDictionary *)subscriptionDictionaryForURL:(NSString *)urlString allowInsecureFetch:(BOOL)allowInsecureFetch {
@@ -9601,6 +9840,43 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
     _selectedSubItemIndex = 0;
     [self normalizeSelection];
     [_tableView reloadData];
+}
+
+- (void)showPlainHTTPSubscriptionWarningForCount:(NSUInteger)count
+                                      confirmation:(void (^)(void))confirmation {
+    [self showPlainHTTPSubscriptionWarningForCount:count
+                                      confirmation:confirmation
+                                        cancellation:nil];
+}
+
+- (void)showPlainHTTPSubscriptionWarningForCount:(NSUInteger)count
+                                      confirmation:(void (^)(void))confirmation
+                                        cancellation:(void (^)(void))cancellation {
+    if (!confirmation || count == 0) return;
+
+    if (_pendingPlainHTTPConfirmation) {
+        Block_release(_pendingPlainHTTPConfirmation);
+        _pendingPlainHTTPConfirmation = NULL;
+    }
+    if (_pendingPlainHTTPCancellation) {
+        Block_release(_pendingPlainHTTPCancellation);
+        _pendingPlainHTTPCancellation = NULL;
+    }
+    _pendingPlainHTTPConfirmation = Block_copy(confirmation);
+    if (cancellation) _pendingPlainHTTPCancellation = Block_copy(cancellation);
+
+    NSString *message = count == 1
+        ? @"This subscription uses unencrypted HTTP. Its access token and configurations can be read or changed by anyone on the network. Continue and allow HTTP for this subscription?"
+        : [NSString stringWithFormat:@"%lu subscriptions use unencrypted HTTP. Their access tokens and configurations can be read or changed by anyone on the network. Continue and allow HTTP for them?",
+                                     (unsigned long)count];
+    UIAlertView *alert = [[[UIAlertView alloc] initWithTitle:@"Unencrypted Subscription"
+                                                    message:message
+                                                   delegate:self
+                                          cancelButtonTitle:@"Cancel"
+                                          otherButtonTitles:@"Continue", nil] autorelease];
+    alert.tag = VCAlertTagPlainHTTPSubscription;
+    [alert show];
+    [self showStatus:@"HTTP subscription requires confirmation" ok:NO];
 }
 
 - (void)showInsecureSubscriptionImportPromptForURLs:(NSArray *)urlStrings
@@ -9769,6 +10045,20 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
                                      startStatus:(NSString *)startStatus
                               importedPrefixPart:(NSString *)importedPrefixPart
                      fallbackSubscriptionsByURL:(NSDictionary *)fallbackSubscriptionsByURL {
+    [self startBackgroundSubscriptionImportForURLs:urlStrings
+                               allowInsecureFetch:allowInsecureFetch
+                                      startStatus:startStatus
+                               importedPrefixPart:importedPrefixPart
+                      fallbackSubscriptionsByURL:fallbackSubscriptionsByURL
+                                   allowPlainHTTP:NO];
+}
+
+- (void)startBackgroundSubscriptionImportForURLs:(NSArray *)urlStrings
+                              allowInsecureFetch:(BOOL)allowInsecureFetch
+                                     startStatus:(NSString *)startStatus
+                              importedPrefixPart:(NSString *)importedPrefixPart
+                     fallbackSubscriptionsByURL:(NSDictionary *)fallbackSubscriptionsByURL
+                                  allowPlainHTTP:(BOOL)allowPlainHTTP {
     NSMutableArray *cleanURLs = [NSMutableArray array];
     for (id obj in urlStrings) {
         if (![obj isKindOfClass:[NSString class]]) continue;
@@ -9782,6 +10072,27 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
     if ([cleanURLs count] == 0) {
         [self showStatus:@"No subscriptions to import" ok:NO];
         return;
+    }
+
+    if (!allowPlainHTTP) {
+        NSUInteger plainHTTPCount = 0;
+        for (NSString *urlString in cleanURLs) {
+            if (![self isHappAddLink:urlString] && ![self isHappEncryptedLink:urlString] &&
+                URLStringUsesPlainHTTP(urlString)) {
+                plainHTTPCount++;
+            }
+        }
+        if (plainHTTPCount > 0) {
+            [self showPlainHTTPSubscriptionWarningForCount:plainHTTPCount confirmation:^{
+                [self startBackgroundSubscriptionImportForURLs:cleanURLs
+                                           allowInsecureFetch:allowInsecureFetch
+                                                  startStatus:startStatus
+                                           importedPrefixPart:importedPrefixPart
+                                  fallbackSubscriptionsByURL:fallbackSubscriptionsByURL
+                                               allowPlainHTTP:YES];
+            }];
+            return;
+        }
     }
 
     if (_launchAutoUpdateInProgress) {
@@ -9822,6 +10133,8 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
             }
             NSDictionary *sub = [self subscriptionDictionaryForURL:subscriptionURL
                                                  allowInsecureFetch:allowInsecureFetch
+                                                     allowPlainHTTP:(allowPlainHTTP && !happSource &&
+                                                                     URLStringUsesPlainHTTP(subscriptionURL))
                                                          happSource:happSource];
             NSString *errorText = nil;
             BOOL insecureRetryAvailable = NO;
@@ -9833,7 +10146,14 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
             } else if (!allowInsecureFetch && insecureRetryAvailable) {
                 [insecureURLs addObject:urlString];
             } else if ([[fallbackSubscriptions objectForKey:subscriptionURL] isKindOfClass:[NSDictionary class]]) {
-                [importedSubs addObject:[fallbackSubscriptions objectForKey:subscriptionURL]];
+                NSDictionary *fallback = [fallbackSubscriptions objectForKey:subscriptionURL];
+                if (allowPlainHTTP && !happSource && URLStringUsesPlainHTTP(subscriptionURL)) {
+                    NSMutableDictionary *approvedFallback = [NSMutableDictionary dictionaryWithDictionary:fallback];
+                    [approvedFallback setObject:[NSNumber numberWithBool:YES]
+                                         forKey:kSubscriptionAllowPlainHTTPKey];
+                    fallback = approvedFallback;
+                }
+                [importedSubs addObject:fallback];
                 fallbackCount++;
             } else {
                 failedCount++;
@@ -9846,18 +10166,33 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
 
             NSUInteger addedCount = 0;
             NSInteger lastAddedIndex = -1;
+            BOOL savedPlainHTTPApproval = NO;
             for (NSDictionary *sub in importedSubs) {
                 NSString *urlString = [sub objectForKey:@"url"];
                 if (![urlString isKindOfClass:[NSString class]] || [urlString length] == 0) continue;
-                if ([self existingSubscriptionIndexForURL:urlString] >= 0) continue;
+                NSInteger existingIndex = [self existingSubscriptionIndexForURL:urlString];
+                if (existingIndex >= 0) {
+                    NSDictionary *existingSub = [_subscriptions objectAtIndex:existingIndex];
+                    if (SubscriptionDictionaryAllowsPlainHTTP(sub) &&
+                        !SubscriptionDictionaryAllowsPlainHTTP(existingSub)) {
+                        NSMutableDictionary *approved = [NSMutableDictionary dictionaryWithDictionary:existingSub];
+                        [approved setObject:[NSNumber numberWithBool:YES]
+                                    forKey:kSubscriptionAllowPlainHTTPKey];
+                        [_subscriptions replaceObjectAtIndex:existingIndex withObject:approved];
+                        savedPlainHTTPApproval = YES;
+                    }
+                    continue;
+                }
 
                 [_subscriptions addObject:sub];
                 addedCount++;
                 lastAddedIndex = [_subscriptions count] - 1;
             }
 
-            if (addedCount > 0) {
+            if (addedCount > 0 || savedPlainHTTPApproval) {
                 [self saveData];
+            }
+            if (addedCount > 0) {
                 [self selectSubscriptionAtIndex:lastAddedIndex];
             } else {
                 [self normalizeSelection];
@@ -9964,6 +10299,7 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
 
 - (void)importSubscriptionURL:(NSString *)urlString
            allowInsecureFetch:(BOOL)allowInsecureFetch
+               allowPlainHTTP:(BOOL)allowPlainHTTP
                    happSource:(BOOL)happSource {
     NSString *normalizedURL = [self safeTrim:urlString];
     if (![normalizedURL isKindOfClass:[NSString class]] || [normalizedURL length] == 0) {
@@ -9972,12 +10308,37 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
     }
 
     NSInteger existing = [self existingSubscriptionIndexForURL:normalizedURL];
+    if (!happSource && URLStringUsesPlainHTTP(normalizedURL) && !allowPlainHTTP) {
+        if (existing >= 0 &&
+            SubscriptionDictionaryAllowsPlainHTTP([_subscriptions objectAtIndex:existing])) {
+            allowPlainHTTP = YES;
+        } else {
+            [self showPlainHTTPSubscriptionWarningForCount:1 confirmation:^{
+                [self importSubscriptionURL:normalizedURL
+                         allowInsecureFetch:allowInsecureFetch
+                             allowPlainHTTP:YES
+                                  happSource:NO];
+            }];
+            return;
+        }
+    }
+
     if (existing >= 0) {
         NSArray *items = [self subscriptionItemsAtIndex:existing];
         if (!allowInsecureFetch && [items count] > 0) {
-            if (happSource && !SubscriptionDictionaryUsesHappHeaders([_subscriptions objectAtIndex:existing])) {
-                NSMutableDictionary *stored = [NSMutableDictionary dictionaryWithDictionary:[_subscriptions objectAtIndex:existing]];
-                [stored setObject:[NSNumber numberWithBool:YES] forKey:kSubscriptionHappSourceKey];
+            NSDictionary *existingSubscription = [_subscriptions objectAtIndex:existing];
+            BOOL needsHappFlag = happSource && !SubscriptionDictionaryUsesHappHeaders(existingSubscription);
+            BOOL needsPlainHTTPFlag = allowPlainHTTP && !happSource &&
+                                      URLStringUsesPlainHTTP(normalizedURL) &&
+                                      !SubscriptionDictionaryAllowsPlainHTTP(existingSubscription);
+            if (needsHappFlag || needsPlainHTTPFlag) {
+                NSMutableDictionary *stored = [NSMutableDictionary dictionaryWithDictionary:existingSubscription];
+                if (needsHappFlag) {
+                    [stored setObject:[NSNumber numberWithBool:YES] forKey:kSubscriptionHappSourceKey];
+                }
+                if (needsPlainHTTPFlag) {
+                    [stored setObject:[NSNumber numberWithBool:YES] forKey:kSubscriptionAllowPlainHTTPKey];
+                }
                 [_subscriptions replaceObjectAtIndex:existing withObject:stored];
                 [self saveData];
             }
@@ -9990,6 +10351,9 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
         [sub setObject:normalizedURL forKey:@"url"];
         if (allowInsecureFetch) {
             [sub setObject:[NSNumber numberWithBool:YES] forKey:kSubscriptionAllowInsecureFetchKey];
+        }
+        if (allowPlainHTTP && !happSource && URLStringUsesPlainHTTP(normalizedURL)) {
+            [sub setObject:[NSNumber numberWithBool:YES] forKey:kSubscriptionAllowPlainHTTPKey];
         }
         if (happSource) {
             [sub setObject:[NSNumber numberWithBool:YES] forKey:kSubscriptionHappSourceKey];
@@ -10019,6 +10383,7 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
 
     NSDictionary *sub = [self subscriptionDictionaryForURL:normalizedURL
                                          allowInsecureFetch:allowInsecureFetch
+                                             allowPlainHTTP:allowPlainHTTP
                                                  happSource:happSource];
     NSString *errorText = nil;
     BOOL insecureRetryAvailable = NO;
@@ -10036,6 +10401,15 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
     }
 
     [self showStatus:([errorText length] > 0 ? errorText : @"Subscription import failed") ok:NO];
+}
+
+- (void)importSubscriptionURL:(NSString *)urlString
+           allowInsecureFetch:(BOOL)allowInsecureFetch
+                   happSource:(BOOL)happSource {
+    [self importSubscriptionURL:urlString
+             allowInsecureFetch:allowInsecureFetch
+                 allowPlainHTTP:NO
+                      happSource:happSource];
 }
 
 - (void)importSubscriptionURL:(NSString *)urlString allowInsecureFetch:(BOOL)allowInsecureFetch {
@@ -10869,6 +11243,19 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
     }
     if (index < 0 || index >= (NSInteger)[_subscriptions count]) {
         [vc finishRefreshWithSubscription:nil errorText:@"Subscription no longer exists"];
+        return;
+    }
+    if ([self subscriptionNeedsPlainHTTPApproval:[_subscriptions objectAtIndex:index]]) {
+        [self showPlainHTTPSubscriptionWarningForCount:1
+                                          confirmation:^{
+                                              if ([self approvePlainHTTPForSubscriptionAtIndex:index]) {
+                                                  [self saveData];
+                                                  [self subscriptionInfoVCRequestedRefresh:vc atIndex:index];
+                                              }
+                                          }
+                                            cancellation:^{
+                                                [vc cancelRefresh];
+                                            }];
         return;
     }
 
@@ -11807,6 +12194,8 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
     [_pendingImportDoneStatus release];
     [_pendingImportRefreshIndices release];
     [_pendingInsecureImportURLs release];
+    if (_pendingPlainHTTPConfirmation) Block_release(_pendingPlainHTTPConfirmation);
+    if (_pendingPlainHTTPCancellation) Block_release(_pendingPlainHTTPCancellation);
     [_subscriptionToReexpandAfterReorder release];
 
     [_configs release];
@@ -13046,6 +13435,33 @@ moveRowAtIndexPath:(NSIndexPath *)sourceIndexPath
         return;
     }
 
+    if (alertView.tag == VCAlertTagPlainHTTPSubscription) {
+        void (^confirmation)(void) = _pendingPlainHTTPConfirmation
+            ? Block_copy(_pendingPlainHTTPConfirmation)
+            : NULL;
+        void (^cancellation)(void) = _pendingPlainHTTPCancellation
+            ? Block_copy(_pendingPlainHTTPCancellation)
+            : NULL;
+        if (_pendingPlainHTTPConfirmation) {
+            Block_release(_pendingPlainHTTPConfirmation);
+            _pendingPlainHTTPConfirmation = NULL;
+        }
+        if (_pendingPlainHTTPCancellation) {
+            Block_release(_pendingPlainHTTPCancellation);
+            _pendingPlainHTTPCancellation = NULL;
+        }
+
+        if (buttonIndex != alertView.cancelButtonIndex && confirmation) {
+            confirmation();
+        } else {
+            if (cancellation) cancellation();
+            [self showStatus:@"HTTP subscription canceled" ok:YES];
+        }
+        if (confirmation) Block_release(confirmation);
+        if (cancellation) Block_release(cancellation);
+        return;
+    }
+
     if (alertView.tag == VCAlertTagImportInsecureSubscription) {
         NSArray *urlStrings = [_pendingInsecureImportURLs retain];
         BOOL useHappHeaders = _pendingInsecureImportUsesHappHeaders;
@@ -13061,12 +13477,23 @@ moveRowAtIndexPath:(NSIndexPath *)sourceIndexPath
                 }
                 [self importSubscriptionURL:urlString
                          allowInsecureFetch:YES
+                             allowPlainHTTP:(!useHappHeaders && URLStringUsesPlainHTTP(urlString))
                                  happSource:useHappHeaders];
             } else if ([urlStrings count] > 1) {
+                BOOL includesPlainHTTP = NO;
+                for (NSString *urlString in urlStrings) {
+                    if (![self isHappEncryptedLink:urlString] && ![self isHappAddLink:urlString] &&
+                        URLStringUsesPlainHTTP(urlString)) {
+                        includesPlainHTTP = YES;
+                        break;
+                    }
+                }
                 [self startBackgroundSubscriptionImportForURLs:urlStrings
                                             allowInsecureFetch:YES
                                                    startStatus:@"Importing insecure subscriptions..."
-                                            importedPrefixPart:nil];
+                                            importedPrefixPart:nil
+                                   fallbackSubscriptionsByURL:nil
+                                                allowPlainHTTP:includesPlainHTTP];
             }
         } else {
             [self showStatus:([urlStrings count] == 1 ? @"Subscription import canceled"
