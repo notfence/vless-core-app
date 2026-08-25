@@ -46,6 +46,10 @@ static NSString *const kDefaultsAutomaticUpdateChecksKey = @"vlesscore.update.au
 static NSString *const kDefaultsPingTypeKey = @"vlesscore.ping.type";
 static NSString *const kDefaultsXrayVersionSpoofEnabledKey = @"vlesscore.xray.version.spoof.enabled";
 static NSString *const kDefaultsXrayVersionKey = @"vlesscore.xray.version";
+static NSString *const kDefaultsLastSelectionKey = @"vlesscore.last_selection";
+static NSString *const kDefaultsConfigurationsExpandedKey = @"vlesscore.configurations_expanded";
+static NSString *const kDefaultsSubscriptionsExpandedKey = @"vlesscore.subscriptions_expanded";
+static NSString *const kDefaultsExpandedSubscriptionKey = @"vlesscore.expanded_subscription";
 static NSString *const kDefaultsLastUpdateCheckKey = @"vlesscore.update.last_check";
 static NSString *const kDefaultsLatestVersionKey = @"vlesscore.update.latest_version";
 static NSString *const kDefaultsLatestReleaseURLKey = @"vlesscore.update.latest_release_url";
@@ -7487,6 +7491,34 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
     return [self isVLESSURI:s] || [self isSOCKS5URI:s];
 }
 
+- (void)saveMainState {
+    NSUserDefaults *ud = [NSUserDefaults standardUserDefaults];
+    NSDictionary *lastSelection = nil;
+    if (_selectedConfigIndex >= 0 && _selectedConfigIndex < (NSInteger)[_configs count]) {
+        lastSelection = [NSDictionary dictionaryWithObjectsAndKeys:
+                         @"config", @"kind",
+                         [NSNumber numberWithInteger:_selectedConfigIndex], @"index",
+                         nil];
+    } else if (_selectedSubIndex >= 0 && _selectedSubIndex < (NSInteger)[_subscriptions count]) {
+        lastSelection = [NSDictionary dictionaryWithObjectsAndKeys:
+                         @"subscription", @"kind",
+                         [NSNumber numberWithInteger:_selectedSubIndex], @"subscription_index",
+                         [NSNumber numberWithInteger:_selectedSubItemIndex], @"item_index",
+                         nil];
+    }
+    if (lastSelection) [ud setObject:lastSelection forKey:kDefaultsLastSelectionKey];
+    else [ud removeObjectForKey:kDefaultsLastSelectionKey];
+    [ud setBool:_configurationsSectionExpanded forKey:kDefaultsConfigurationsExpandedKey];
+    [ud setBool:_subscriptionsSectionExpanded forKey:kDefaultsSubscriptionsExpandedKey];
+    NSInteger expandedSubscription = _expandedSubscription;
+    if (_reorderingSection == 1 && _subscriptionToReexpandAfterReorder) {
+        NSUInteger index = [_subscriptions indexOfObjectIdenticalTo:_subscriptionToReexpandAfterReorder];
+        expandedSubscription = (index == NSNotFound) ? -1 : (NSInteger)index;
+    }
+    [ud setInteger:expandedSubscription forKey:kDefaultsExpandedSubscriptionKey];
+    [ud synchronize];
+}
+
 - (void)saveData {
     NSUserDefaults *ud = [NSUserDefaults standardUserDefaults];
     if (gVCSecureStoreWritable && VCSaveProtectedConfigurationData(_configs, _subscriptions)) {
@@ -7498,7 +7530,7 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
     [ud setBool:_stealthModeEnabled forKey:kDefaultsStealthModeKey];
     [ud setBool:_darkThemeEnabled forKey:kDefaultsDarkThemeKey];
     [ud setBool:_automaticUpdateChecksEnabled forKey:kDefaultsAutomaticUpdateChecksKey];
-    [ud synchronize];
+    [self saveMainState];
     [self updateStickyMainSectionHeader];
 }
 
@@ -7566,14 +7598,37 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
     _selectedConfigIndex = -1;
     _selectedSubIndex = -1;
     _selectedSubItemIndex = -1;
-    _expandedSubscription = -1;
+    NSNumber *savedExpandedValue = [ud objectForKey:kDefaultsExpandedSubscriptionKey];
+    NSInteger savedExpandedSubscription = [savedExpandedValue isKindOfClass:[NSNumber class]]
+        ? [savedExpandedValue integerValue] : -1;
+    _expandedSubscription = (savedExpandedSubscription >= 0 &&
+                             savedExpandedSubscription < (NSInteger)[_subscriptions count])
+        ? savedExpandedSubscription : -1;
     _updatingSubscriptionIndex = -1;
     _stickySectionHeaderSection = -1;
     _reorderingSection = -1;
-    _configurationsSectionExpanded = NO;
-    _subscriptionsSectionExpanded = NO;
+    _configurationsSectionExpanded = [ud boolForKey:kDefaultsConfigurationsExpandedKey];
+    _subscriptionsSectionExpanded = [ud boolForKey:kDefaultsSubscriptionsExpandedKey];
 
-    if ([_configs count] > 0) {
+    NSDictionary *lastSelection = [ud objectForKey:kDefaultsLastSelectionKey];
+    NSString *selectionKind = [lastSelection isKindOfClass:[NSDictionary class]]
+        ? [lastSelection objectForKey:@"kind"] : nil;
+    if ([selectionKind isEqualToString:@"config"]) {
+        NSInteger index = [[lastSelection objectForKey:@"index"] integerValue];
+        if (index >= 0 && index < (NSInteger)[_configs count]) _selectedConfigIndex = index;
+    } else if ([selectionKind isEqualToString:@"subscription"]) {
+        NSInteger subIndex = [[lastSelection objectForKey:@"subscription_index"] integerValue];
+        if (subIndex >= 0 && subIndex < (NSInteger)[_subscriptions count]) {
+            NSDictionary *subscription = [_subscriptions objectAtIndex:subIndex];
+            NSArray *items = [subscription objectForKey:@"items"];
+            if (![items isKindOfClass:[NSArray class]]) items = [NSArray array];
+            NSInteger itemIndex = [[lastSelection objectForKey:@"item_index"] integerValue];
+            _selectedSubIndex = subIndex;
+            _selectedSubItemIndex = ([items count] == 0) ? -1
+                : ((itemIndex >= 0 && itemIndex < (NSInteger)[items count]) ? itemIndex : 0);
+        }
+    }
+    if (_selectedConfigIndex < 0 && _selectedSubIndex < 0 && [_configs count] > 0) {
         _selectedConfigIndex = 0;
     }
 }
@@ -9839,6 +9894,7 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
     _selectedSubIndex = subIndex;
     _selectedSubItemIndex = 0;
     [self normalizeSelection];
+    [self saveMainState];
     [_tableView reloadData];
 }
 
@@ -10276,6 +10332,7 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
         _selectedSubIndex = -1;
         _selectedSubItemIndex = -1;
         [self normalizeSelection];
+        [self saveData];
         [_tableView reloadData];
         [self showStatus:@"Configuration already exists (skipped)" ok:YES];
         return;
@@ -10287,12 +10344,12 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
                          normalizedURI, @"uri",
                          nil];
     [_configs addObject:cfg];
-    [self saveData];
 
     _configurationsSectionExpanded = YES;
     _selectedConfigIndex = [_configs count] - 1;
     _selectedSubIndex = -1;
     _selectedSubItemIndex = -1;
+    [self saveData];
     [_tableView reloadData];
     [self showStatus:@"Configuration imported" ok:YES];
 }
@@ -10647,12 +10704,12 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
 
         if (importedConfigs > 0 || pendingSubs > 0) {
             if (importedConfigs > 0) {
-                [self saveData];
                 _configurationsSectionExpanded = YES;
                 _selectedConfigIndex = [_configs count] - 1;
                 _selectedSubIndex = -1;
                 _selectedSubItemIndex = -1;
                 [self normalizeSelection];
+                [self saveData];
                 [_tableView reloadData];
             }
         }
@@ -12286,6 +12343,7 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
         _expandedSubscription = -1;
     }
 
+    [self saveMainState];
     [self reloadMainTableDataAfterExternalChange];
     if (_reorderingSection >= 0) {
         [_tableView setEditing:YES animated:YES];
@@ -12336,6 +12394,7 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
     } else {
         _subscriptionsSectionExpanded = !_subscriptionsSectionExpanded;
     }
+    [self saveMainState];
     NSInteger newRowCount = [self tableView:_tableView numberOfRowsInSection:section];
 
     NSUInteger transitionToken = ++_mainSectionTransitionToken;
@@ -13212,6 +13271,7 @@ moveRowAtIndexPath:(NSIndexPath *)sourceIndexPath
         return;
     }
     BOOL animateSubscriptionsSection = NO;
+    BOOL selectionChanged = NO;
     NSInteger oldExpandedSubscription = -1;
     NSInteger oldExpandedHeaderRow = -1;
     NSInteger oldExpandedItemCount = 0;
@@ -13229,6 +13289,7 @@ moveRowAtIndexPath:(NSIndexPath *)sourceIndexPath
         _selectedConfigIndex = indexPath.row;
         _selectedSubIndex = -1;
         _selectedSubItemIndex = -1;
+        selectionChanged = YES;
         [self showStatus:[NSString stringWithFormat:@"Selected config: %@", name ? name : @"(unnamed)"] ok:YES];
     } else {
         NSInteger subIdx = -1;
@@ -13259,6 +13320,7 @@ moveRowAtIndexPath:(NSIndexPath *)sourceIndexPath
                 _selectedConfigIndex = -1;
                 _selectedSubIndex = subIdx;
                 _selectedSubItemIndex = itemIdx;
+                selectionChanged = YES;
                 NSDictionary *sub = [_subscriptions objectAtIndex:subIdx];
                 NSString *itemName = [self displayNameForSubscriptionURI:uri
                                                                     index:itemIdx
@@ -13270,6 +13332,7 @@ moveRowAtIndexPath:(NSIndexPath *)sourceIndexPath
 
     [_tableView deselectRowAtIndexPath:indexPath animated:YES];
     [self normalizeSelection];
+    if (selectionChanged || animateSubscriptionsSection) [self saveMainState];
     if (_connected && oldURI) {
         NSString *newURI = [self uriForCurrentSelection];
         [self reconnectToURIIfNeededFrom:oldURI to:newURI];
