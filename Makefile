@@ -8,6 +8,7 @@ IOS_CC ?= $(IOS_BIN)/arm-apple-darwin11-clang
 IOS_AR ?= $(IOS_BIN)/arm-apple-darwin11-ar
 IOS_RANLIB ?= $(IOS_BIN)/arm-apple-darwin11-ranlib
 IOS_STRIP ?= $(IOS_BIN)/arm-apple-darwin11-strip
+IOS_OTOOL ?= $(IOS_BIN)/arm-apple-darwin11-otool
 LDID ?= $(IOS_BIN)/ldid
 IOS_BLOCKS_RUNTIME_LIB ?= libBlocksRuntime.so
 IOS_BLOCKS_RUNTIME_DIR ?= $(shell \
@@ -29,6 +30,7 @@ DEB_OUT := $(BUILD_DIR)/com.vlesscore.app_iphoneos-arm.deb
 
 OPENSSL_IOS_DIR ?= $(abspath ../vless-core-cli/third_party/openssl-ios6-armv7)
 OPENSSL_IOS_INCLUDE ?= $(OPENSSL_IOS_DIR)/include
+OPENSSL_IOS_SSL_LIB ?= $(OPENSSL_IOS_DIR)/lib/libssl.a
 OPENSSL_IOS_CRYPTO_LIB ?= $(OPENSSL_IOS_DIR)/lib/libcrypto.a
 
 ZBAR_DIR := third_party/zbar/zbar
@@ -60,10 +62,11 @@ DAEMON_HEADERS := daemon/vpnctld_protocol.h
 BOOTSTRAP_SRC := daemon/vpnctld_bootstrap.c
 
 APP_CFLAGS := -fno-objc-arc -Wall -Wextra -O2 -arch armv7 -miphoneos-version-min=6.0 -isysroot $(IOS_SDK) -Iintegrations/happ -Iintegrations/karing -I$(ZBAR_DIR) -I$(OPENSSL_IOS_INCLUDE)
-APP_LDFLAGS := -framework UIKit -framework Foundation -framework CoreGraphics -framework QuartzCore -framework AVFoundation -framework CoreMedia -framework CoreVideo -liconv -lz $(OPENSSL_IOS_CRYPTO_LIB)
+APP_LDFLAGS := -Wl,-pie -framework UIKit -framework Foundation -framework CoreGraphics -framework QuartzCore -framework AVFoundation -framework CoreMedia -framework CoreVideo -liconv -lz $(OPENSSL_IOS_CRYPTO_LIB)
 ZBAR_CFLAGS := -w -O2 -arch armv7 -miphoneos-version-min=6.0 -isysroot $(IOS_SDK) -I$(ZBAR_DIR)
 
 DAEMON_CFLAGS := -Wall -Wextra -O2 -std=c11 -arch armv7 -miphoneos-version-min=6.0 -isysroot $(IOS_SDK)
+DAEMON_LDFLAGS := -Wl,-pie
 
 VLESS_CORE_BIN ?= $(abspath ../vless-core-cli/vless-core-darwin-armv7)
 VLESS_CORE_CURL_BIN ?= $(abspath ../vless-core-cli/third_party/curl-ios6-armv7/bin/curl)
@@ -78,8 +81,10 @@ check-ios-toolchain:
 	@test -x "$(IOS_AR)" || (echo "Missing iOS archiver: $(IOS_AR)"; echo "Set IOS_TOOLCHAIN=/path/to/ios6/toolchain"; exit 1)
 	@test -x "$(IOS_RANLIB)" || (echo "Missing iOS ranlib: $(IOS_RANLIB)"; echo "Set IOS_TOOLCHAIN=/path/to/ios6/toolchain"; exit 1)
 	@test -x "$(IOS_STRIP)" || (echo "Missing iOS strip: $(IOS_STRIP)"; echo "Set IOS_TOOLCHAIN=/path/to/ios6/toolchain"; exit 1)
+	@test -x "$(IOS_OTOOL)" || (echo "Missing iOS otool: $(IOS_OTOOL)"; echo "Set IOS_TOOLCHAIN=/path/to/ios6/toolchain"; exit 1)
 	@test -d "$(IOS_SDK)" || (echo "Missing iOS SDK: $(IOS_SDK)"; echo "Set IOS_SDK=/path/to/iPhoneOS6.1.sdk"; exit 1)
 	@test -f "$(OPENSSL_IOS_INCLUDE)/openssl/evp.h" || (echo "Missing OpenSSL headers: $(OPENSSL_IOS_INCLUDE)"; echo "Build OpenSSL in ../vless-core-cli or override OPENSSL_IOS_DIR"; exit 1)
+	@test -f "$(OPENSSL_IOS_SSL_LIB)" || (echo "Missing OpenSSL SSL library: $(OPENSSL_IOS_SSL_LIB)"; echo "Build OpenSSL in ../vless-core-cli or override OPENSSL_IOS_DIR"; exit 1)
 	@test -f "$(OPENSSL_IOS_CRYPTO_LIB)" || (echo "Missing OpenSSL crypto library: $(OPENSSL_IOS_CRYPTO_LIB)"; echo "Build OpenSSL in ../vless-core-cli or override OPENSSL_IOS_DIR"; exit 1)
 	@test -n "$(IOS_BLOCKS_RUNTIME_DIR)" || (echo "Missing $(IOS_BLOCKS_RUNTIME_LIB) under $(IOS_TOOLCHAIN)"; echo "Add it to the toolchain or set IOS_BLOCKS_RUNTIME_DIR=/path/to/runtime/lib"; exit 1)
 	@test -x "$(LDID)" || (echo "Missing ldid tool: $(LDID)"; echo "Set IOS_TOOLCHAIN correctly or override LDID"; exit 1)
@@ -89,16 +94,23 @@ check-package-inputs:
 	@test -f "$(VLESS_CORE_CURL_BIN)" || (echo "Missing curl binary: $(VLESS_CORE_CURL_BIN)"; echo "Build it in ../vless-core-cli (make curl-ios6) or override VLESS_CORE_CURL_BIN=/path/to/curl"; exit 1)
 	@test -f "$(REDSOCKS_BIN)" || (echo "Missing redsocks binary: $(REDSOCKS_BIN)"; exit 1)
 	@test -f "$(CA_BUNDLE)" || (echo "Missing CA bundle: $(CA_BUNDLE)"; echo "Provide CA_BUNDLE=/path/to/cacert.pem"; exit 1)
-	@if [ -f "$(OPENSSL_PATCH_STATUS_FILE)" ] && [ "$(OPENSSL_PATCH_STATUS_FILE)" -nt "$(VLESS_CORE_BIN)" ]; then \
-		echo "Stale core binary: $(VLESS_CORE_BIN) is older than $(OPENSSL_PATCH_STATUS_FILE)"; \
-		echo "Rebuild it in ../vless-core-cli after changing OpenSSL: make ios"; \
-		exit 1; \
-	fi
-	@if [ -f "$(OPENSSL_PATCH_STATUS_FILE)" ] && [ "$(OPENSSL_PATCH_STATUS_FILE)" -nt "$(VLESS_CORE_CURL_BIN)" ]; then \
-		echo "Stale curl binary: $(VLESS_CORE_CURL_BIN) is older than $(OPENSSL_PATCH_STATUS_FILE)"; \
-		echo "Rebuild it in ../vless-core-cli after changing OpenSSL: make curl-ios6"; \
-		exit 1; \
-	fi
+	@for binary in "$(VLESS_CORE_BIN)" "$(VLESS_CORE_CURL_BIN)" "$(REDSOCKS_BIN)"; do \
+		$(IOS_OTOOL) -hv "$$binary" | grep -qw PIE || { echo "Refusing non-PIE iOS binary: $$binary"; exit 1; }; \
+	done
+	@for dependency in "$(OPENSSL_PATCH_STATUS_FILE)" "$(OPENSSL_IOS_SSL_LIB)" "$(OPENSSL_IOS_CRYPTO_LIB)"; do \
+		if [ -f "$$dependency" ] && [ "$$dependency" -nt "$(VLESS_CORE_BIN)" ]; then \
+			echo "Stale core binary: $(VLESS_CORE_BIN) is older than $$dependency"; \
+			echo "Rebuild it in ../vless-core-cli after changing OpenSSL: make ios"; \
+			exit 1; \
+		fi; \
+	done
+	@for dependency in "$(OPENSSL_IOS_SSL_LIB)" "$(OPENSSL_IOS_CRYPTO_LIB)"; do \
+		if [ "$$dependency" -nt "$(VLESS_CORE_CURL_BIN)" ]; then \
+			echo "Stale curl binary: $(VLESS_CORE_CURL_BIN) is older than $$dependency"; \
+			echo "Rebuild it in ../vless-core-cli after changing OpenSSL: make curl-ios6"; \
+			exit 1; \
+		fi; \
+	done
 
 $(BUILD_DIR)/zbar/%.o: $(ZBAR_DIR)/%.c $(ZBAR_HEADERS)
 	mkdir -p $(dir $@)
@@ -111,14 +123,17 @@ $(ZBAR_LIB): check-ios-toolchain $(ZBAR_OBJ)
 $(APP_BIN): check-ios-toolchain $(APP_SRC) $(APP_HEADERS) $(ZBAR_LIB)
 	mkdir -p $(BUILD_DIR)
 	PATH="$(IOS_BIN):$$PATH" $(IOS_RUNTIME_ENV) $(IOS_CC) $(APP_CFLAGS) $(APP_SRC) $(ZBAR_LIB) -o $@ $(APP_LDFLAGS)
+	@$(IOS_OTOOL) -hv $@ | grep -qw PIE || (echo "Refusing non-PIE iOS binary: $@"; exit 1)
 
 $(DAEMON_BIN): check-ios-toolchain $(DAEMON_SRC) $(DAEMON_HEADERS)
 	mkdir -p $(BUILD_DIR)
-	PATH="$(IOS_BIN):$$PATH" $(IOS_RUNTIME_ENV) $(IOS_CC) $(DAEMON_CFLAGS) $(DAEMON_SRC) -o $@
+	PATH="$(IOS_BIN):$$PATH" $(IOS_RUNTIME_ENV) $(IOS_CC) $(DAEMON_CFLAGS) $(DAEMON_SRC) -o $@ $(DAEMON_LDFLAGS)
+	@$(IOS_OTOOL) -hv $@ | grep -qw PIE || (echo "Refusing non-PIE iOS binary: $@"; exit 1)
 
 $(BOOTSTRAP_BIN): check-ios-toolchain $(BOOTSTRAP_SRC) $(DAEMON_HEADERS)
 	mkdir -p $(BUILD_DIR)
-	PATH="$(IOS_BIN):$$PATH" $(IOS_RUNTIME_ENV) $(IOS_CC) $(DAEMON_CFLAGS) $(BOOTSTRAP_SRC) -o $@
+	PATH="$(IOS_BIN):$$PATH" $(IOS_RUNTIME_ENV) $(IOS_CC) $(DAEMON_CFLAGS) $(BOOTSTRAP_SRC) -o $@ $(DAEMON_LDFLAGS)
+	@$(IOS_OTOOL) -hv $@ | grep -qw PIE || (echo "Refusing non-PIE iOS binary: $@"; exit 1)
 
 app: $(APP_BIN)
 
