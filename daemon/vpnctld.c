@@ -1185,17 +1185,24 @@ static int spawn_logged(const char *bin, char *const argv[], const char *stdin_d
     return 0;
 }
 
-static int spawn_core(const char *uri, const char *xray_version, int port, pid_t *pid_out) {
+static int spawn_core(const char *uri, const char *server_ips, const char *xray_version, int port, pid_t *pid_out) {
     const char *core_bin = find_vless_core_bin();
     if (!core_bin) return -2;
 
     char port_str[16];
     snprintf(port_str, sizeof(port_str), "%d", port);
 
+    char connection_data[sizeof(g.routing) + sizeof(g.server_ips)];
+    int connection_length = snprintf(connection_data, sizeof(connection_data), "%s\n%s", uri, server_ips);
+    if (connection_length <= 0 || (size_t)connection_length >= sizeof(connection_data)) {
+        secure_zero(connection_data, sizeof(connection_data));
+        return -1;
+    }
+
     char *argv[12];
     size_t argc = 0;
     argv[argc++] = (char *)core_bin;
-    argv[argc++] = "--uri-fd";
+    argv[argc++] = "--connection-fd";
     argv[argc++] = "0";
     argv[argc++] = "--listen-port";
     argv[argc++] = port_str;
@@ -1209,7 +1216,9 @@ static int spawn_core(const char *uri, const char *xray_version, int port, pid_t
     }
     argv[argc] = NULL;
 
-    return spawn_logged(core_bin, argv, uri, pid_out);
+    int result = spawn_logged(core_bin, argv, connection_data, pid_out);
+    secure_zero(connection_data, sizeof(connection_data));
+    return result;
 }
 
 static int write_redsocks_conf(int socks_port, int redir_port, const char *redirector) {
@@ -1725,8 +1734,9 @@ static int write_pf_conf(const char *server_ips, char ifnames[][32], size_t if_c
         for (size_t i = 0; i < if_count; i++) {
             const char *ifname = ifnames[i];
             if (fprintf(fp,
-                "nat on %s inet proto tcp from any to ! <vlesscore_bypass> -> 127.0.0.1\n",
-                ifname) < 0) {
+                "nat on %s inet proto tcp from any to ! <vlesscore_bypass> -> 127.0.0.1\n"
+                "nat on %s inet proto udp from any to any port 53 -> 127.0.0.1\n",
+                ifname, ifname) < 0) {
                 fclose(fp);
                 return -1;
             }
@@ -1769,8 +1779,9 @@ static int write_pf_conf(const char *server_ips, char ifnames[][32], size_t if_c
         for (size_t i = 0; i < if_count; i++) {
             const char *ifname = ifnames[i];
             if (fprintf(fp,
-                "nat on %s inet proto tcp from any to ! <vlesscore_bypass> -> 127.0.0.1\n",
-                ifname) < 0) {
+                "nat on %s inet proto tcp from any to ! <vlesscore_bypass> -> 127.0.0.1\n"
+                "nat on %s inet proto udp from any to any port 53 -> 127.0.0.1\n",
+                ifname, ifname) < 0) {
                 fclose(fp);
                 return -1;
             }
@@ -2323,7 +2334,7 @@ static int connect_all(const char *uri, const char *xray_version, int requested_
 
     log_msg("resolved server host %s -> %s in %lldms", host, g.server_ips, now_ms() - resolve_start_ms);
 
-    if (spawn_core(uri, xray_version, port, &g.core_pid) != 0) {
+    if (spawn_core(uri, g.server_ips, xray_version, port, &g.core_pid) != 0) {
         snprintf(msg, msg_cap, "ERR failed to start vless-core binary");
         disconnect_all();
         return -1;
