@@ -1251,24 +1251,32 @@ static int write_redsocks_conf(int socks_port, int redir_port, const char *redir
     return (rc > 0 && close_rc == 0) ? 0 : -1;
 }
 
-static int pid_alive(pid_t pid) {
-    if (pid <= 0) return 0;
+static int child_process_running(pid_t *pid, const char *name) {
+    if (!pid || *pid <= 0) return 0;
 
     int status = 0;
-    pid_t rc = waitpid(pid, &status, WNOHANG);
+    pid_t rc = 0;
+    do {
+        rc = waitpid(*pid, &status, WNOHANG);
+    } while (rc < 0 && errno == EINTR);
+
     if (rc == 0) {
         return 1;
     }
-    if (rc == pid) {
+    if (rc == *pid) {
         if (WIFEXITED(status)) {
-            log_msg("pid=%d exited, status=%d", (int)pid, WEXITSTATUS(status));
+            log_msg("%s pid=%d exited, status=%d", name, (int)*pid, WEXITSTATUS(status));
         } else if (WIFSIGNALED(status)) {
-            log_msg("pid=%d terminated by signal=%d", (int)pid, WTERMSIG(status));
+            log_msg("%s pid=%d terminated by signal=%d", name, (int)*pid, WTERMSIG(status));
         } else {
-            log_msg("pid=%d exited", (int)pid);
+            log_msg("%s pid=%d exited", name, (int)*pid);
         }
+        *pid = 0;
         return 0;
     }
+
+    log_msg("%s pid=%d waitpid failed errno=%d", name, (int)*pid, errno);
+    *pid = 0;
     return 0;
 }
 
@@ -1296,7 +1304,7 @@ static int spawn_redsocks(int socks_port, int *redir_port_out, pid_t *pid_out) {
     }
 
     usleep(300000);
-    if (!pid_alive(pid)) {
+    if (!child_process_running(&pid, "redsocks")) {
         stop_pid(&pid);
         log_msg("redsocks failed with redirector=pf");
         return -6;
@@ -1582,7 +1590,7 @@ static int spawn_dns_proxy(int socks_port, int *dns_port_out, pid_t *pid_out) {
 
     close(udp_fd);
     usleep(100000);
-    if (!pid_alive(pid)) {
+    if (!child_process_running(&pid, "dns proxy")) {
         stop_pid(&pid);
         return -3;
     }
@@ -2211,6 +2219,20 @@ static void disconnect_all(void) {
     }
 }
 
+static void monitor_connected_children(void) {
+    if (!g.connected) return;
+
+    int healthy = 1;
+    if (!child_process_running(&g.core_pid, "vless-core")) healthy = 0;
+    if (!child_process_running(&g.redsocks_pid, "redsocks")) healthy = 0;
+    if (!child_process_running(&g.dns_pid, "dns proxy")) healthy = 0;
+
+    if (!healthy) {
+        log_msg("VPN helper exited unexpectedly; disconnecting and clearing PF rules");
+        disconnect_all();
+    }
+}
+
 static int try_connect_pf(int socks_port) {
     int redir_port = 0;
     int rc = spawn_redsocks(socks_port, &redir_port, &g.redsocks_pid);
@@ -2308,9 +2330,21 @@ static int connect_all(const char *uri, const char *xray_version, int requested_
     }
 
     usleep(500000);
+    if (!child_process_running(&g.core_pid, "vless-core")) {
+        snprintf(msg, msg_cap, "ERR vless-core exited during startup");
+        disconnect_all();
+        return -1;
+    }
 
     int pf_rc = try_connect_pf(port);
     if (pf_rc == 0) {
+        if (!child_process_running(&g.core_pid, "vless-core") ||
+            !child_process_running(&g.redsocks_pid, "redsocks") ||
+            !child_process_running(&g.dns_pid, "dns proxy")) {
+            snprintf(msg, msg_cap, "ERR VPN helper exited during startup");
+            disconnect_all();
+            return -1;
+        }
         update_vpn_icon_state(1);
         snprintf(msg, msg_cap, "OK connected mode=%s socks=%d redir=%d protected=%d",
                  mode_name(g.mode), g.socks_port, g.redir_port, g.protect_logs);
@@ -2607,11 +2641,30 @@ int main(void) {
     for (;;) {
         if (g_terminate) break;
 
+        monitor_connected_children();
+
+        fd_set read_fds;
+        FD_ZERO(&read_fds);
+        FD_SET(lfd, &read_fds);
+        struct timeval monitor_timeout;
+        monitor_timeout.tv_sec = 1;
+        monitor_timeout.tv_usec = 0;
+
+        int ready = select(lfd + 1, &read_fds, NULL, NULL, &monitor_timeout);
+        if (ready < 0) {
+            if (errno == EINTR) continue;
+            log_msg("control socket select failed errno=%d", errno);
+            break;
+        }
+        if (ready == 0) continue;
+
         int cfd = accept(lfd, NULL, NULL);
         if (cfd < 0) {
             if (errno == EINTR && !g_terminate) continue;
             break;
         }
+
+        monitor_connected_children();
 
         control_client_t client_type = control_client_type(cfd);
         if (client_type == CONTROL_CLIENT_UNAUTHORIZED) {
