@@ -3796,21 +3796,23 @@ static UIView *VCMainListCellReorderControlInView(UIView *view) {
 
 @end
 
-@interface ThirdPartyLicenseVC : UIViewController {
+@interface LicenseDocumentVC : UIViewController {
     UITextView *_textView;
     NSString *_documentText;
+    NSString *_resourceName;
     NSString *_marker;
     BOOL _didScrollToMarker;
 }
-- (id)initWithTitle:(NSString *)title marker:(NSString *)marker;
+- (id)initWithTitle:(NSString *)title resourceName:(NSString *)resourceName marker:(NSString *)marker;
 @end
 
-@implementation ThirdPartyLicenseVC
+@implementation LicenseDocumentVC
 
-- (id)initWithTitle:(NSString *)title marker:(NSString *)marker {
+- (id)initWithTitle:(NSString *)title resourceName:(NSString *)resourceName marker:(NSString *)marker {
     self = [super init];
     if (self) {
         self.title = title;
+        _resourceName = [resourceName copy];
         _marker = [marker copy];
     }
     return self;
@@ -3819,6 +3821,7 @@ static UIView *VCMainListCellReorderControlInView(UIView *view) {
 - (void)dealloc {
     [_textView release];
     [_documentText release];
+    [_resourceName release];
     [_marker release];
     [super dealloc];
 }
@@ -3827,12 +3830,12 @@ static UIView *VCMainListCellReorderControlInView(UIView *view) {
     [super viewDidLoad];
     self.view.backgroundColor = VCBackgroundColor();
 
-    NSString *path = [[NSBundle mainBundle] pathForResource:@"THIRD_PARTY_LICENSES" ofType:@"txt"];
+    NSString *path = [[NSBundle mainBundle] pathForResource:_resourceName ofType:nil];
     NSString *text = path
         ? [NSString stringWithContentsOfFile:path encoding:NSUTF8StringEncoding error:NULL]
         : nil;
     if (![text length]) {
-        text = @"Third-party license information is unavailable.";
+        text = @"License information is unavailable.";
     }
     _documentText = [text copy];
 
@@ -3905,7 +3908,17 @@ static UIView *VCMainListCellReorderControlInView(UIView *view) {
     return [NSDictionary dictionaryWithObjectsAndKeys:
             title ? title : @"", @"title",
             detail ? detail : @"", @"detail",
+            @"THIRD_PARTY_LICENSES.txt", @"licenseResource",
             marker ? marker : @"", @"licenseMarker",
+            nil];
+}
+
+- (NSDictionary *)projectLicenseRow {
+    return [NSDictionary dictionaryWithObjectsAndKeys:
+            @"vless-core-app", @"title",
+            @"vless-core-app Source License 1.0. Click to read the license.", @"detail",
+            @"LICENSE", @"licenseResource",
+            @"", @"licenseMarker",
             nil];
 }
 
@@ -3949,6 +3962,7 @@ static UIView *VCMainListCellReorderControlInView(UIView *view) {
                                                                        @"@rafal_official for testing and debugging"]];
 
     NSArray *newSections = [[NSArray alloc] initWithObjects:
+                            [self sectionWithTitle:@"License" rows:[NSArray arrayWithObject:[self projectLicenseRow]]],
                             [self sectionWithTitle:@"Third-party software" rows:libraries],
                             [self sectionWithTitle:@"Special thanks" rows:thanks],
                             nil];
@@ -4017,7 +4031,7 @@ static UIView *VCMainListCellReorderControlInView(UIView *view) {
     NSDictionary *row = [self rowForIndexPath:indexPath];
     cell.textLabel.text = [row objectForKey:@"title"];
     cell.detailTextLabel.text = [row objectForKey:@"detail"];
-    BOOL hasLicense = [[row objectForKey:@"licenseMarker"] length] > 0;
+    BOOL hasLicense = [[row objectForKey:@"licenseResource"] length] > 0;
     cell.selectionStyle = hasLicense ? UITableViewCellSelectionStyleBlue
                                      : UITableViewCellSelectionStyleNone;
     cell.accessoryType = UITableViewCellAccessoryNone;
@@ -4028,10 +4042,11 @@ static UIView *VCMainListCellReorderControlInView(UIView *view) {
 
 - (void)tableView:(UITableView *)tableView didSelectRowAtIndexPath:(NSIndexPath *)indexPath {
     NSDictionary *row = [self rowForIndexPath:indexPath];
+    NSString *resourceName = [row objectForKey:@"licenseResource"];
     NSString *marker = [row objectForKey:@"licenseMarker"];
-    if ([marker length]) {
-        ThirdPartyLicenseVC *license = [[[ThirdPartyLicenseVC alloc]
-            initWithTitle:[row objectForKey:@"title"] marker:marker] autorelease];
+    if ([resourceName length]) {
+        LicenseDocumentVC *license = [[[LicenseDocumentVC alloc]
+            initWithTitle:[row objectForKey:@"title"] resourceName:resourceName marker:marker] autorelease];
         [self.navigationController pushViewController:license animated:YES];
     }
     [tableView deselectRowAtIndexPath:indexPath animated:YES];

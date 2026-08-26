@@ -139,6 +139,19 @@ Package uses `gzip` compression for old iOS 6 `dpkg` compatibility.
 
 The daemon uses `pf + redsocks`.
 
+## License
+
+Code owned by notfence is available under the
+[`vless-core-app Source License 1.0`](LICENSE). It may be used in personal,
+internal business, and unrelated income-producing activities, but the project
+itself may not be sold, included in a paid product, or used to provide a paid
+VPN or proxy service. Complete, unmodified source may be redistributed;
+private modification and compilation by individuals are permitted; legal
+entities may use official builds but may not create private modifications.
+Modified source and unofficial build artifacts may not be distributed.
+Byte-for-byte identical official artifacts may be redistributed without
+payment and with their notices.
+
 ## Third-party software
 
 Third-party licenses apply only to the components identified in
@@ -150,6 +163,10 @@ The `.deb` contains one combined document at:
 ```text
 /Applications/vless-core.app/THIRD_PARTY_LICENSES.txt
 ```
+
+The project license is included separately at
+`/Applications/vless-core.app/LICENSE` and does not replace any third-party
+license.
 
 Corresponding ZBar source is included in this repository. redsocks is shipped
 as the prebuilt `third_party/redsocks-vless-core` executable and is not rebuilt

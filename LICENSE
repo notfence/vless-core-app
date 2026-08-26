@@ -1,0 +1,181 @@
+vless-core-app Source License 1.0
+=================================
+
+Copyright (c) 2026 notfence (https://github.com/notfence/)
+All rights reserved.
+
+This is a proprietary source-available license. It is not an open-source
+license.
+
+1. Definitions
+
+"Licensor" means notfence.
+
+"You" means the individual or legal entity exercising permissions granted by
+this License.
+
+"Software" means the source code and other copyrightable material in this
+repository that is owned by the Licensor and made available under this
+License. Software does not include Third-Party Components.
+
+"Original Source" means a complete and unmodified copy of the Software in
+source form, together with its accompanying documentation, this License, and
+notices, as published through the Licensor's official GitHub account or
+another distribution channel expressly identified by the Licensor as
+official.
+
+"Modified Material" means any modification of, addition to, deletion from,
+translation of, or derivative work based on the Software, including patches
+and diff files containing changes to the Software.
+
+"Artifact" means any executable, object code, library, package, installer,
+firmware image, container image, or other output containing or produced from
+the Software or Modified Material by compiling, linking, or similar processing,
+including an archive containing any such output. An archive containing only
+the Original Source is not an Artifact.
+
+"Commercialize" means to obtain or seek revenue, payment, monetary
+compensation, or commercial advantage in exchange for providing,
+distributing, making available, or granting access to the Software, Modified
+Material, Artifacts, or their functionality. This includes selling, renting,
+licensing, charging for access or distribution, including them in a paid
+product or service, or using them to provide a paid VPN, proxy, or network
+access service.
+
+Merely using the Software as a tool in an otherwise commercial or
+income-producing activity is not Commercialization. Internal business use is
+permitted, provided that the Software and network access provided through it
+are not themselves sold or monetized.
+
+"Third-Party Components" means code, libraries, binaries, data, certificates,
+or other material identified as third-party material in the repository, in
+THIRD_PARTY_LICENSES.txt, in legal/THIRD_PARTY_LICENSES.txt, or in an
+accompanying notice or source header.
+
+2. Permissions
+
+Subject to full compliance with this License, the Licensor grants you a
+limited, worldwide, non-exclusive, non-transferable, non-sublicensable license
+to:
+
+a. view and download the Original Source;
+
+b. make copies of the Original Source for any use permitted by this License
+   and for backup;
+
+c. reproduce and redistribute the Original Source, but only if it remains
+   complete and unmodified, is provided without payment or other
+   consideration, and includes this License and all copyright, attribution,
+   and third-party notices exactly as provided by the Licensor;
+
+d. if You are an individual, privately create Modified Material and Artifacts
+   for your own use as permitted by this License, provided that neither the
+   Modified Material nor the Artifacts are disclosed or distributed to any
+   other person or entity. This permission is not granted to legal entities;
+   and
+
+e. install and run Artifacts officially distributed by the Licensor, or
+   Artifacts you create under Section 2(d), on any number of devices owned by
+   or under your control, and transfer those Artifacts only between
+   those devices; and
+
+f. reproduce and redistribute an Artifact officially published by the
+   Licensor, provided that it remains byte-for-byte identical to the official
+   release, is provided without payment or other consideration, retains all
+   accompanying license and third-party notices.
+
+If the Software implements an invention covered by a patent owned and
+licensable by the Licensor, the permissions above include only the minimum
+patent permission necessary to exercise those permissions. No broader patent
+license is granted.
+
+3. Restrictions
+
+Except for the permissions expressly granted in Section 2, you may not:
+
+a. Commercialize the Software, Modified Material, or Artifacts;
+
+b. disclose, publish, transmit, sublicense, sell, rent, host for others, or
+   otherwise distribute any Modified Material;
+
+c. disclose or distribute any self-built, repackaged, or modified Artifact, or
+   distribute an official Artifact except as permitted by Section 2(f);
+
+d. incorporate, bundle, embed, or use the Software, Modified Material, or any
+   Artifact as a component, dependency, or backend of another project,
+   product, application, library, service, or source-code collection that is
+   distributed, published, or made available to any third party, whether it is
+   included directly, invoked separately, or downloaded at runtime;
+
+e. make modifications available in a public repository or public fork;
+
+f. remove, obscure, or alter this License or any copyright, attribution, or
+   third-party notice;
+
+g. represent a copy, fork, modification, or build as official or endorsed by
+   the Licensor; or
+
+h. use the Licensor's name, project names, logos, or other marks except as
+   required for accurate attribution.
+
+4. GitHub Forks
+
+GitHub's Terms of Service may permit users of GitHub to view and reproduce a
+public repository by forking it within GitHub. Any permission arising from
+GitHub's Terms of Service applies only to the extent required by those terms
+and does not expand this License. A publicly accessible fork may contain only
+the complete, unmodified Original Source and must comply with Section 2(c).
+Modified Material may not be placed in a public fork.
+
+5. Ownership and Contributions
+
+The Software is licensed, not sold. The Licensor retains all rights not
+expressly granted by this License.
+
+Contributions are not accepted unless expressly requested by the Licensor. A
+requested contribution will not be accepted or incorporated unless its author
+first enters into a separate written agreement assigning the necessary
+copyright rights to the Licensor. Merely opening an issue or pull request does
+not transfer ownership to the Licensor.
+
+6. Third-Party Components
+
+This License does not apply to Third-Party Components. Each Third-Party
+Component remains governed exclusively by its own license and notices. If a
+third-party license grants rights that conflict with a restriction in this
+License, that restriction does not limit the rights granted for that
+Third-Party Component.
+
+7. Termination
+
+Your rights under this License terminate automatically and immediately if you
+breach any of its terms. Upon termination, you must stop exercising the rights
+granted by this License and delete all Modified Material and Artifacts in your
+possession or control, except to the extent retention is required by law. The
+Licensor may reinstate terminated rights only by express written permission.
+
+Sections 5, 6, 8, and 9 survive termination.
+
+8. Disclaimer of Warranty
+
+THE SOFTWARE IS PROVIDED "AS IS" AND "AS AVAILABLE", WITHOUT WARRANTY OF ANY
+KIND, EXPRESS OR IMPLIED, INCLUDING WARRANTIES OF MERCHANTABILITY, FITNESS FOR
+A PARTICULAR PURPOSE, TITLE, NON-INFRINGEMENT, SECURITY, OR ERROR-FREE
+OPERATION. YOU ASSUME ALL RISK ARISING FROM USE OF THE SOFTWARE.
+
+9. Limitation of Liability
+
+TO THE MAXIMUM EXTENT PERMITTED BY APPLICABLE LAW, THE LICENSOR WILL NOT BE
+LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY,
+CONSEQUENTIAL, OR OTHER DAMAGES, OR FOR ANY LOSS OF DATA, PROFITS, REVENUE,
+BUSINESS, PRIVACY, OR DEVICE FUNCTIONALITY, ARISING FROM OR RELATED TO THE
+SOFTWARE OR THIS LICENSE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+
+10. General Terms
+
+This License is the entire license grant from the Licensor for the Software.
+Failure to enforce a term is not a waiver. If any term is found unenforceable,
+it will be limited to the minimum extent necessary, and the remaining terms
+will continue in effect. No permission may be inferred from making the source
+code publicly accessible. By exercising any permission granted in Section 2,
+you accept this License.

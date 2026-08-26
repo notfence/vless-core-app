@@ -101,6 +101,7 @@ check-package-inputs:
 	@test -f "$(VLESS_CORE_CURL_BIN)" || (echo "Missing curl binary: $(VLESS_CORE_CURL_BIN)"; echo "Build it in ../vless-core-cli (make curl-ios6) or override VLESS_CORE_CURL_BIN=/path/to/curl"; exit 1)
 	@test -f "$(REDSOCKS_BIN)" || (echo "Missing redsocks binary: $(REDSOCKS_BIN)"; exit 1)
 	@test -f "$(CA_BUNDLE)" || (echo "Missing CA bundle: $(CA_BUNDLE)"; echo "Provide CA_BUNDLE=/path/to/cacert.pem"; exit 1)
+	@test -f "$(ROOT)/LICENSE" || (echo "Missing project license"; exit 1)
 	@test -f "$(LEGAL_DIR)/THIRD_PARTY_LICENSES.txt" || (echo "Missing third-party license information"; exit 1)
 	@test -f "$(ROOT)/third_party/zbar/COPYING" || (echo "Missing ZBar notices"; exit 1)
 	@for binary in "$(VLESS_CORE_BIN)" "$(VLESS_CORE_CURL_BIN)" "$(REDSOCKS_BIN)"; do \
@@ -189,6 +190,7 @@ package-root: check-package-inputs $(APP_BIN) $(DAEMON_BIN) $(BOOTSTRAP_BIN)
 	cp app/icons/info.png $(PKG_ROOT)/Applications/vless-core.app/info.png
 	cp app/icons/update-dark.png $(PKG_ROOT)/Applications/vless-core.app/update-dark.png
 	cp app/icons/update-white.png $(PKG_ROOT)/Applications/vless-core.app/update-white.png
+	cp $(ROOT)/LICENSE $(PKG_ROOT)/Applications/vless-core.app/LICENSE
 	cp $(LEGAL_DIR)/THIRD_PARTY_LICENSES.txt $(PKG_ROOT)/Applications/vless-core.app/THIRD_PARTY_LICENSES.txt
 	cp $(APP_BIN) $(PKG_ROOT)/Applications/vless-core.app/vless-core
 	cp $(DAEMON_BIN) $(PKG_ROOT)/usr/bin/vpnctld
