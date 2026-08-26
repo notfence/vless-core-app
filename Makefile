@@ -3,6 +3,8 @@ BUILD_DIR := $(ROOT)/build
 
 IOS_TOOLCHAIN ?= $(HOME)/toolchains/ios6
 IOS_SDK ?= $(IOS_TOOLCHAIN)/SDK/iPhoneOS6.1.sdk
+APP_IOS_SDK ?= $(abspath ../toolchains/sdks/iPhoneOS10.3.sdk)
+APP_IOS_SDK_VERSION ?= 10.3
 IOS_BIN ?= $(IOS_TOOLCHAIN)/bin
 IOS_CC ?= $(IOS_BIN)/arm-apple-darwin11-clang
 IOS_AR ?= $(IOS_BIN)/arm-apple-darwin11-ar
@@ -57,13 +59,16 @@ ZBAR_LIB := $(BUILD_DIR)/libzbar-qr.a
 
 APP_SRC := app/main.m integrations/happ/happ_crypto.c integrations/karing/karing_backup.m
 APP_HEADERS := integrations/happ/happ_crypto.h integrations/karing/karing_backup.h daemon/vpnctld_protocol.h
+APP_OBJ := \
+	$(patsubst %.m,$(BUILD_DIR)/app/%.o,$(filter %.m,$(APP_SRC))) \
+	$(patsubst %.c,$(BUILD_DIR)/app/%.o,$(filter %.c,$(APP_SRC)))
 DAEMON_SRC := daemon/vpnctld.c daemon/vpnicon_statusbar.c
 DAEMON_HEADERS := daemon/vpnctld_protocol.h
 BOOTSTRAP_SRC := daemon/vpnctld_bootstrap.c
 
-APP_CFLAGS := -fno-objc-arc -Wall -Wextra -O2 -arch armv7 -miphoneos-version-min=6.0 -isysroot $(IOS_SDK) -Iintegrations/happ -Iintegrations/karing -I$(ZBAR_DIR) -I$(OPENSSL_IOS_INCLUDE)
-APP_LDFLAGS := -Wl,-pie -framework UIKit -framework Foundation -framework CoreGraphics -framework QuartzCore -framework AVFoundation -framework CoreMedia -framework CoreVideo -liconv -lz $(OPENSSL_IOS_CRYPTO_LIB)
-ZBAR_CFLAGS := -w -O2 -arch armv7 -miphoneos-version-min=6.0 -isysroot $(IOS_SDK) -I$(ZBAR_DIR)
+APP_CFLAGS := -fno-objc-arc -Wall -Wextra -O2 -arch armv7 -miphoneos-version-min=6.0 -isysroot $(APP_IOS_SDK) -Iintegrations/happ -Iintegrations/karing -I$(ZBAR_DIR) -I$(OPENSSL_IOS_INCLUDE)
+APP_LDFLAGS := -Wl,-pie -Wl,-platform_version,ios,6.0,$(APP_IOS_SDK_VERSION) -framework UIKit -framework Foundation -framework CoreGraphics -framework QuartzCore -framework AVFoundation -framework CoreMedia -framework CoreVideo -liconv -lz $(OPENSSL_IOS_CRYPTO_LIB)
+ZBAR_CFLAGS := -w -O2 -arch armv7 -miphoneos-version-min=6.0 -isysroot $(APP_IOS_SDK) -I$(ZBAR_DIR)
 
 DAEMON_CFLAGS := -Wall -Wextra -O2 -std=c11 -arch armv7 -miphoneos-version-min=6.0 -isysroot $(IOS_SDK)
 DAEMON_LDFLAGS := -Wl,-pie
@@ -83,6 +88,7 @@ check-ios-toolchain:
 	@test -x "$(IOS_STRIP)" || (echo "Missing iOS strip: $(IOS_STRIP)"; echo "Set IOS_TOOLCHAIN=/path/to/ios6/toolchain"; exit 1)
 	@test -x "$(IOS_OTOOL)" || (echo "Missing iOS otool: $(IOS_OTOOL)"; echo "Set IOS_TOOLCHAIN=/path/to/ios6/toolchain"; exit 1)
 	@test -d "$(IOS_SDK)" || (echo "Missing iOS SDK: $(IOS_SDK)"; echo "Set IOS_SDK=/path/to/iPhoneOS6.1.sdk"; exit 1)
+	@test -d "$(APP_IOS_SDK)" || (echo "Missing app SDK: $(APP_IOS_SDK)"; echo "Set APP_IOS_SDK=/path/to/iPhoneOS10.3.sdk"; exit 1)
 	@test -f "$(OPENSSL_IOS_INCLUDE)/openssl/evp.h" || (echo "Missing OpenSSL headers: $(OPENSSL_IOS_INCLUDE)"; echo "Build OpenSSL in ../vless-core-cli or override OPENSSL_IOS_DIR"; exit 1)
 	@test -f "$(OPENSSL_IOS_SSL_LIB)" || (echo "Missing OpenSSL SSL library: $(OPENSSL_IOS_SSL_LIB)"; echo "Build OpenSSL in ../vless-core-cli or override OPENSSL_IOS_DIR"; exit 1)
 	@test -f "$(OPENSSL_IOS_CRYPTO_LIB)" || (echo "Missing OpenSSL crypto library: $(OPENSSL_IOS_CRYPTO_LIB)"; echo "Build OpenSSL in ../vless-core-cli or override OPENSSL_IOS_DIR"; exit 1)
@@ -120,9 +126,17 @@ $(ZBAR_LIB): check-ios-toolchain $(ZBAR_OBJ)
 	$(IOS_AR) rcs $@ $(ZBAR_OBJ)
 	$(IOS_RANLIB) $@
 
-$(APP_BIN): check-ios-toolchain $(APP_SRC) $(APP_HEADERS) $(ZBAR_LIB)
+$(BUILD_DIR)/app/%.o: %.m $(APP_HEADERS)
+	mkdir -p $(dir $@)
+	PATH="$(IOS_BIN):$$PATH" $(IOS_RUNTIME_ENV) $(IOS_CC) $(APP_CFLAGS) -c $< -o $@
+
+$(BUILD_DIR)/app/%.o: %.c $(APP_HEADERS)
+	mkdir -p $(dir $@)
+	PATH="$(IOS_BIN):$$PATH" $(IOS_RUNTIME_ENV) $(IOS_CC) $(APP_CFLAGS) -c $< -o $@
+
+$(APP_BIN): check-ios-toolchain $(APP_OBJ) $(ZBAR_LIB)
 	mkdir -p $(BUILD_DIR)
-	PATH="$(IOS_BIN):$$PATH" $(IOS_RUNTIME_ENV) $(IOS_CC) $(APP_CFLAGS) $(APP_SRC) $(ZBAR_LIB) -o $@ $(APP_LDFLAGS)
+	PATH="$(IOS_BIN):$$PATH" $(IOS_RUNTIME_ENV) $(IOS_CC) -arch armv7 -miphoneos-version-min=6.0 -isysroot $(IOS_SDK) $(APP_OBJ) $(ZBAR_LIB) -o $@ $(APP_LDFLAGS)
 	@$(IOS_OTOOL) -hv $@ | grep -qw PIE || (echo "Refusing non-PIE iOS binary: $@"; exit 1)
 
 $(DAEMON_BIN): check-ios-toolchain $(DAEMON_SRC) $(DAEMON_HEADERS)

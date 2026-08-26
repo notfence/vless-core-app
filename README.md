@@ -9,7 +9,7 @@
 - ARM64 devices running iOS 10 or earlier are supported through 32-bit compatibility
 - Jailbreak required
 
-The app, daemon, bundled core, and helper binaries are all built for ARMv7 with iOS 6.0 as the minimum deployment target.
+The app, daemon, bundled core, and helper binaries are all built for ARMv7 with iOS 6.0 as the minimum deployment target. The GUI is compiled against iOS 10.3 headers while remaining linked against iOS 6.1 framework stubs; the daemon and helper binaries use the iOS 6.1 SDK throughout.
 
 See the [Issues](https://github.com/notfence/vless-core-app/issues) page for the current bug list.
 
@@ -91,6 +91,7 @@ Build them in `vless-core-cli`:
 # build vless-core-cli assets first
 cd /path/to/vless-core-cli
 IOS_TOOLCHAIN=/path/to/ios6/toolchain
+APP_IOS_SDK=/path/to/iPhoneOS10.3.sdk
 make openssl-ios6 IOS_TOOLCHAIN=$IOS_TOOLCHAIN
 make curl-ios6 IOS_TOOLCHAIN=$IOS_TOOLCHAIN
 make third_party/cacert.pem
@@ -99,7 +100,7 @@ make ios IOS_TOOLCHAIN=$IOS_TOOLCHAIN
 # then build app package
 cd /path/to/vless-core-app
 make clean
-make deb IOS_TOOLCHAIN=$IOS_TOOLCHAIN
+make deb IOS_TOOLCHAIN=$IOS_TOOLCHAIN APP_IOS_SDK=$APP_IOS_SDK
 ```
 
 Output:

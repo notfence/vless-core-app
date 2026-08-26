@@ -95,6 +95,17 @@ static const CGFloat kVCMainCompactContentStartY = 112.0f;
 static BOOL gVCSecureStoreWritable = YES;
 static NSString *SendCommand(NSString *cmdLine);
 
+static CGFloat VCMainStatusBarInset(void) {
+    if ([[UIDevice currentDevice].systemVersion integerValue] < 7 ||
+        [UIApplication sharedApplication].statusBarHidden) {
+        return 0.0f;
+    }
+
+    CGRect frame = [UIApplication sharedApplication].statusBarFrame;
+    CGFloat inset = MIN(CGRectGetWidth(frame), CGRectGetHeight(frame));
+    return (inset > 0.0f && inset < 64.0f) ? inset : 0.0f;
+}
+
 static CGFloat VCClampUnit(CGFloat value) {
     if (value < 0.0f) return 0.0f;
     if (value > 1.0f) return 1.0f;
@@ -3177,6 +3188,18 @@ typedef NS_ENUM(NSInteger, VCMainListCellKind) {
 - (BOOL)usesConfigurationItemLayout;
 @end
 
+static UIView *VCMainListCellReorderControlInView(UIView *view) {
+    for (UIView *subview in view.subviews) {
+        if ([NSStringFromClass([subview class]) hasSuffix:@"ReorderControl"]) {
+            return subview;
+        }
+
+        UIView *control = VCMainListCellReorderControlInView(subview);
+        if (control) return control;
+    }
+    return nil;
+}
+
 @implementation VCMainListCell
 
 - (id)initWithStyle:(UITableViewCellStyle)style reuseIdentifier:(NSString *)reuseIdentifier {
@@ -3250,7 +3273,28 @@ typedef NS_ENUM(NSInteger, VCMainListCellKind) {
 - (void)layoutSubviews {
     [super layoutSubviews];
 
+    if (self.showsReorderControl) {
+        UIView *reorderControl = VCMainListCellReorderControlInView(self);
+        if (reorderControl && reorderControl.superview) {
+            CGRect cellBounds = [self convertRect:self.bounds toView:reorderControl.superview];
+            CGRect reorderFrame = reorderControl.frame;
+            reorderFrame.origin.x = CGRectGetMaxX(cellBounds) - CGRectGetWidth(reorderFrame);
+            reorderFrame.origin.y = floorf(CGRectGetMidY(cellBounds) -
+                                            CGRectGetHeight(reorderFrame) * 0.5f);
+            reorderControl.frame = reorderFrame;
+        }
+    }
+
     CGFloat width = CGRectGetWidth(self.contentView.bounds);
+    if (self.accessoryView && !self.accessoryView.hidden) {
+        CGRect accessoryFrame = self.accessoryView.frame;
+        accessoryFrame.origin.x = floorf(CGRectGetWidth(self.bounds) -
+                                         CGRectGetWidth(accessoryFrame) - 14.0f);
+        accessoryFrame.origin.y = floorf((CGRectGetHeight(self.bounds) -
+                                          CGRectGetHeight(accessoryFrame)) * 0.5f);
+        self.accessoryView.frame = accessoryFrame;
+    }
+
     if (_visualKind == VCMainListCellKindSubscriptionHeader) {
         CGFloat left = 14.0f;
         CGFloat rightPadding = 8.0f;
@@ -3510,7 +3554,7 @@ typedef NS_ENUM(NSInteger, VCMainListCellKind) {
     return IsPadDevice();
 }
 
-- (NSUInteger)supportedInterfaceOrientations {
+- (UIInterfaceOrientationMask)supportedInterfaceOrientations {
     if (IsPadDevice()) {
         return UIInterfaceOrientationMaskAllButUpsideDown;
     }
@@ -3743,7 +3787,7 @@ typedef NS_ENUM(NSInteger, VCMainListCellKind) {
     return IsPadDevice();
 }
 
-- (NSUInteger)supportedInterfaceOrientations {
+- (UIInterfaceOrientationMask)supportedInterfaceOrientations {
     if (IsPadDevice()) {
         return UIInterfaceOrientationMaskAllButUpsideDown;
     }
@@ -3894,7 +3938,7 @@ typedef NS_ENUM(NSInteger, VCMainListCellKind) {
     return IsPadDevice();
 }
 
-- (NSUInteger)supportedInterfaceOrientations {
+- (UIInterfaceOrientationMask)supportedInterfaceOrientations {
     if (IsPadDevice()) {
         return UIInterfaceOrientationMaskAllButUpsideDown;
     }
@@ -4425,7 +4469,7 @@ commitEditingStyle:(UITableViewCellEditingStyle)editingStyle
     return IsPadDevice();
 }
 
-- (NSUInteger)supportedInterfaceOrientations {
+- (UIInterfaceOrientationMask)supportedInterfaceOrientations {
     return IsPadDevice() ? UIInterfaceOrientationMaskAllButUpsideDown
                          : UIInterfaceOrientationMaskPortrait;
 }
@@ -4648,7 +4692,7 @@ commitEditingStyle:(UITableViewCellEditingStyle)editingStyle
     return IsPadDevice();
 }
 
-- (NSUInteger)supportedInterfaceOrientations {
+- (UIInterfaceOrientationMask)supportedInterfaceOrientations {
     return IsPadDevice() ? UIInterfaceOrientationMaskAllButUpsideDown
                          : UIInterfaceOrientationMaskPortrait;
 }
@@ -5349,7 +5393,7 @@ commitEditingStyle:(UITableViewCellEditingStyle)editingStyle
     return IsPadDevice();
 }
 
-- (NSUInteger)supportedInterfaceOrientations {
+- (UIInterfaceOrientationMask)supportedInterfaceOrientations {
     if (IsPadDevice()) {
         return UIInterfaceOrientationMaskAllButUpsideDown;
     }
@@ -5392,7 +5436,7 @@ commitEditingStyle:(UITableViewCellEditingStyle)editingStyle
     return [[self topViewController] shouldAutorotate];
 }
 
-- (NSUInteger)supportedInterfaceOrientations {
+- (UIInterfaceOrientationMask)supportedInterfaceOrientations {
     return [[self topViewController] supportedInterfaceOrientations];
 }
 
@@ -6049,7 +6093,7 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
     return IsPadDevice();
 }
 
-- (NSUInteger)supportedInterfaceOrientations {
+- (UIInterfaceOrientationMask)supportedInterfaceOrientations {
     if (IsPadDevice()) {
         return UIInterfaceOrientationMaskAllButUpsideDown;
     }
@@ -6556,7 +6600,7 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
     return IsPadDevice();
 }
 
-- (NSUInteger)supportedInterfaceOrientations {
+- (UIInterfaceOrientationMask)supportedInterfaceOrientations {
     return IsPadDevice() ? UIInterfaceOrientationMaskAllButUpsideDown : UIInterfaceOrientationMaskPortrait;
 }
 
@@ -9866,6 +9910,7 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
     BOOL pingLoading = [self isSubscriptionPingInProgressAtIndex:index];
     CGFloat width = loading ? 100.0f : 80.0f;
     UIView *v = [[[UIView alloc] initWithFrame:CGRectMake(0, 0, width, 24)] autorelease];
+    v.autoresizingMask = UIViewAutoresizingFlexibleLeftMargin;
 
     UIButton *pingButton = [UIButton buttonWithType:UIButtonTypeCustom];
     pingButton.frame = CGRectMake(0.0f, 0.0f, 24.0f, 24.0f);
@@ -9926,11 +9971,17 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
     BOOL failed = [display isEqualToString:kVCPingFailureValue];
     UIView *v = [[[UIView alloc] initWithFrame:CGRectMake(0, 0, 24.0f, 24.0f)] autorelease];
     v.clipsToBounds = NO;
+    v.autoresizingMask = UIViewAutoresizingFlexibleLeftMargin;
 
     if (hasResult) {
-        UILabel *label = [[[UILabel alloc] initWithFrame:CGRectMake(-5.0f, 21.0f, 34.0f, 12.0f)] autorelease];
+        UIFont *font = [UIFont boldSystemFontOfSize:9.0f];
+        CGFloat labelWidth = MAX(34.0f, ceilf([display sizeWithFont:font].width) + 2.0f);
+        UILabel *label = [[[UILabel alloc] initWithFrame:CGRectMake(floorf((24.0f - labelWidth) * 0.5f),
+                                                                           21.0f,
+                                                                           labelWidth,
+                                                                           12.0f)] autorelease];
         label.backgroundColor = [UIColor clearColor];
-        label.font = [UIFont boldSystemFontOfSize:9.0f];
+        label.font = font;
         label.textAlignment = NSTextAlignmentCenter;
         label.adjustsFontSizeToFitWidth = NO;
         label.textColor = failed ? VCErrorColor() : VCSuccessColor();
@@ -11802,12 +11853,13 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
     }
 
     CGFloat width = self.view.bounds.size.width;
-    CGRect expandedButtonFrame = CGRectMake((width - 122.0f) * 0.5f, 60.0f, 122.0f, 122.0f);
-    CGRect compactButtonFrame = CGRectMake(12.0f, 52.0f, 104.0f, 48.0f);
-    CGRect expandedUptimeFrame = CGRectMake(16.0f, 190.0f, width - 32.0f, 20.0f);
-    CGRect compactUptimeFrame = CGRectMake(128.0f, 50.0f, width - 140.0f, 18.0f);
-    CGRect expandedStatusFrame = CGRectMake(16.0f, 216.0f, width - 32.0f, 30.0f);
-    CGRect compactStatusFrame = CGRectMake(128.0f, 71.0f, width - 140.0f, 37.0f);
+    CGFloat topInset = VCMainStatusBarInset();
+    CGRect expandedButtonFrame = CGRectMake((width - 122.0f) * 0.5f, topInset + 60.0f, 122.0f, 122.0f);
+    CGRect compactButtonFrame = CGRectMake(12.0f, topInset + 52.0f, 104.0f, 48.0f);
+    CGRect expandedUptimeFrame = CGRectMake(16.0f, topInset + 190.0f, width - 32.0f, 20.0f);
+    CGRect compactUptimeFrame = CGRectMake(128.0f, topInset + 50.0f, width - 140.0f, 18.0f);
+    CGRect expandedStatusFrame = CGRectMake(16.0f, topInset + 216.0f, width - 32.0f, 30.0f);
+    CGRect compactStatusFrame = CGRectMake(128.0f, topInset + 71.0f, width - 140.0f, 37.0f);
 
     [CATransaction begin];
     [CATransaction setDisableActions:YES];
@@ -11832,7 +11884,7 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
     }
 
     if (_showingTerminal && _logSelector && _logView) {
-        CGFloat logY = kVCMainContentStartY - collapseDistance * progress;
+        CGFloat logY = topInset + kVCMainContentStartY - collapseDistance * progress;
         CGRect selectorFrame = _logSelector.frame;
         selectorFrame.origin.y = logY + 2.0f;
         _logSelector.frame = selectorFrame;
@@ -12133,11 +12185,12 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
 
     CGRect b = self.view.bounds;
     BOOL collapsiblePhoneLayout = !IsPadDevice();
-    CGFloat listY = collapsiblePhoneLayout ? kVCMainCompactContentStartY : kVCMainContentStartY;
+    CGFloat topInset = VCMainStatusBarInset();
+    CGFloat listY = topInset + (collapsiblePhoneLayout ? kVCMainCompactContentStartY : kVCMainContentStartY);
     UIColor *bg = VCBackgroundColor();
     self.view.backgroundColor = bg;
 
-    CGFloat topY = 10.0f;
+    CGFloat topY = topInset + 10.0f;
     CGFloat iconW = 28.0f;
     CGFloat gap = 6.0f;
     CGFloat right = b.size.width - 12.0f;
@@ -12148,7 +12201,7 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
     CGFloat plusX = terminalX - gap - iconW;
     CGFloat clearLogsY = topY + iconW + gap;
 
-    _titleLabel = [[UILabel alloc] initWithFrame:CGRectMake(12, 6, plusX - 20, 28)];
+    _titleLabel = [[UILabel alloc] initWithFrame:CGRectMake(12, topInset + 6.0f, plusX - 20, 28)];
     _titleLabel.text = @"vless-core";
     _titleLabel.font = [UIFont boldSystemFontOfSize:22.0f];
     _titleLabel.textColor = VCPrimaryTextColor();
@@ -12159,7 +12212,7 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
     CGFloat updateX = CGRectGetMinX(_titleLabel.frame) +
                       ceilf([_titleLabel.text sizeWithFont:_titleLabel.font].width) + 4.0f;
     _updateBtn = [[UIButton buttonWithType:UIButtonTypeCustom] retain];
-    _updateBtn.frame = CGRectMake(updateX, 6.0f, iconW, iconW);
+    _updateBtn.frame = CGRectMake(updateX, topInset + 6.0f, iconW, iconW);
     _updateBtn.hidden = YES;
     [_updateBtn addTarget:self action:@selector(updateIndicatorPressed) forControlEvents:UIControlEventTouchUpInside];
     [self applyTopButtonFeedbackToButton:_updateBtn];
@@ -12203,7 +12256,7 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
 
     CGFloat btnSize = 122.0f;
     _connectBtn = [[UIButton buttonWithType:UIButtonTypeCustom] retain];
-    _connectBtn.frame = CGRectMake((b.size.width - btnSize) * 0.5f, 60.0f, btnSize, btnSize);
+    _connectBtn.frame = CGRectMake((b.size.width - btnSize) * 0.5f, topInset + 60.0f, btnSize, btnSize);
     _connectBtn.titleLabel.font = [UIFont boldSystemFontOfSize:20.0f];
     _connectBtn.layer.cornerRadius = btnSize * 0.5f;
     _connectBtn.layer.borderWidth = 2.0f;
@@ -12214,7 +12267,8 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
     [self applyTouchFeedbackToButton:_connectBtn];
     [self.view addSubview:_connectBtn];
 
-    _uptimeLabel = [[UILabel alloc] initWithFrame:CGRectMake(16.0f, 190.0f, b.size.width - 32.0f, 20.0f)];
+    _uptimeLabel = [[UILabel alloc] initWithFrame:CGRectMake(16.0f, topInset + 190.0f,
+                                                            b.size.width - 32.0f, 20.0f)];
     _uptimeLabel.font = [UIFont boldSystemFontOfSize:13.0f];
     _uptimeLabel.text = @"00:00:00";
     _uptimeLabel.textColor = VCPrimaryTextColor();
@@ -12223,7 +12277,8 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
     _uptimeLabel.autoresizingMask = UIViewAutoresizingFlexibleWidth;
     [self.view addSubview:_uptimeLabel];
 
-    _statusLabel = [[UILabel alloc] initWithFrame:CGRectMake(16.0f, 216.0f, b.size.width - 32.0f, 30.0f)];
+    _statusLabel = [[UILabel alloc] initWithFrame:CGRectMake(16.0f, topInset + 216.0f,
+                                                            b.size.width - 32.0f, 30.0f)];
     _statusLabel.font = [UIFont systemFontOfSize:12.5f];
     _statusLabel.numberOfLines = 2;
     _statusLabel.text = @"Ready";
@@ -12253,7 +12308,7 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
     }
     [self.view addSubview:_tableView];
 
-    CGFloat logY = kVCMainContentStartY;
+    CGFloat logY = topInset + kVCMainContentStartY;
     CGFloat logH = b.size.height - logY;
     if (logH < 120.0f) logH = 120.0f;
     CGFloat logSelectorWidth = 188.0f;
@@ -12349,7 +12404,7 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
     return IsPadDevice();
 }
 
-- (NSUInteger)supportedInterfaceOrientations {
+- (UIInterfaceOrientationMask)supportedInterfaceOrientations {
     if (IsPadDevice()) {
         return UIInterfaceOrientationMaskAllButUpsideDown;
     }
@@ -13541,7 +13596,7 @@ moveRowAtIndexPath:(NSIndexPath *)sourceIndexPath
 
 #pragma mark - Import UI
 
-- (void)actionSheet:(UIActionSheet *)actionSheet clickedButtonAtIndex:(NSInteger)buttonIndex {
+- (void)actionSheet:(UIActionSheet *)actionSheet didDismissWithButtonIndex:(NSInteger)buttonIndex {
     if (actionSheet.tag == VCActionSheetTagImport) {
         if (buttonIndex == 0) {
             NSString *clip = [[UIPasteboard generalPasteboard] string];
@@ -13779,7 +13834,7 @@ moveRowAtIndexPath:(NSIndexPath *)sourceIndexPath
     return [self openImportURL:url];
 }
 
-- (NSUInteger)application:(UIApplication *)application supportedInterfaceOrientationsForWindow:(UIWindow *)window {
+- (UIInterfaceOrientationMask)application:(UIApplication *)application supportedInterfaceOrientationsForWindow:(UIWindow *)window {
     (void)application;
     (void)window;
     return IsPadDevice() ? UIInterfaceOrientationMaskAllButUpsideDown : UIInterfaceOrientationMaskPortrait;
