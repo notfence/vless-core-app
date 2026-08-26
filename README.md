@@ -138,3 +138,19 @@ Package uses `gzip` compression for old iOS 6 `dpkg` compatibility.
 ## Full-device backend
 
 The daemon uses `pf + redsocks`.
+
+## Third-party software
+
+Third-party licenses apply only to the components identified in
+[`legal/THIRD_PARTY_LICENSES.txt`](legal/THIRD_PARTY_LICENSES.txt), not to the
+project as a whole. Credits shows a short dependency list and opens the full
+notices, license texts, and LGPL relinking information for each component.
+The `.deb` contains one combined document at:
+
+```text
+/Applications/vless-core.app/THIRD_PARTY_LICENSES.txt
+```
+
+Corresponding ZBar source is included in this repository. redsocks is shipped
+as the prebuilt `third_party/redsocks-vless-core` executable and is not rebuilt
+as part of the application package.

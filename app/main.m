@@ -3796,6 +3796,90 @@ static UIView *VCMainListCellReorderControlInView(UIView *view) {
 
 @end
 
+@interface ThirdPartyLicenseVC : UIViewController {
+    UITextView *_textView;
+    NSString *_documentText;
+    NSString *_marker;
+    BOOL _didScrollToMarker;
+}
+- (id)initWithTitle:(NSString *)title marker:(NSString *)marker;
+@end
+
+@implementation ThirdPartyLicenseVC
+
+- (id)initWithTitle:(NSString *)title marker:(NSString *)marker {
+    self = [super init];
+    if (self) {
+        self.title = title;
+        _marker = [marker copy];
+    }
+    return self;
+}
+
+- (void)dealloc {
+    [_textView release];
+    [_documentText release];
+    [_marker release];
+    [super dealloc];
+}
+
+- (void)viewDidLoad {
+    [super viewDidLoad];
+    self.view.backgroundColor = VCBackgroundColor();
+
+    NSString *path = [[NSBundle mainBundle] pathForResource:@"THIRD_PARTY_LICENSES" ofType:@"txt"];
+    NSString *text = path
+        ? [NSString stringWithContentsOfFile:path encoding:NSUTF8StringEncoding error:NULL]
+        : nil;
+    if (![text length]) {
+        text = @"Third-party license information is unavailable.";
+    }
+    _documentText = [text copy];
+
+    _textView = [[UITextView alloc] initWithFrame:self.view.bounds];
+    _textView.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
+    _textView.backgroundColor = VCBackgroundColor();
+    _textView.textColor = VCPrimaryTextColor();
+    _textView.font = [UIFont systemFontOfSize:13.0f];
+    _textView.editable = NO;
+    _textView.text = _documentText;
+    [self.view addSubview:_textView];
+}
+
+- (void)viewDidAppear:(BOOL)animated {
+    [super viewDidAppear:animated];
+    if (_didScrollToMarker || ![_marker length]) {
+        return;
+    }
+
+    NSRange range = [_documentText rangeOfString:_marker options:NSCaseInsensitiveSearch];
+    if (range.location != NSNotFound) {
+        [_textView scrollRangeToVisible:range];
+        _textView.selectedRange = NSMakeRange(range.location, 0);
+    }
+    _didScrollToMarker = YES;
+}
+
+- (BOOL)shouldAutorotateToInterfaceOrientation:(UIInterfaceOrientation)interfaceOrientation {
+    if (IsPadDevice()) {
+        return UIInterfaceOrientationIsPortrait(interfaceOrientation) || UIInterfaceOrientationIsLandscape(interfaceOrientation);
+    }
+    return interfaceOrientation == UIInterfaceOrientationPortrait;
+}
+
+- (BOOL)shouldAutorotate {
+    return IsPadDevice();
+}
+
+- (UIInterfaceOrientationMask)supportedInterfaceOrientations {
+    if (IsPadDevice()) {
+        return UIInterfaceOrientationMaskAllButUpsideDown;
+    }
+    return UIInterfaceOrientationMaskPortrait;
+}
+
+@end
+
 @interface CreditsVC : UIViewController <UITableViewDataSource, UITableViewDelegate> {
     UITableView *_tableView;
     NSArray *_sections;
@@ -3817,6 +3901,14 @@ static UIView *VCMainListCellReorderControlInView(UIView *view) {
             nil];
 }
 
+- (NSDictionary *)licensedRowWithTitle:(NSString *)title detail:(NSString *)detail marker:(NSString *)marker {
+    return [NSDictionary dictionaryWithObjectsAndKeys:
+            title ? title : @"", @"title",
+            detail ? detail : @"", @"detail",
+            marker ? marker : @"", @"licenseMarker",
+            nil];
+}
+
 - (NSDictionary *)sectionWithTitle:(NSString *)title rows:(NSArray *)rows {
     return [NSDictionary dictionaryWithObjectsAndKeys:
             title ? title : @"", @"title",
@@ -3829,12 +3921,27 @@ static UIView *VCMainListCellReorderControlInView(UIView *view) {
     NSString *opensslPatchStatus = DetectOpenSSLPatchStatus();
 
     NSArray *libraries = [NSArray arrayWithObjects:
-                          [self rowWithTitle:@"curl" detail:[NSString stringWithFormat:@"HTTP client library, version %@", [deps objectForKey:@"curl"]]],
-                          [self rowWithTitle:@"OpenSSL" detail:[NSString stringWithFormat:@"TLS library, version %@, %@", [deps objectForKey:@"openssl"], opensslPatchStatus]],
-                          [self rowWithTitle:@"zlib" detail:[NSString stringWithFormat:@"Compression library, version %@", [deps objectForKey:@"zlib"]]],
-                          [self rowWithTitle:@"libevent" detail:@"Event loop library used by redsocks."],
-                          [self rowWithTitle:@"ZBar" detail:@"QR code recognition library, version 0.23.93, LGPL 2.1 or later."],
-                          [self rowWithTitle:@"CA certificates" detail:@"Mozilla CA bundle packaged as cacert.pem."],
+                          [self licensedRowWithTitle:@"curl"
+                                              detail:[NSString stringWithFormat:@"HTTP client library, version %@. License: curl license.", [deps objectForKey:@"curl"]]
+                                              marker:@"curl 8.21.0"],
+                          [self licensedRowWithTitle:@"OpenSSL"
+                                              detail:[NSString stringWithFormat:@"TLS library, version %@, %@. License: Apache 2.0.", [deps objectForKey:@"openssl"], opensslPatchStatus]
+                                              marker:@"OpenSSL 3.5.7"],
+                          [self licensedRowWithTitle:@"zlib"
+                                              detail:[NSString stringWithFormat:@"Compression library, version %@. License: zlib license.", [deps objectForKey:@"zlib"]]
+                                              marker:@"zlib 1.3.1"],
+                          [self licensedRowWithTitle:@"libevent"
+                                              detail:@"Event loop library used by redsocks. License: BSD-style licenses."
+                                              marker:@"libevent 2.1.12-stable"],
+                          [self licensedRowWithTitle:@"ZBar"
+                                              detail:@"QR code recognition library, version 0.23.93. License: LGPL 2.1 or later."
+                                              marker:@"ZBar 0.23.93"],
+                          [self licensedRowWithTitle:@"CA certificates"
+                                              detail:@"Mozilla CA bundle packaged as cacert.pem. License: MPL 2.0."
+                                              marker:@"Mozilla CA certificate bundle"],
+                          [self licensedRowWithTitle:@"redsocks"
+                                              detail:@"SOCKS5 redirector used for full-device routing. License: Apache 2.0."
+                                              marker:@"redsocks"],
                           nil];
 
     NSArray *thanks = [NSArray arrayWithObject:
@@ -3842,7 +3949,7 @@ static UIView *VCMainListCellReorderControlInView(UIView *view) {
                                                                        @"@rafal_official for testing and debugging"]];
 
     NSArray *newSections = [[NSArray alloc] initWithObjects:
-                            [self sectionWithTitle:@"Dependencies" rows:libraries],
+                            [self sectionWithTitle:@"Third-party software" rows:libraries],
                             [self sectionWithTitle:@"Special thanks" rows:thanks],
                             nil];
     [_sections release];
@@ -3910,8 +4017,24 @@ static UIView *VCMainListCellReorderControlInView(UIView *view) {
     NSDictionary *row = [self rowForIndexPath:indexPath];
     cell.textLabel.text = [row objectForKey:@"title"];
     cell.detailTextLabel.text = [row objectForKey:@"detail"];
+    BOOL hasLicense = [[row objectForKey:@"licenseMarker"] length] > 0;
+    cell.selectionStyle = hasLicense ? UITableViewCellSelectionStyleBlue
+                                     : UITableViewCellSelectionStyleNone;
+    cell.accessoryType = UITableViewCellAccessoryNone;
+    cell.accessoryView = hasLicense ? VCCreateDisclosureAccessoryView() : nil;
     VCAppearanceApplyCell(cell);
     return cell;
+}
+
+- (void)tableView:(UITableView *)tableView didSelectRowAtIndexPath:(NSIndexPath *)indexPath {
+    NSDictionary *row = [self rowForIndexPath:indexPath];
+    NSString *marker = [row objectForKey:@"licenseMarker"];
+    if ([marker length]) {
+        ThirdPartyLicenseVC *license = [[[ThirdPartyLicenseVC alloc]
+            initWithTitle:[row objectForKey:@"title"] marker:marker] autorelease];
+        [self.navigationController pushViewController:license animated:YES];
+    }
+    [tableView deselectRowAtIndexPath:indexPath animated:YES];
 }
 
 - (void)tableView:(UITableView *)tableView willDisplayCell:(UITableViewCell *)cell forRowAtIndexPath:(NSIndexPath *)indexPath {
@@ -5092,7 +5215,7 @@ commitEditingStyle:(UITableViewCellEditingStyle)editingStyle
         return @"Version and core binary info";
     }
     if (indexPath.section == 4 && indexPath.row == 1) {
-        return @"Dependencies and special thanks";
+        return @"Dependencies, licenses and special thanks";
     }
     if (indexPath.section == 4 && indexPath.row == 2) {
         return @"Common questions and quick answers";
@@ -5260,7 +5383,7 @@ commitEditingStyle:(UITableViewCellEditingStyle)editingStyle
         cell.accessoryView = VCCreateDisclosureAccessoryView();
         [self applySettingsMarqueesToCell:cell
                                     title:@"Credits"
-                                   detail:@"Dependencies and special thanks"];
+                                   detail:@"Dependencies, licenses and special thanks"];
         return cell;
     }
 
