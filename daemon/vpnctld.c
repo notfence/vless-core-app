@@ -2647,10 +2647,14 @@ int main(void) {
         FD_ZERO(&read_fds);
         FD_SET(lfd, &read_fds);
         struct timeval monitor_timeout;
-        monitor_timeout.tv_sec = 1;
-        monitor_timeout.tv_usec = 0;
+        struct timeval *timeout_ptr = NULL;
+        if (g.connected) {
+            monitor_timeout.tv_sec = 1;
+            monitor_timeout.tv_usec = 0;
+            timeout_ptr = &monitor_timeout;
+        }
 
-        int ready = select(lfd + 1, &read_fds, NULL, NULL, &monitor_timeout);
+        int ready = select(lfd + 1, &read_fds, NULL, NULL, timeout_ptr);
         if (ready < 0) {
             if (errno == EINTR) continue;
             log_msg("control socket select failed errno=%d", errno);

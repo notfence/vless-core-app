@@ -6984,6 +6984,7 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
 
     BOOL _connected;
     BOOL _connectedWithProtectedLogs;
+    BOOL _daemonStatusCheckInFlight;
     BOOL _showingTerminal;
     BOOL _autoUpdateSubscriptions;
     BOOL _preserveCustomSubscriptionNames;
@@ -7000,6 +7001,7 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
     BOOL _queuedMainMarqueeRelayout;
     BOOL _pendingInsecureImportUsesHappHeaders;
 }
+- (void)reconcileConnectionStateWithDaemon;
 - (NSString *)shortUpdateFailureTextForSubscription:(NSDictionary *)sub errorText:(NSString *)errorText;
 - (void)showSubscriptionUpdateFailures:(NSArray *)failureTexts;
 - (BOOL)subscriptionNeedsPlainHTTPApproval:(NSDictionary *)subscription;
@@ -8158,6 +8160,39 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
 - (void)uptimeTick:(NSTimer *)timer {
     (void)timer;
     [self refreshUptimeText];
+    [self reconcileConnectionStateWithDaemon];
+}
+
+- (void)reconcileConnectionStateWithDaemon {
+    if (!_connected || _daemonStatusCheckInFlight) return;
+
+    _daemonStatusCheckInFlight = YES;
+    NSTimeInterval expectedConnectedSince = _connectedSince;
+    dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_DEFAULT, 0), ^{
+        NSAutoreleasePool *pool = [[NSAutoreleasePool alloc] init];
+        NSString *response = [self sanitizeDaemonText:SendCommand(@"STATUS\n")];
+        BOOL disconnected = [response hasPrefix:@"OK disconnected"];
+
+        dispatch_async(dispatch_get_main_queue(), ^{
+            _daemonStatusCheckInFlight = NO;
+            if (!disconnected || !_connected ||
+                _connectedSince != expectedConnectedSince) {
+                return;
+            }
+
+            _connected = NO;
+            _connectedWithProtectedLogs = NO;
+            [self stopUptimeTimer];
+            [self updateConnectButton];
+            [self showStatus:@"Connection lost" ok:NO];
+        });
+        [pool drain];
+    });
+}
+
+- (void)applicationDidBecomeActiveNotification:(NSNotification *)notification {
+    (void)notification;
+    [self reconcileConnectionStateWithDaemon];
 }
 
 - (void)showStatus:(NSString *)text ok:(BOOL)ok {
@@ -12311,6 +12346,11 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
 - (void)viewDidLoad {
     [super viewDidLoad];
 
+    [[NSNotificationCenter defaultCenter] addObserver:self
+                                             selector:@selector(applicationDidBecomeActiveNotification:)
+                                                 name:UIApplicationDidBecomeActiveNotification
+                                               object:nil];
+
     [self loadData];
     _pingDisplayByURI = [[NSMutableDictionary alloc] init];
     _standalonePingURIs = [[NSMutableSet alloc] init];
@@ -12561,6 +12601,7 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
 }
 
 - (void)dealloc {
+    [[NSNotificationCenter defaultCenter] removeObserver:self];
     [NSObject cancelPreviousPerformRequestsWithTarget:self
                                              selector:@selector(startAutomaticUpdateCheckIfNeeded)
                                                object:nil];
