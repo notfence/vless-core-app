@@ -10,6 +10,13 @@ refresh_uicache() {
 
 case "$1" in
   remove|purge)
+    rm -f /usr/share/vless-core/runtime-architecture
+    rm -f /var/db/vless-core/system-proxy-backup.plist.tmp \
+          /var/db/vless-core/system-proxy-backup.corrupt.plist \
+          /var/db/vless-core/pf-state.tmp \
+          /var/run/vlesscore-pf-previous-state \
+          /var/run/vlesscore-pf-previous-state.tmp
+    rmdir /var/db/vless-core >/dev/null 2>&1 || true
     echo "Running uicache for package removal..."
     refresh_uicache || true
     ;;

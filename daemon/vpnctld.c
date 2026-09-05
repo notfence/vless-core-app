@@ -32,6 +32,7 @@
 
 #include "vpnicon_statusbar.h"
 #include "vpnctld_protocol.h"
+#include "system_proxy.h"
 
 #if __has_include(<net/pfvar.h>)
 #include <net/pfvar.h>
@@ -115,6 +116,20 @@ typedef enum {
     MODE_PF = 1,
 } vpn_mode_t;
 
+typedef enum {
+    PF_ENABLED_ERROR = -1,
+    PF_DISABLED = 0,
+    PF_ENABLED = 1,
+} pf_enabled_state_t;
+
+typedef enum {
+    PF_ROOT_ERROR = -1,
+    PF_ROOT_CONFLICT = -2,
+    PF_ROOT_EMPTY = 0,
+    PF_ROOT_OWN_DISPATCH = 1,
+    PF_ROOT_SHARED_DISPATCH = 2,
+} pf_root_state_t;
+
 typedef struct {
     char ip[INET_ADDRSTRLEN];
     unsigned int references;
@@ -130,18 +145,31 @@ typedef struct {
     pid_t dns_pid;
     vpn_mode_t mode;
     int pf_enabled_before;
+    int pf_dispatch_installed;
     char server_ip[64];
     char server_ips[512];
     char routing[8192];
     int routing_bypass_lan;
     int protect_logs;
+    int system_proxy_enabled;
+    long long system_proxy_refresh_ms;
+    pid_t springboard_pid;
+    pid_t springboard_candidate_pid;
+    unsigned int springboard_candidate_polls;
+    long long springboard_poll_ms;
     route_bypass_entry_t route_bypass[256];
 } vpn_state_t;
 
 static vpn_state_t g;
 static const int kConnectResolveTimeoutMs = 8000;
+static const char *kStateDirectory = "/var/db/vless-core";
+static const char *kPFPreviousStatePath = "/var/db/vless-core/pf-state";
+static const char *kPFPreviousStateTempPath = "/var/db/vless-core/pf-state.tmp";
+static const char *kLegacyPFPreviousStatePath = "/var/run/vlesscore-pf-previous-state";
+static const char *kLegacyPFPreviousStateTempPath = "/var/run/vlesscore-pf-previous-state.tmp";
 static volatile sig_atomic_t g_terminate = 0;
 static int g_listen_fd = -1;
+static int g_instance_lock_fd = -1;
 static int g_vpn_icon_publisher_logged = 0;
 static uid_t g_helper_uid = (uid_t)-1;
 static gid_t g_helper_gid = (gid_t)-1;
@@ -157,6 +185,7 @@ typedef enum {
 static void stop_pid(pid_t *p);
 static void truncate_log_file(const char *path);
 static void clear_logs(void);
+static void restart_system_dns_resolver(void);
 
 static void handle_term_signal(int sig) {
     (void)sig;
@@ -179,6 +208,169 @@ static int load_helper_identity(void) {
     g_helper_uid = account->pw_uid;
     g_helper_gid = account->pw_gid;
     return 0;
+}
+
+static int acquire_instance_lock(int wait_for_owner) {
+    int fd = open(VC_DAEMON_LOCK_PATH, O_RDWR | O_CREAT | O_NOFOLLOW, 0600);
+    if (fd < 0) return -1;
+
+    struct stat st;
+    if (fstat(fd, &st) != 0 || !S_ISREG(st.st_mode) || st.st_uid != 0 || st.st_nlink != 1) {
+        close(fd);
+        errno = EPERM;
+        return -1;
+    }
+    if ((st.st_mode & 0777) != 0600 && fchmod(fd, 0600) != 0) {
+        close(fd);
+        return -1;
+    }
+
+    struct flock lock;
+    memset(&lock, 0, sizeof(lock));
+    lock.l_type = F_WRLCK;
+    lock.l_whence = SEEK_SET;
+    int command = wait_for_owner ? F_SETLKW : F_SETLK;
+    while (fcntl(fd, command, &lock) != 0) {
+        if (wait_for_owner && errno == EINTR) continue;
+        int saved_errno = errno;
+        close(fd);
+        errno = saved_errno;
+        return -1;
+    }
+    if (fcntl(fd, F_SETFD, FD_CLOEXEC) != 0) {
+        close(fd);
+        return -1;
+    }
+
+    char owner[32];
+    int owner_length = snprintf(owner, sizeof(owner), "%ld\n", (long)getpid());
+    if (owner_length <= 0 || (size_t)owner_length >= sizeof(owner) ||
+        ftruncate(fd, 0) != 0 || lseek(fd, 0, SEEK_SET) < 0 ||
+        write(fd, owner, (size_t)owner_length) != owner_length) {
+        close(fd);
+        return -1;
+    }
+    return fd;
+}
+
+static int ensure_state_directory(void) {
+    struct stat st;
+    if (lstat(kStateDirectory, &st) != 0) {
+        if (errno != ENOENT || mkdir(kStateDirectory, 0700) != 0 ||
+            lstat(kStateDirectory, &st) != 0) {
+            return -1;
+        }
+    }
+    if (!S_ISDIR(st.st_mode) || S_ISLNK(st.st_mode) || st.st_uid != 0) return -1;
+    if ((st.st_mode & 0777) != 0700 && chmod(kStateDirectory, 0700) != 0) return -1;
+    return 0;
+}
+
+static int sync_state_directory(void) {
+    int fd = open(kStateDirectory, O_RDONLY | O_NOFOLLOW);
+    if (fd < 0) return -1;
+    struct stat st;
+    int result = fstat(fd, &st) == 0 && S_ISDIR(st.st_mode) && fsync(fd) == 0 ? 0 : -1;
+    close(fd);
+    return result;
+}
+
+static int write_pf_previous_state(int was_enabled, int dispatch_installed) {
+    if (ensure_state_directory() != 0) return -1;
+    (void)unlink(kPFPreviousStateTempPath);
+    int fd = open(kPFPreviousStateTempPath,
+                  O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW,
+                  0600);
+    if (fd < 0) return -1;
+
+    char state[64];
+    int state_length = snprintf(state,
+                                sizeof(state),
+                                "v2\nenabled=%d\ndispatch=%d\n",
+                                was_enabled ? 1 : 0,
+                                dispatch_installed ? 1 : 0);
+    if (state_length <= 0 || (size_t)state_length >= sizeof(state)) {
+        close(fd);
+        (void)unlink(kPFPreviousStateTempPath);
+        return -1;
+    }
+    size_t offset = 0;
+    while (offset < (size_t)state_length) {
+        ssize_t count = write(fd, state + offset, (size_t)state_length - offset);
+        if (count < 0 && errno == EINTR) continue;
+        if (count <= 0) break;
+        offset += (size_t)count;
+    }
+    int result = offset == (size_t)state_length && fsync(fd) == 0 ? 0 : -1;
+    if (close(fd) != 0) result = -1;
+    if (result == 0 && rename(kPFPreviousStateTempPath, kPFPreviousStatePath) != 0) {
+        result = -1;
+    }
+    if (result == 0 && sync_state_directory() != 0) result = -1;
+    if (result != 0) (void)unlink(kPFPreviousStateTempPath);
+    if (result == 0) (void)unlink(kLegacyPFPreviousStatePath);
+    return result;
+}
+
+static int read_pf_previous_state_file(const char *path,
+                                       int *was_enabled,
+                                       int *dispatch_installed) {
+    int fd = open(path, O_RDONLY | O_NOFOLLOW);
+    if (fd < 0) return errno == ENOENT ? 1 : -1;
+
+    struct stat st;
+    char state[64] = {0};
+    ssize_t count = -1;
+    if (fstat(fd, &st) == 0 && S_ISREG(st.st_mode) && st.st_uid == 0 &&
+        st.st_nlink == 1 && st.st_size > 0 && st.st_size < (off_t)sizeof(state)) {
+        do {
+            count = read(fd, state, (size_t)st.st_size);
+        } while (count < 0 && errno == EINTR);
+    }
+    close(fd);
+    if (count == 2 && state[1] == '\n' && (state[0] == '0' || state[0] == '1')) {
+        *was_enabled = state[0] == '1';
+        *dispatch_installed = -1;
+        return 0;
+    }
+
+    for (int enabled = 0; enabled <= 1; enabled++) {
+        for (int dispatch = 0; dispatch <= 1; dispatch++) {
+            char expected[64];
+            int expected_length = snprintf(expected,
+                                           sizeof(expected),
+                                           "v2\nenabled=%d\ndispatch=%d\n",
+                                           enabled,
+                                           dispatch);
+            if (expected_length == count && memcmp(state, expected, (size_t)count) == 0) {
+                *was_enabled = enabled;
+                *dispatch_installed = dispatch;
+                return 0;
+            }
+        }
+    }
+    return -1;
+}
+
+static int read_pf_previous_state(int *was_enabled, int *dispatch_installed) {
+    int result = read_pf_previous_state_file(kPFPreviousStatePath,
+                                             was_enabled,
+                                             dispatch_installed);
+    if (result != 1) return result;
+    return read_pf_previous_state_file(kLegacyPFPreviousStatePath,
+                                       was_enabled,
+                                       dispatch_installed);
+}
+
+static int remove_pf_previous_state(void) {
+    int result = 0;
+    if (unlink(kPFPreviousStatePath) == 0) {
+        if (sync_state_directory() != 0) result = -1;
+    } else if (errno != ENOENT) {
+        result = -1;
+    }
+    if (unlink(kLegacyPFPreviousStatePath) != 0 && errno != ENOENT) result = -1;
+    return result;
 }
 
 static int drop_helper_privileges(void) {
@@ -428,7 +620,7 @@ static const char *find_redsocks_bin(void) {
 }
 
 static const char *find_vless_core_bin(void) {
-    if (can_exec("/usr/bin/vless-core-darwin-armv7")) return "/usr/bin/vless-core-darwin-armv7";
+    if (can_exec(VC_CORE_EXECUTABLE_PATH)) return VC_CORE_EXECUTABLE_PATH;
     return NULL;
 }
 
@@ -1636,6 +1828,121 @@ static void update_vpn_icon_state(int enabled) {
     }
 }
 
+static int process_has_name(pid_t pid, const char *name) {
+    if (pid <= 0 || !name || !*name) return 0;
+    int mib[] = { CTL_KERN, KERN_PROC, KERN_PROC_PID, pid };
+    struct kinfo_proc process;
+    memset(&process, 0, sizeof(process));
+    size_t size = sizeof(process);
+    return sysctl(mib, 4, &process, &size, NULL, 0) == 0 &&
+           size >= sizeof(process) &&
+           process.kp_proc.p_pid == pid &&
+           strcmp(process.kp_proc.p_comm, name) == 0;
+}
+
+static pid_t springboard_pid(pid_t cached_pid) {
+    if (process_has_name(cached_pid, "SpringBoard")) return cached_pid;
+
+    int mib[] = { CTL_KERN, KERN_PROC, KERN_PROC_ALL, 0 };
+    for (int attempt = 0; attempt < 3; attempt++) {
+        size_t size = 0;
+        if (sysctl(mib, 4, NULL, &size, NULL, 0) != 0 || size == 0) return 0;
+
+        size_t capacity = size + sizeof(struct kinfo_proc) * 16;
+        struct kinfo_proc *processes = malloc(capacity);
+        if (!processes) return 0;
+        if (sysctl(mib, 4, processes, &capacity, NULL, 0) == 0) {
+            size_t count = capacity / sizeof(struct kinfo_proc);
+            pid_t found = 0;
+            for (size_t index = 0; index < count; index++) {
+                if (strcmp(processes[index].kp_proc.p_comm, "SpringBoard") == 0) {
+                    found = processes[index].kp_proc.p_pid;
+                    break;
+                }
+            }
+            free(processes);
+            return found;
+        }
+        int saved_errno = errno;
+        free(processes);
+        if (saved_errno != ENOMEM) return 0;
+    }
+    return 0;
+}
+
+static void restart_system_dns_resolver(void) {
+    int mib[] = { CTL_KERN, KERN_PROC, KERN_PROC_ALL, 0 };
+    for (int attempt = 0; attempt < 3; attempt++) {
+        size_t size = 0;
+        if (sysctl(mib, 4, NULL, &size, NULL, 0) != 0 || size == 0) return;
+
+        size_t capacity = size + sizeof(struct kinfo_proc) * 16;
+        struct kinfo_proc *processes = malloc(capacity);
+        if (!processes) return;
+        if (sysctl(mib, 4, processes, &capacity, NULL, 0) == 0) {
+            size_t count = capacity / sizeof(struct kinfo_proc);
+            unsigned int signaled = 0;
+            for (size_t index = 0; index < count; index++) {
+                if (strncmp(processes[index].kp_proc.p_comm,
+                            "mDNSResponder",
+                            strlen("mDNSResponder")) == 0 &&
+                    processes[index].kp_proc.p_pid > 1 &&
+                    kill(processes[index].kp_proc.p_pid, SIGKILL) == 0) {
+                    signaled++;
+                }
+            }
+            free(processes);
+            log_msg("restarted system DNS resolver processes=%u after stale PF recovery",
+                    signaled);
+            return;
+        }
+        int saved_errno = errno;
+        free(processes);
+        if (saved_errno != ENOMEM) return;
+    }
+}
+
+static void monitor_springboard_icon(long long current_ms) {
+    if (current_ms - g.springboard_poll_ms < 1000) return;
+    g.springboard_poll_ms = current_ms;
+
+    pid_t cached_pid = g.springboard_candidate_pid > 0
+        ? g.springboard_candidate_pid
+        : g.springboard_pid;
+    pid_t observed_pid = springboard_pid(cached_pid);
+    if (observed_pid <= 0) {
+        g.springboard_candidate_pid = 0;
+        g.springboard_candidate_polls = 0;
+        return;
+    }
+    if (g.springboard_pid <= 0) {
+        g.springboard_pid = observed_pid;
+        return;
+    }
+    if (observed_pid == g.springboard_pid) {
+        g.springboard_candidate_pid = 0;
+        g.springboard_candidate_polls = 0;
+        return;
+    }
+    if (observed_pid != g.springboard_candidate_pid) {
+        g.springboard_candidate_pid = observed_pid;
+        g.springboard_candidate_polls = 1;
+        return;
+    }
+    if (++g.springboard_candidate_polls < 2) return;
+
+    g.springboard_pid = observed_pid;
+    g.springboard_candidate_pid = 0;
+    g.springboard_candidate_polls = 0;
+    int rc = vpnicon_statusbar_republish();
+    if (rc == VPNICON_STATUSBAR_OK) {
+        log_msg("VPN status bar icon republished after SpringBoard restart pid=%d",
+                (int)observed_pid);
+    } else if (rc == VPNICON_STATUSBAR_ERROR) {
+        log_msg("VPN status bar icon republish failed: %s", vpnicon_statusbar_last_error());
+    }
+}
+
 static int bind_control_socket(void) {
     int lfd = socket(AF_UNIX, SOCK_STREAM, 0);
     if (lfd < 0) {
@@ -1675,10 +1982,21 @@ static int bind_control_socket(void) {
 static void stop_pid(pid_t *p) {
     if (*p <= 0) return;
 
-    kill(*p, SIGTERM);
-    usleep(300000);
-    kill(*p, SIGKILL);
-    waitpid(*p, NULL, 0);
+    pid_t pid = *p;
+    (void)kill(pid, SIGTERM);
+    for (int attempt = 0; attempt < 30; attempt++) {
+        pid_t result = waitpid(pid, NULL, WNOHANG);
+        if (result == pid || (result < 0 && errno == ECHILD)) {
+            *p = 0;
+            return;
+        }
+        if (result < 0 && errno != EINTR) break;
+        usleep(10000);
+    }
+
+    (void)kill(pid, SIGKILL);
+    while (waitpid(pid, NULL, 0) < 0 && errno == EINTR) {
+    }
     *p = 0;
 }
 
@@ -1944,10 +2262,8 @@ static int write_pf_conf(const char *server_ips, char ifnames[][32], size_t if_c
     return 0;
 }
 
-static int pf_is_enabled(void) {
-    const char *pfctl = find_pfctl_bin();
-    if (!pfctl) return 0;
-
+static pf_enabled_state_t pf_enabled_state(const char *pfctl) {
+    if (!pfctl) return PF_ENABLED_ERROR;
     char output[4096];
     char *argv[] = {
         (char *)pfctl,
@@ -1956,10 +2272,13 @@ static int pf_is_enabled(void) {
         NULL,
     };
     if (run_argv_capture(argv, output, sizeof(output)) != 0) {
-        return 0;
+        log_msg("pf status query failed");
+        return PF_ENABLED_ERROR;
     }
-
-    return contains_ci(output, "Status: Enabled");
+    if (contains_ci(output, "Status: Enabled")) return PF_ENABLED;
+    if (contains_ci(output, "Status: Disabled")) return PF_DISABLED;
+    log_msg("pf status query returned an unknown state");
+    return PF_ENABLED_ERROR;
 }
 
 static void ensure_pf_os_file(void) {
@@ -1977,9 +2296,9 @@ static void ensure_pf_os_file(void) {
     log_msg("created placeholder /etc/pf.os");
 }
 
-static void flush_pf_states(void) {
+static int flush_pf_states(void) {
     const char *pfctl = find_pfctl_bin();
-    if (!pfctl) return;
+    if (!pfctl) return -1;
 
     char *argv[] = {
         (char *)pfctl,
@@ -1989,37 +2308,95 @@ static void flush_pf_states(void) {
         NULL,
     };
     if (run_argv(argv) == 0) {
-        log_msg("pf states flushed after rule load");
+        log_msg("pf states flushed");
+        return 0;
     }
+    return -1;
 }
 
-static int pf_root_has_vlesscore_dispatch(const char *pfctl) {
+static int text_has_nonspace(const char *text) {
+    while (text && *text) {
+        if (!isspace((unsigned char)*text)) return 1;
+        text++;
+    }
+    return 0;
+}
+
+static int rule_line_equals(const char *start, size_t length, const char *expected) {
+    while (length > 0 && isspace((unsigned char)*start)) {
+        start++;
+        length--;
+    }
+    while (length > 0 && isspace((unsigned char)start[length - 1])) length--;
+    return strlen(expected) == length && memcmp(start, expected, length) == 0;
+}
+
+static int rule_line_has_nonspace(const char *start, size_t length) {
+    for (size_t index = 0; index < length; index++) {
+        if (!isspace((unsigned char)start[index])) return 1;
+    }
+    return 0;
+}
+
+static int pf_dispatch_rules_only(const char *rules, int nat_rules) {
+    int nat_count = 0;
+    int rdr_count = 0;
+    int filter_count = 0;
+    const char *line = rules;
+    while (line && *line) {
+        const char *newline = strchr(line, '\n');
+        size_t length = newline ? (size_t)(newline - line) : strlen(line);
+        if (length > 0) {
+            if (nat_rules &&
+                (rule_line_equals(line, length, "nat-anchor \"vlesscore\"") ||
+                 rule_line_equals(line, length, "nat-anchor \"vlesscore\" all"))) {
+                nat_count++;
+            } else if (nat_rules &&
+                       (rule_line_equals(line, length, "rdr-anchor \"vlesscore\"") ||
+                        rule_line_equals(line, length, "rdr-anchor \"vlesscore\" all"))) {
+                rdr_count++;
+            } else if (!nat_rules &&
+                       (rule_line_equals(line, length, "anchor \"vlesscore\"") ||
+                        rule_line_equals(line, length, "anchor \"vlesscore\" all"))) {
+                filter_count++;
+            } else if (rule_line_has_nonspace(line, length)) {
+                return 0;
+            }
+        }
+        line = newline ? newline + 1 : NULL;
+    }
+    return nat_rules ? nat_count == 1 && rdr_count == 1 : filter_count == 1;
+}
+
+static pf_root_state_t pf_root_state(const char *pfctl) {
     char nat_rules[16384];
     char filter_rules[16384];
     char *nat_argv[] = { (char *)pfctl, "-sn", NULL };
     char *filter_argv[] = { (char *)pfctl, "-sr", NULL };
     if (run_argv_capture(nat_argv, nat_rules, sizeof(nat_rules)) != 0 ||
         run_argv_capture(filter_argv, filter_rules, sizeof(filter_rules)) != 0) {
-        return -1;
+        return PF_ROOT_ERROR;
     }
 
     int has_nat = contains_ci(nat_rules, "nat-anchor \"vlesscore\"");
     int has_rdr = contains_ci(nat_rules, "rdr-anchor \"vlesscore\"");
     int has_filter = contains_ci(filter_rules, "anchor \"vlesscore\"");
-    if (has_nat && has_rdr && has_filter) return 1;
-
-    if (nat_rules[0] != '\0' || filter_rules[0] != '\0') {
-        log_msg("pf root rules exist without vlesscore anchor; refusing to replace them");
-        return -2;
+    if (has_nat && has_rdr && has_filter) {
+        if (pf_dispatch_rules_only(nat_rules, 1) &&
+            pf_dispatch_rules_only(filter_rules, 0)) {
+            return PF_ROOT_OWN_DISPATCH;
+        }
+        return PF_ROOT_SHARED_DISPATCH;
     }
-    return 0;
+
+    if (text_has_nonspace(nat_rules) || text_has_nonspace(filter_rules)) {
+        log_msg("pf root rules exist without vlesscore anchor; refusing to replace them");
+        return PF_ROOT_CONFLICT;
+    }
+    return PF_ROOT_EMPTY;
 }
 
-static int ensure_pf_dispatch(const char *pfctl) {
-    int state = pf_root_has_vlesscore_dispatch(pfctl);
-    if (state == 1) return 0;
-    if (state != 0) return -1;
-
+static int install_pf_dispatch(const char *pfctl) {
     const char *path = "/var/run/vlesscore-pf-dispatch.conf";
     FILE *fp = fopen(path, "w");
     if (!fp) return -1;
@@ -2045,6 +2422,28 @@ static int ensure_pf_dispatch(const char *pfctl) {
     return 0;
 }
 
+static int remove_owned_pf_dispatch(const char *pfctl) {
+    pf_root_state_t state = pf_root_state(pfctl);
+    if (state == PF_ROOT_ERROR) return -1;
+    if (state == PF_ROOT_EMPTY) return 0;
+    if (state != PF_ROOT_OWN_DISPATCH) {
+        log_msg("pf root rules changed while VPN was active; leaving root dispatch untouched");
+        return 0;
+    }
+
+    char *clear_argv[] = {
+        (char *)pfctl,
+        "-q",
+        "-f",
+        "/dev/null",
+        NULL,
+    };
+    if (run_argv(clear_argv) != 0) return -1;
+    if (pf_root_state(pfctl) != PF_ROOT_EMPTY) return -1;
+    log_msg("pf vlesscore root dispatch removed");
+    return 0;
+}
+
 static int apply_pf_rules(const char *server_ips, int redir_port, int dns_port) {
     const char *pfctl = find_pfctl_bin();
     if (!pfctl) {
@@ -2052,10 +2451,22 @@ static int apply_pf_rules(const char *server_ips, int redir_port, int dns_port) 
         return -1;
     }
 
-    int was_enabled = pf_is_enabled();
-    g.pf_enabled_before = was_enabled ? 1 : 0;
-    int dispatch_rc = ensure_pf_dispatch(pfctl);
-    if (dispatch_rc != 0) return -7;
+    pf_enabled_state_t enabled_state = pf_enabled_state(pfctl);
+    if (enabled_state == PF_ENABLED_ERROR) return -8;
+
+    pf_root_state_t root_state = pf_root_state(pfctl);
+    if (root_state == PF_ROOT_ERROR || root_state == PF_ROOT_CONFLICT) return -7;
+
+    ensure_pf_os_file();
+    int was_enabled = enabled_state == PF_ENABLED;
+    g.pf_enabled_before = was_enabled;
+    g.pf_dispatch_installed =
+        root_state == PF_ROOT_EMPTY || root_state == PF_ROOT_OWN_DISPATCH;
+    if (write_pf_previous_state(g.pf_enabled_before, g.pf_dispatch_installed) != 0) {
+        log_msg("failed to persist previous PF state");
+        return -1;
+    }
+    if (root_state == PF_ROOT_EMPTY && install_pf_dispatch(pfctl) != 0) return -7;
 
     if (was_enabled) {
         log_msg("pf already enabled; will reload rules");
@@ -2090,16 +2501,19 @@ static int apply_pf_rules(const char *server_ips, int redir_port, int dns_port) 
             "-e",
             NULL,
         };
-        if (run_argv(enable_argv) == 0 || pf_is_enabled()) {
+        (void)run_argv(enable_argv);
+        pf_enabled_state_t state_after_enable = pf_enabled_state(pfctl);
+        if (state_after_enable == PF_ENABLED) {
             enabled_now = 1;
-        } else {
+        } else if (state_after_enable == PF_DISABLED) {
             char *enable_old_argv[] = {
                 (char *)pfctl,
                 "-q",
                 "-E",
                 NULL,
             };
-            if (run_argv(enable_old_argv) == 0 || pf_is_enabled()) {
+            (void)run_argv(enable_old_argv);
+            if (pf_enabled_state(pfctl) == PF_ENABLED) {
                 enabled_now = 1;
             }
         }
@@ -2108,8 +2522,6 @@ static int apply_pf_rules(const char *server_ips, int redir_port, int dns_port) 
     if (!enabled_now) {
         return -5;
     }
-
-    ensure_pf_os_file();
 
     const pf_rule_mode_t modes_default[] = {
         PF_RULE_ROUTE_TO_LO0,
@@ -2157,7 +2569,7 @@ static int apply_pf_rules(const char *server_ips, int redir_port, int dns_port) 
         };
         if (run_argv(load_argv) == 0) {
             log_msg("pf rules loaded mode=%s", pf_rule_mode_name(mode));
-            flush_pf_states();
+            (void)flush_pf_states();
             return 0;
         }
     }
@@ -2165,9 +2577,10 @@ static int apply_pf_rules(const char *server_ips, int redir_port, int dns_port) 
     return -4;
 }
 
-static void clear_pf_rules(void) {
+static int clear_pf_rules(void) {
     const char *pfctl = find_pfctl_bin();
-    if (!pfctl) return;
+    if (!pfctl) return -1;
+    int result = 0;
 
     char *empty_argv[] = {
         (char *)pfctl,
@@ -2178,7 +2591,7 @@ static void clear_pf_rules(void) {
         "/dev/null",
         NULL,
     };
-    run_argv(empty_argv);
+    if (run_argv(empty_argv) != 0) result = -1;
 
     char *flush_tables_argv[] = {
         (char *)pfctl,
@@ -2189,7 +2602,11 @@ static void clear_pf_rules(void) {
         "Tables",
         NULL,
     };
-    run_argv(flush_tables_argv);
+    if (run_argv(flush_tables_argv) != 0) result = -1;
+
+    if (g.pf_dispatch_installed && remove_owned_pf_dispatch(pfctl) != 0) result = -1;
+
+    if (flush_pf_states() != 0) result = -1;
 
     if (!g.pf_enabled_before) {
         char *disable_argv[] = {
@@ -2198,19 +2615,84 @@ static void clear_pf_rules(void) {
             "-d",
             NULL,
         };
-        run_argv(disable_argv);
+        if (run_argv(disable_argv) != 0 && pf_enabled_state(pfctl) != PF_DISABLED) {
+            result = -1;
+        }
     }
 
+    if (result == 0) {
+        g.pf_dispatch_installed = 0;
+        if (remove_pf_previous_state() != 0) result = -1;
+    }
+    return result;
 }
 
-static void disconnect_all(void) {
+static int recover_stale_pf_state(void) {
+    if (ensure_state_directory() != 0) return -1;
+    (void)unlink(kPFPreviousStateTempPath);
+    (void)unlink(kLegacyPFPreviousStateTempPath);
+
+    int was_enabled = 0;
+    int dispatch_installed = 0;
+    int state_result = read_pf_previous_state(&was_enabled, &dispatch_installed);
+    const char *pfctl = find_pfctl_bin();
+    pf_root_state_t root_state = pfctl ? pf_root_state(pfctl) : PF_ROOT_ERROR;
+    int stale_dispatch_present =
+        root_state == PF_ROOT_OWN_DISPATCH || root_state == PF_ROOT_SHARED_DISPATCH;
+
+    if (state_result == 1) {
+        if (!stale_dispatch_present) return 0;
+        g.pf_enabled_before = 1;
+        g.pf_dispatch_installed = root_state == PF_ROOT_OWN_DISPATCH;
+        log_msg("recovering orphaned PF dispatch without state file");
+        if (clear_pf_rules() != 0) return -1;
+        restart_system_dns_resolver();
+        return 0;
+    }
+    if (state_result != 0) {
+        log_msg("invalid PF state file; recovering conservatively");
+        g.pf_enabled_before = 1;
+        g.pf_dispatch_installed = root_state == PF_ROOT_OWN_DISPATCH;
+        if (stale_dispatch_present && clear_pf_rules() != 0) return -1;
+        if (!stale_dispatch_present && remove_pf_previous_state() != 0) return -1;
+        if (stale_dispatch_present) restart_system_dns_resolver();
+        return 0;
+    }
+
+    g.pf_enabled_before = was_enabled;
+    if (dispatch_installed < 0) {
+        dispatch_installed = root_state == PF_ROOT_OWN_DISPATCH;
+    }
+    g.pf_dispatch_installed = dispatch_installed;
+    log_msg("recovering stale PF state previous_enabled=%d dispatch_installed=%d",
+            was_enabled,
+            dispatch_installed);
+    if (clear_pf_rules() != 0) return -1;
+    (void)unlink("/var/run/vlesscore-redsocks.conf");
+    (void)unlink("/var/run/vlesscore-pf.conf");
+    (void)unlink("/var/run/vlesscore-pf-dispatch.conf");
+    if (stale_dispatch_present) restart_system_dns_resolver();
+    return 0;
+}
+
+static int disconnect_all(void) {
     int protected_logs = g.protect_logs;
     char routing[sizeof(g.routing)];
     snprintf(routing, sizeof(routing), "%s", g.routing);
     int routing_bypass_lan = g.routing_bypass_lan;
 
+#if defined(__LP64__)
+    if (g.system_proxy_enabled && vc_system_proxy_disable() != 0) {
+        log_msg("failed to restore system PAC settings; keeping VPN helpers alive");
+        return -1;
+    }
+#endif
+
     if (g.mode == MODE_PF) {
-        clear_pf_rules();
+        if (clear_pf_rules() != 0) {
+            log_msg("failed to clear PF rules; keeping VPN helpers alive");
+            return -1;
+        }
     }
 
     stop_pid(&g.redsocks_pid);
@@ -2228,6 +2710,7 @@ static void disconnect_all(void) {
     if (protected_logs) {
         clear_logs();
     }
+    return 0;
 }
 
 static void monitor_connected_children(void) {
@@ -2239,9 +2722,28 @@ static void monitor_connected_children(void) {
     if (!child_process_running(&g.dns_pid, "dns proxy")) healthy = 0;
 
     if (!healthy) {
-        log_msg("VPN helper exited unexpectedly; disconnecting and clearing PF rules");
-        disconnect_all();
+        log_msg("VPN helper exited unexpectedly; restoring PAC settings and clearing PF rules");
+        if (disconnect_all() != 0) {
+            log_msg("VPN cleanup will be retried while system proxy restoration is pending");
+        }
+        return;
     }
+
+#if defined(__LP64__)
+    long long current_ms = now_ms();
+    if (g.system_proxy_enabled && current_ms - g.system_proxy_refresh_ms >= 1000) {
+        g.system_proxy_refresh_ms = current_ms;
+        if (vc_system_proxy_refresh(g.socks_port) != 0) {
+            log_msg("system PAC proxy refresh failed; disconnecting to prevent WebKit traffic leaks");
+            if (disconnect_all() != 0) {
+                log_msg("VPN cleanup will be retried while system proxy restoration is pending");
+            }
+        }
+    }
+#else
+    long long current_ms = now_ms();
+#endif
+    monitor_springboard_icon(current_ms);
 }
 
 static int try_connect_pf(int socks_port) {
@@ -2255,7 +2757,6 @@ static int try_connect_pf(int socks_port) {
 
     int dns_port = 0;
     if (spawn_dns_proxy(socks_port, &dns_port, &g.dns_pid) != 0) {
-        clear_pf_rules();
         stop_pid(&g.redsocks_pid);
         return -45;
     }
@@ -2263,7 +2764,9 @@ static int try_connect_pf(int socks_port) {
     const char *pf_server_ips = (g.server_ips[0] != '\0') ? g.server_ips : g.server_ip;
     int pf_rc = apply_pf_rules(pf_server_ips, redir_port, dns_port);
     if (pf_rc != 0) {
-        clear_pf_rules();
+        if (clear_pf_rules() != 0) {
+            log_msg("failed to roll back PF after connection error");
+        }
         stop_pid(&g.dns_pid);
         stop_pid(&g.redsocks_pid);
         return -40 + pf_rc;
@@ -2336,14 +2839,14 @@ static int connect_all(const char *uri, const char *xray_version, int requested_
 
     if (spawn_core(uri, g.server_ips, xray_version, port, &g.core_pid) != 0) {
         snprintf(msg, msg_cap, "ERR failed to start vless-core binary");
-        disconnect_all();
+        (void)disconnect_all();
         return -1;
     }
 
     usleep(500000);
     if (!child_process_running(&g.core_pid, "vless-core")) {
         snprintf(msg, msg_cap, "ERR vless-core exited during startup");
-        disconnect_all();
+        (void)disconnect_all();
         return -1;
     }
 
@@ -2353,16 +2856,29 @@ static int connect_all(const char *uri, const char *xray_version, int requested_
             !child_process_running(&g.redsocks_pid, "redsocks") ||
             !child_process_running(&g.dns_pid, "dns proxy")) {
             snprintf(msg, msg_cap, "ERR VPN helper exited during startup");
-            disconnect_all();
+            (void)disconnect_all();
             return -1;
         }
+#if defined(__LP64__)
+        if (vc_system_proxy_enable(port) != 0) {
+            log_msg("failed to enable system PAC proxy for WebKit");
+            (void)vc_system_proxy_disable();
+            snprintf(msg, msg_cap, "ERR failed to configure system proxy");
+            (void)disconnect_all();
+            return -1;
+        }
+        g.system_proxy_enabled = 1;
+        log_msg("system PAC proxy enabled on network services port=%d", port);
+#endif
         update_vpn_icon_state(1);
+        g.springboard_pid = springboard_pid(0);
+        g.springboard_poll_ms = now_ms();
         snprintf(msg, msg_cap, "OK connected mode=%s socks=%d redir=%d protected=%d",
                  mode_name(g.mode), g.socks_port, g.redir_port, g.protect_logs);
         return 0;
     }
 
-    disconnect_all();
+    (void)disconnect_all();
     snprintf(msg, msg_cap, "ERR pf backend unavailable: pf_rc=%d (see /var/log/vpnctld.log)", pf_rc);
     return -1;
 }
@@ -2500,7 +3016,9 @@ static void handle_client(int cfd, control_client_t client_type) {
     char reply[512];
     memset(reply, 0, sizeof(reply));
 
-    if (client_type == CONTROL_CLIENT_BOOTSTRAP && strncmp(buf, "STATUS", 6) != 0) {
+    if (client_type == CONTROL_CLIENT_BOOTSTRAP &&
+        strncmp(buf, "STATUS", 6) != 0 &&
+        strncmp(buf, "DISCONNECT", 10) != 0) {
         snprintf(reply, sizeof(reply), "ERR unauthorized command\n");
         write(cfd, reply, strlen(reply));
         return;
@@ -2548,8 +3066,11 @@ static void handle_client(int cfd, control_client_t client_type) {
             snprintf(reply, sizeof(reply), "OK disconnected\n");
         }
     } else if (strncmp(buf, "DISCONNECT", 10) == 0) {
-        disconnect_all();
-        snprintf(reply, sizeof(reply), "OK disconnected\n");
+        if (disconnect_all() == 0) {
+            snprintf(reply, sizeof(reply), "OK disconnected\n");
+        } else {
+            snprintf(reply, sizeof(reply), "ERR failed to restore system PAC settings\n");
+        }
     } else if (strncmp(buf, "CLEAR_LOGS", 10) == 0) {
         clear_logs();
         snprintf(reply, sizeof(reply), "OK logs cleared\n");
@@ -2619,10 +3140,19 @@ static void handle_client(int cfd, control_client_t client_type) {
     write(cfd, reply, strlen(reply));
 }
 
-int main(void) {
+int main(int argc, char **argv) {
+    int launched_by_launchd = argc == 2 && strcmp(argv[1], "--launchd") == 0;
+    if (argc != 1 && !launched_by_launchd) return 1;
+
     umask(0077);
     if (geteuid() != 0 || chdir("/") != 0) return 1;
     close_inherited_descriptors();
+    g_instance_lock_fd = acquire_instance_lock(launched_by_launchd);
+    if (g_instance_lock_fd < 0) {
+        if (!launched_by_launchd && (errno == EACCES || errno == EAGAIN)) return 0;
+        log_msg("daemon instance lock unavailable errno=%d", errno);
+        return 1;
+    }
     if (load_helper_identity() != 0) return 1;
     (void)chmod("/var/log/vpnctld.log", 0600);
     (void)chmod("/var/log/vless-core.log", 0600);
@@ -2639,6 +3169,16 @@ int main(void) {
     memset(&g, 0, sizeof(g));
     snprintf(g.routing, sizeof(g.routing), "0;proxy;1");
     g.routing_bypass_lan = 1;
+#if defined(__LP64__)
+    if (vc_system_proxy_restore_stale() != 0) {
+        log_msg("fatal: cannot restore stale system PAC settings");
+        return 1;
+    }
+#endif
+    if (recover_stale_pf_state() != 0) {
+        log_msg("fatal: cannot restore stale PF state");
+        return 1;
+    }
     update_vpn_icon_state(0);
 
     int lfd = bind_control_socket();
@@ -2698,11 +3238,13 @@ int main(void) {
         close(cfd);
     }
 
-    disconnect_all();
+    (void)disconnect_all();
     unlink(VC_DAEMON_SOCKET_PATH);
     if (lfd >= 0) {
         close(lfd);
     }
     g_listen_fd = -1;
+    close(g_instance_lock_fd);
+    g_instance_lock_fd = -1;
     return 0;
 }

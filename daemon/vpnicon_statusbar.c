@@ -195,7 +195,7 @@ static int initialize_locked(void) {
         set_error_locked("cannot read iOS ProductVersion");
         return VPNICON_STATUSBAR_ERROR;
     }
-    if (g_ios_major < 6 || g_ios_major > 10) {
+    if (g_ios_major < 6 || g_ios_major > 14) {
         g_unsupported = 1;
         return VPNICON_STATUSBAR_UNSUPPORTED;
     }
@@ -277,6 +277,22 @@ int vpnicon_statusbar_set_enabled(int enabled) {
 
     pthread_mutex_unlock(&g_lock);
     return VPNICON_STATUSBAR_OK;
+}
+
+int vpnicon_statusbar_republish(void) {
+    pthread_mutex_lock(&g_lock);
+
+    int rc = initialize_locked();
+    if (rc == VPNICON_STATUSBAR_OK) {
+        if (g_published) {
+            send_void_int(g_status_bar_server, g_remove_item_sel, g_vpn_item_type);
+        }
+        send_void_int(g_status_bar_server, g_add_item_sel, g_vpn_item_type);
+        g_published = 1;
+    }
+
+    pthread_mutex_unlock(&g_lock);
+    return rc;
 }
 
 int vpnicon_statusbar_item_type(void) {

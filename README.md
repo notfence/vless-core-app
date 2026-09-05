@@ -1,15 +1,18 @@
 # vless-core-app
 
-`vless-core-app` is an iOS 6–10 app + root daemon for full-device VLESS/SOCKS5 routing.
+`vless-core-app` is an iOS 6–14 app + root daemon for full-device VLESS/SOCKS5 routing.
 
 ## Compatibility
 
-- iOS 6.x through iOS 10.x
-- All compatible 32-bit devices
-- ARM64 devices running iOS 10 or earlier are supported through 32-bit compatibility
-- Jailbreak required
+- iOS 6.x through iOS 14.x
+- iOS 6–10 uses the original ARMv7 runtime, including ARM64 devices through 32-bit compatibility
+- iOS 11–14 uses a native ARM64 runtime
+- Jailbreak required (rootful)
 
-The app, daemon, bundled core, and helper binaries are all built for ARMv7 with iOS 6.0 as the minimum deployment target. The GUI is compiled against iOS 10.3 headers while remaining linked against iOS 6.1 framework stubs; the daemon and helper binaries use the iOS 6.1 SDK throughout.
+One `.deb` contains separate thin ARMv7 and ARM64 versions of the app, daemon,
+core, and helper binaries. During installation, `postinst` selects ARM64 only on
+iOS 11 or newer. It leaves the original ARMv7 implementation in the runtime
+paths on iOS 6–10, even when the device itself has an ARM64 CPU.
 
 See the [Issues](https://github.com/notfence/vless-core-app/issues) page for the current bug list.
 
@@ -82,7 +85,9 @@ Build or download it from:
 `vless-core-app` package build expects these files:
 
 - `../vless-core-cli/vless-core-darwin-armv7`
+- `../vless-core-cli/vless-core-darwin-arm64`
 - `../vless-core-cli/third_party/curl-ios6-armv7/bin/curl`
+- `../vless-core-cli/third_party/curl-ios-arm64/bin/curl`
 - `../vless-core-cli/third_party/cacert.pem`
 
 Build them in `vless-core-cli`:
@@ -92,15 +97,21 @@ Build them in `vless-core-cli`:
 cd /path/to/vless-core-cli
 IOS_TOOLCHAIN=/path/to/ios6/toolchain
 APP_IOS_SDK=/path/to/iPhoneOS10.3.sdk
+ARM64_IOS_SDK=/path/to/iPhoneOS11.4.sdk
 make openssl-ios6 IOS_TOOLCHAIN=$IOS_TOOLCHAIN
+make openssl-ios-arm64 IOS_TOOLCHAIN=$IOS_TOOLCHAIN
+make zlib-ios6 IOS_TOOLCHAIN=$IOS_TOOLCHAIN
+make zlib-ios-arm64 IOS_TOOLCHAIN=$IOS_TOOLCHAIN
 make curl-ios6 IOS_TOOLCHAIN=$IOS_TOOLCHAIN
+make curl-ios-arm64 IOS_TOOLCHAIN=$IOS_TOOLCHAIN
 make third_party/cacert.pem
 make ios IOS_TOOLCHAIN=$IOS_TOOLCHAIN
+make ios-arm64 IOS_TOOLCHAIN=$IOS_TOOLCHAIN
 
 # then build app package
 cd /path/to/vless-core-app
 make clean
-make deb IOS_TOOLCHAIN=$IOS_TOOLCHAIN APP_IOS_SDK=$APP_IOS_SDK
+make deb IOS_TOOLCHAIN=$IOS_TOOLCHAIN APP_IOS_SDK=$APP_IOS_SDK ARM64_IOS_SDK=$ARM64_IOS_SDK
 ```
 
 Output:
@@ -109,7 +120,9 @@ Output:
 By default, package build takes binaries from sibling repo:
 
 - `../vless-core-cli/vless-core-darwin-armv7`
+- `../vless-core-cli/vless-core-darwin-arm64`
 - `../vless-core-cli/third_party/curl-ios6-armv7/bin/curl`
+- `../vless-core-cli/third_party/curl-ios-arm64/bin/curl`
 - `../vless-core-cli/third_party/cacert.pem`
 
 Override paths if needed:
@@ -117,7 +130,9 @@ Override paths if needed:
 ```bash
 make deb \
   VLESS_CORE_BIN=/abs/path/to/vless-core-darwin-armv7 \
+  VLESS_CORE_ARM64_BIN=/abs/path/to/vless-core-darwin-arm64 \
   VLESS_CORE_CURL_BIN=/abs/path/to/curl \
+  VLESS_CORE_CURL_ARM64_BIN=/abs/path/to/arm64/curl \
   CA_BUNDLE=/abs/path/to/cacert.pem
 ```
 
@@ -127,8 +142,10 @@ Package uses `gzip` compression for old iOS 6 `dpkg` compatibility.
 
 - App: `/Applications/vless-core.app`
 - Daemon API: authenticated Unix socket at `/var/run/vpnctld.sock`
-- Core binary: `/usr/bin/vless-core-darwin-armv7`
-- Subscription fetch binary: `/usr/bin/vless-core-curl`
+- `postinst` keeps only the runtime selected for the installed iOS version and removes the other architecture
+- Selected runtime: `/usr/share/vless-core/runtime-architecture`
+- Core runtime path: `/usr/bin/vless-core-darwin-armv7` on iOS 6–10 or `/usr/bin/vless-core-darwin-arm64` on iOS 11+
+- Subscription fetch runtime path: `/usr/bin/vless-core-curl`
 - CA bundle: `/usr/share/vless-core/cacert.pem`
 - Redsocks helper: `/usr/bin/redsocks-vless-core`
 - Logs:
@@ -137,7 +154,12 @@ Package uses `gzip` compression for old iOS 6 `dpkg` compatibility.
 
 ## Full-device backend
 
-The daemon uses `pf + redsocks`.
+The daemon uses `pf + redsocks` on every supported version. On iOS 11–14 it
+also installs a temporary, non-persistent PAC setting that sends
+CFNetwork/WebKit traffic through the local SOCKS listener, including Safari
+traffic that can bypass PF. Original proxy settings are restored on disconnect,
+helper failure, daemon restart, package upgrade, and package removal. The PAC
+state is not written to the persistent SystemConfiguration preferences.
 
 ## License
 
@@ -169,5 +191,5 @@ The project license is included separately at
 license.
 
 Corresponding ZBar source is included in this repository. redsocks is shipped
-as the prebuilt `third_party/redsocks-vless-core` executable and is not rebuilt
+as prebuilt ARMv7 and ARM64 executables under `third_party/` and is not rebuilt
 as part of the application package.

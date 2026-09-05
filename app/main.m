@@ -79,6 +79,7 @@ static NSString *const kSubscriptionLastUpdatedKey = @"last_updated";
 static NSString *const kSubscriptionCustomNameKey = @"custom_name";
 static NSString *const kHiddenLinkText = @"**link is hidden**";
 static NSString *const kDefaultXrayVersion = @"26.3.27";
+static NSString *const kVCQRMetadataType = @"org.iso.QRCode";
 static NSString *const kUpdateAPIURL = @"https://api.github.com/repos/notfence/vless-core-app/releases/latest";
 static NSString *const kUpdateReleasesURL = @"https://github.com/notfence/vless-core-app/releases";
 static const NSTimeInterval kAutomaticUpdateCheckInterval = 24.0 * 60.0 * 60.0;
@@ -571,6 +572,12 @@ static int TryBootstrapDaemon(void) {
     pid_t pid = 0;
     int rc = posix_spawn(&pid, "/usr/bin/vpnctld-bootstrap", &actions, NULL, argv, environ);
     posix_spawn_file_actions_destroy(&actions);
+    if (rc == 0) {
+        dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_DEFAULT, 0), ^{
+            while (waitpid(pid, NULL, 0) < 0 && errno == EINTR) {
+            }
+        });
+    }
     return (rc == 0) ? 0 : -1;
 }
 
@@ -669,53 +676,15 @@ static int WriteAll(int fd, const void *bytes, size_t length) {
     return 0;
 }
 
-static int ProbeDaemon(int connect_timeout_ms, int io_timeout_ms, int *last_errno_out) {
-    struct timeval tv;
-    tv.tv_sec = io_timeout_ms / 1000;
-    tv.tv_usec = (io_timeout_ms % 1000) * 1000;
-
-    int fd = -1;
-    int last_errno = 0;
-    if (OpenDaemonSocket(&tv, connect_timeout_ms, &fd, &last_errno) != 0 || fd < 0) {
-        if (last_errno_out) *last_errno_out = last_errno;
-        return -1;
-    }
-
-    const char probe[] = "STATUS\n";
-    if (WriteAll(fd, probe, (size_t)(sizeof(probe) - 1)) != 0) {
-        last_errno = errno;
-        close(fd);
-        if (last_errno_out) *last_errno_out = last_errno;
-        return -1;
-    }
-
-    char buf[64];
-    ssize_t rd = read(fd, buf, sizeof(buf) - 1);
-    if (rd <= 0) {
-        last_errno = (rd < 0) ? errno : ECONNRESET;
-        close(fd);
-        if (last_errno_out) *last_errno_out = last_errno;
-        return -1;
-    }
-
-    buf[rd] = '\0';
-    close(fd);
-    if (strncmp(buf, "OK ", 3) == 0) {
-        if (last_errno_out) *last_errno_out = 0;
-        return 0;
-    }
-
-    if (last_errno_out) *last_errno_out = EPROTO;
-    return -1;
-}
-
-static ssize_t SendRawCommand(NSData *outData, const struct timeval *rw_tv, int connect_timeout_ms, char *buf, size_t buf_cap, int *last_errno_out) {
+static ssize_t SendRawCommand(NSData *outData, const struct timeval *rw_tv, int connect_timeout_ms, char *buf, size_t buf_cap, int *last_errno_out, BOOL *connected_out) {
+    if (connected_out) *connected_out = NO;
     int fd = -1;
     int last_errno = 0;
     if (OpenDaemonSocket(rw_tv, connect_timeout_ms, &fd, &last_errno) != 0 || fd < 0) {
         if (last_errno_out) *last_errno_out = last_errno;
         return -1;
     }
+    if (connected_out) *connected_out = YES;
 
     if (WriteAll(fd, [outData bytes], [outData length]) != 0) {
         last_errno = errno;
@@ -769,31 +738,23 @@ static NSString *SendCommand(NSString *cmdLine) {
             (void)TryBootstrapDaemon();
         }
 
-        BOOL daemonReady = NO;
         int ready_attempts = (phase == 1) ? 10 : 1;
         for (int attempt = 0; attempt < ready_attempts; attempt++) {
-            if (ProbeDaemon(250, 300, &last_errno) == 0) {
-                daemonReady = YES;
-                break;
+            BOOL connected = NO;
+            char buf[65536];
+            ssize_t rd = SendRawCommand(outData, &cmd_tv, 500, buf, sizeof(buf), &last_errno, &connected);
+            if (rd > 0) {
+                return [NSString stringWithUTF8String:buf];
             }
-            if (attempt + 1 < ready_attempts) {
-                usleep(120 * 1000);
+
+            if (connected) {
+                last_io_error = (last_errno == EPIPE || last_errno == ECONNRESET) ?
+                    @"no response from daemon" :
+                    [NSString stringWithFormat:@"write/read failed: %s", strerror(last_errno)];
+                return last_io_error;
             }
+            if (attempt + 1 < ready_attempts) usleep(120 * 1000);
         }
-
-        if (!daemonReady) {
-            continue;
-        }
-
-        char buf[65536];
-        ssize_t rd = SendRawCommand(outData, &cmd_tv, 500, buf, sizeof(buf), &last_errno);
-        if (rd > 0) {
-            return [NSString stringWithUTF8String:buf];
-        }
-
-        last_io_error = (last_errno == EPIPE || last_errno == ECONNRESET) ?
-            @"no response from daemon" :
-            [NSString stringWithFormat:@"write/read failed: %s", strerror(last_errno)];
     }
 
     if (last_io_error) {
@@ -1065,7 +1026,7 @@ static pid_t spawn_temp_core_for_ping(const char *uri, uint16_t port, const char
     if (!uri || !*uri) return -1;
     size_t uri_length = strlen(uri);
     if (uri_length > kVCMaximumConfigURIBytes) return -1;
-    const char *core = "/usr/bin/vless-core-darwin-armv7";
+    const char *core = VC_CORE_EXECUTABLE_PATH;
     if (access(core, X_OK) != 0) {
         return -1;
     }
@@ -1099,10 +1060,10 @@ static pid_t spawn_temp_core_for_ping(const char *uri, uint16_t port, const char
             if (dn > STDERR_FILENO) close(dn);
         }
         if (xray_version && *xray_version) {
-            execl(core, "vless-core-darwin-armv7", "--uri-fd", "0", "--listen-port", port_str,
+            execl(core, VC_CORE_EXECUTABLE_NAME, "--uri-fd", "0", "--listen-port", port_str,
                   "--xray-version", xray_version, (char *)NULL);
         } else {
-            execl(core, "vless-core-darwin-armv7", "--uri-fd", "0", "--listen-port", port_str,
+            execl(core, VC_CORE_EXECUTABLE_NAME, "--uri-fd", "0", "--listen-port", port_str,
                   (char *)NULL);
         }
         _exit(127);
@@ -1440,9 +1401,9 @@ static NSString *RunCommandFirstLine(const char *cmdLine) {
 }
 
 static NSString *DetectCoreBinaryVersion(void) {
-    NSString *v = RunCommandFirstLine("/usr/bin/vless-core-darwin-armv7 -v 2>/dev/null");
+    NSString *v = RunCommandFirstLine(VC_CORE_EXECUTABLE_PATH " -v 2>/dev/null");
     if (!v || [v length] == 0) {
-        v = RunCommandFirstLine("vless-core-darwin-armv7 -v 2>/dev/null");
+        v = RunCommandFirstLine(VC_CORE_EXECUTABLE_NAME " -v 2>/dev/null");
     }
     if (!v || [v length] == 0) {
         v = @"unknown";
@@ -1523,7 +1484,7 @@ static NSString *NormalizeOpenSSLPatchStatus(NSString *status) {
 static NSString *DetectOpenSSLPatchStatus(void) {
     NSString *status = ReadTextFileBestEffort(@"/usr/share/vless-core/openssl-patch-status");
     if (!status || [status length] == 0) {
-        status = RunCommandFirstLine("/usr/bin/vless-core-darwin-armv7 --openssl-patch-status 2>/dev/null");
+        status = RunCommandFirstLine(VC_CORE_EXECUTABLE_PATH " --openssl-patch-status 2>/dev/null");
     }
     return NormalizeOpenSSLPatchStatus(status);
 }
@@ -2643,8 +2604,28 @@ static void VCAppearanceApplyNavigationBar(UINavigationBar *navigationBar) {
     [navigationBar layoutIfNeeded];
 }
 
+static UIStatusBarStyle VCAppearancePreferredStatusBarStyle(void) {
+    if ([[[UIDevice currentDevice] systemVersion] integerValue] < 13) {
+        return [[UIApplication sharedApplication] statusBarStyle];
+    }
+    return VCAppearanceIsDark() ? UIStatusBarStyleLightContent : UIStatusBarStyleDefault;
+}
+
 static void VCAppearanceApplyStatusBar(void) {
-    BOOL modernStatusBar = ([[[UIDevice currentDevice] systemVersion] integerValue] >= 7);
+    NSInteger systemMajor = [[[UIDevice currentDevice] systemVersion] integerValue];
+    if (systemMajor >= 13) {
+        UIWindow *window = [[UIApplication sharedApplication] keyWindow];
+        UIViewController *controller = window.rootViewController;
+        while (controller.presentedViewController) {
+            controller = controller.presentedViewController;
+        }
+        if ([controller respondsToSelector:@selector(setNeedsStatusBarAppearanceUpdate)]) {
+            [controller setNeedsStatusBarAppearanceUpdate];
+        }
+        return;
+    }
+
+    BOOL modernStatusBar = (systemMajor >= 7);
     UIStatusBarStyle style = UIStatusBarStyleDefault;
     if (VCAppearanceIsDark()) {
         style = modernStatusBar ? UIStatusBarStyleBlackTranslucent : UIStatusBarStyleBlackOpaque;
@@ -3959,7 +3940,9 @@ static UIView *VCMainListCellReorderControlInView(UIView *view) {
 
     NSArray *thanks = [NSArray arrayWithObject:
                        [self rowWithTitle:@"Special thanks to:" detail:@"@kirillshpitalev for testing and debugging\n"
-                                                                       @"@rafal_official for testing and debugging"]];
+                                                                       @"@rafal_official for testing and debugging\n"
+                                                                       @"@polin0m for testing and debugging\n"
+                                                                       @"@cmp_73 for testing and debugging"]];
 
     NSArray *newSections = [[NSArray alloc] initWithObjects:
                             [self sectionWithTitle:@"License" rows:[NSArray arrayWithObject:[self projectLicenseRow]]],
@@ -5565,6 +5548,14 @@ commitEditingStyle:(UITableViewCellEditingStyle)editingStyle
 
 @implementation SettingsNavController
 
+- (UIStatusBarStyle)preferredStatusBarStyle {
+    return VCAppearancePreferredStatusBarStyle();
+}
+
+- (UIViewController *)childViewControllerForStatusBarStyle {
+    return nil;
+}
+
 - (void)viewDidLoad {
     [super viewDidLoad];
     VCAppearanceApplyNavigationBar(self.navigationBar);
@@ -5589,10 +5580,11 @@ commitEditingStyle:(UITableViewCellEditingStyle)editingStyle
 - (void)qrScanVC:(UIViewController *)vc didScanText:(NSString *)text;
 @end
 
-@interface QRScanVC : UIViewController <AVCaptureVideoDataOutputSampleBufferDelegate> {
+@interface QRScanVC : UIViewController <AVCaptureMetadataOutputObjectsDelegate, AVCaptureVideoDataOutputSampleBufferDelegate> {
     id<QRScanVCDelegate> _delegate;
     AVCaptureSession *_captureSession;
     AVCaptureDevice *_camera;
+    AVCaptureMetadataOutput *_metadataOutput;
     AVCaptureVideoDataOutput *_videoOutput;
     dispatch_queue_t _sessionQueue;
     dispatch_queue_t _videoQueue;
@@ -5614,11 +5606,16 @@ commitEditingStyle:(UITableViewCellEditingStyle)editingStyle
     BOOL _torchEnabled;
 }
 @property (nonatomic, assign) id<QRScanVCDelegate> delegate;
+- (void)applyNativeQRMetadataType;
 @end
 
 @implementation QRScanVC
 
 @synthesize delegate = _delegate;
+
+- (UIStatusBarStyle)preferredStatusBarStyle {
+    return VCAppearancePreferredStatusBarStyle();
+}
 
 - (void)setScannerHintText:(NSString *)text {
     if (![text isKindOfClass:[NSString class]]) text = @"";
@@ -5748,6 +5745,11 @@ commitEditingStyle:(UITableViewCellEditingStyle)editingStyle
         [previewConn setVideoOrientation:v];
     }
 
+    AVCaptureConnection *metadataConn = [_metadataOutput connectionWithMediaType:AVMediaTypeVideo];
+    if (metadataConn && [metadataConn isVideoOrientationSupported]) {
+        [metadataConn setVideoOrientation:v];
+    }
+
     AVCaptureConnection *videoConn = [_videoOutput connectionWithMediaType:AVMediaTypeVideo];
     if (videoConn && [videoConn isVideoOrientationSupported]) {
         [videoConn setVideoOrientation:v];
@@ -5758,11 +5760,18 @@ commitEditingStyle:(UITableViewCellEditingStyle)editingStyle
     if (!_captureSession || !_sessionQueue) return;
 
     AVCaptureSession *session = [_captureSession retain];
+    QRScanVC *controller = (running && _metadataOutput) ? [self retain] : nil;
     dispatch_async(_sessionQueue, ^{
         if (running) {
             if (![session isRunning]) [session startRunning];
         } else {
             if ([session isRunning]) [session stopRunning];
+        }
+        if (controller) {
+            dispatch_async(dispatch_get_main_queue(), ^{
+                [controller applyNativeQRMetadataType];
+                [controller release];
+            });
         }
         [session release];
     });
@@ -6006,21 +6015,47 @@ commitEditingStyle:(UITableViewCellEditingStyle)editingStyle
         return @"Camera input is not supported";
     }
 
-    _videoOutput = [[AVCaptureVideoDataOutput alloc] init];
-    _videoOutput.alwaysDiscardsLateVideoFrames = YES;
-    NSDictionary *settings = [NSDictionary dictionaryWithObject:[NSNumber numberWithUnsignedInt:kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange]
-                                                         forKey:(id)kCVPixelBufferPixelFormatTypeKey];
-    [_videoOutput setVideoSettings:settings];
-    _videoQueue = dispatch_queue_create("com.vlesscore.qrscan.video", DISPATCH_QUEUE_SERIAL);
-    dispatch_set_target_queue(_videoQueue, dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_LOW, 0));
-    [_videoOutput setSampleBufferDelegate:self queue:_videoQueue];
-    if ([_captureSession canAddOutput:_videoOutput]) {
-        [_captureSession addOutput:_videoOutput];
+    if ([[UIDevice currentDevice].systemVersion integerValue] >= 11) {
+        _metadataOutput = [[AVCaptureMetadataOutput alloc] init];
+        if ([_captureSession canAddOutput:_metadataOutput]) {
+            [_captureSession addOutput:_metadataOutput];
+            [_metadataOutput setMetadataObjectsDelegate:self queue:dispatch_get_main_queue()];
+        } else {
+            [_metadataOutput release];
+            _metadataOutput = nil;
+            return @"Native QR recognition is unavailable";
+        }
     } else {
-        [_videoOutput release];
-        _videoOutput = nil;
+        _videoOutput = [[AVCaptureVideoDataOutput alloc] init];
+        _videoOutput.alwaysDiscardsLateVideoFrames = YES;
+        NSDictionary *settings = [NSDictionary dictionaryWithObject:[NSNumber numberWithUnsignedInt:kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange]
+                                                             forKey:(id)kCVPixelBufferPixelFormatTypeKey];
+        [_videoOutput setVideoSettings:settings];
+        _videoQueue = dispatch_queue_create("com.vlesscore.qrscan.video", DISPATCH_QUEUE_SERIAL);
+        dispatch_set_target_queue(_videoQueue, dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_LOW, 0));
+        [_videoOutput setSampleBufferDelegate:self queue:_videoQueue];
+        if ([_captureSession canAddOutput:_videoOutput]) {
+            [_captureSession addOutput:_videoOutput];
+        } else {
+            [_videoOutput release];
+            _videoOutput = nil;
+            return @"Legacy QR recognition is unavailable";
+        }
     }
     return nil;
+}
+
+- (void)applyNativeQRMetadataType {
+    if (!_metadataOutput || _didFinish || !_scannerVisible) return;
+
+    NSArray *availableTypes = [_metadataOutput availableMetadataObjectTypes];
+    if (![availableTypes containsObject:kVCQRMetadataType]) return;
+    @try {
+        [_metadataOutput setMetadataObjectTypes:[NSArray arrayWithObject:kVCQRMetadataType]];
+    }
+    @catch (NSException *exception) {
+        (void)exception;
+    }
 }
 
 - (void)finishCaptureSessionConfigurationWithError:(NSString *)errorText {
@@ -6192,6 +6227,27 @@ commitEditingStyle:(UITableViewCellEditingStyle)editingStyle
 }
 
 - (void)captureOutput:(AVCaptureOutput *)captureOutput
+didOutputMetadataObjects:(NSArray *)metadataObjects
+       fromConnection:(AVCaptureConnection *)connection {
+    (void)captureOutput;
+    (void)connection;
+    if (_didFinish || ![metadataObjects isKindOfClass:[NSArray class]]) return;
+
+    for (id object in metadataObjects) {
+        if (![object respondsToSelector:@selector(type)] ||
+            ![object respondsToSelector:@selector(stringValue)]) {
+            continue;
+        }
+        NSString *type = [object performSelector:@selector(type)];
+        if (![type isEqualToString:kVCQRMetadataType]) continue;
+        NSString *value = [object performSelector:@selector(stringValue)];
+        if (![value isKindOfClass:[NSString class]] || [value length] == 0) continue;
+        [self deliverScanResult:value];
+        return;
+    }
+}
+
+- (void)captureOutput:(AVCaptureOutput *)captureOutput
 didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
        fromConnection:(AVCaptureConnection *)connection {
     (void)captureOutput;
@@ -6267,6 +6323,7 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
     }
     [_captureSession release];
     [_camera release];
+    [_metadataOutput release];
     [_videoOutput release];
     [_previewLayer release];
     [_hintLabel release];
@@ -6950,6 +7007,7 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
     VCUpdateChecker *_updateChecker;
     NSString *_availableReleaseURL;
     NSString *_availableUpdateVersion;
+    NSString *_pendingReconnectURI;
 
     NSMutableArray *_configs;
     NSMutableArray *_subscriptions;
@@ -6984,6 +7042,8 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
 
     BOOL _connected;
     BOOL _connectedWithProtectedLogs;
+    BOOL _reconnectInProgress;
+    BOOL _pendingReconnectProtectLogs;
     BOOL _daemonStatusCheckInFlight;
     BOOL _showingTerminal;
     BOOL _autoUpdateSubscriptions;
@@ -7002,6 +7062,8 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
     BOOL _pendingInsecureImportUsesHappHeaders;
 }
 - (void)reconcileConnectionStateWithDaemon;
+- (void)beginPendingReconnect;
+- (void)flushMainStateDefaults;
 - (NSString *)shortUpdateFailureTextForSubscription:(NSDictionary *)sub errorText:(NSString *)errorText;
 - (void)showSubscriptionUpdateFailures:(NSArray *)failureTexts;
 - (BOOL)subscriptionNeedsPlainHTTPApproval:(NSDictionary *)subscription;
@@ -7046,6 +7108,7 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
 - (void)snapPhoneConnectionLayoutIfNeededAnimated:(BOOL)animated;
 - (void)prepareMainTableStructuralTransition;
 - (void)completeMainTableStructuralTransition;
+- (void)stabilizeMainTableOffsetDuringStructuralTransition;
 - (void)restoreMainTableAfterStructuralTransitionCompact:(BOOL)compact
                                           preservedOffset:(CGFloat)preservedOffset;
 - (void)importFileAtURL:(NSURL *)url;
@@ -7058,6 +7121,10 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
 @end
 
 @implementation MainVC
+
+- (UIStatusBarStyle)preferredStatusBarStyle {
+    return VCAppearancePreferredStatusBarStyle();
+}
 
 - (NSString *)safeTrim:(NSString *)s {
     if (!s) return @"";
@@ -7850,7 +7917,14 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
         expandedSubscription = (index == NSNotFound) ? -1 : (NSInteger)index;
     }
     [ud setInteger:expandedSubscription forKey:kDefaultsExpandedSubscriptionKey];
-    [ud synchronize];
+    [NSObject cancelPreviousPerformRequestsWithTarget:self
+                                             selector:@selector(flushMainStateDefaults)
+                                               object:nil];
+    [self performSelector:@selector(flushMainStateDefaults) withObject:nil afterDelay:0.5];
+}
+
+- (void)flushMainStateDefaults {
+    [[NSUserDefaults standardUserDefaults] synchronize];
 }
 
 - (void)saveData {
@@ -8164,7 +8238,7 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
 }
 
 - (void)reconcileConnectionStateWithDaemon {
-    if (!_connected || _daemonStatusCheckInFlight) return;
+    if (!_connected || _reconnectInProgress || _daemonStatusCheckInFlight) return;
 
     _daemonStatusCheckInFlight = YES;
     NSTimeInterval expectedConnectedSince = _connectedSince;
@@ -8801,7 +8875,7 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
 - (void)xhttpConnectHealthCheckResultOnMain:(NSDictionary *)payload {
     BOOL ok = [[payload objectForKey:@"ok"] isEqualToString:@"1"];
     if (ok) return;
-    if (!_connected) return;
+    if (!_connected || _reconnectInProgress || [_pendingReconnectURI length]) return;
 
     NSString *reason = [payload objectForKey:@"reason"];
     if ([reason rangeOfString:@"TOFU pin mismatch"].location == NSNotFound) {
@@ -11522,44 +11596,108 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
         return;
     }
 
-    [self showStatus:@"Reconnecting to selected config..." ok:YES];
+    [_pendingReconnectURI release];
+    _pendingReconnectURI = [newURI copy];
+    _pendingReconnectProtectLogs = protectLogs;
+    [NSObject cancelPreviousPerformRequestsWithTarget:self
+                                             selector:@selector(beginPendingReconnect)
+                                               object:nil];
+    if (!_reconnectInProgress) {
+        [self performSelector:@selector(beginPendingReconnect) withObject:nil afterDelay:0.2];
+    }
+    [self showStatus:@"Switching to selected config..." ok:YES];
+}
 
-    NSString *discResp = [self sanitizeDaemonText:SendCommand(@"DISCONNECT\n")];
-    if (![discResp hasPrefix:@"OK"]) {
-        [self showStatus:[NSString stringWithFormat:@"Reconnect failed (disconnect): %@", discResp] ok:NO];
-        return;
-    }
-    _connectedWithProtectedLogs = NO;
+- (void)beginPendingReconnect {
+    if (_reconnectInProgress || ![_pendingReconnectURI length]) return;
 
-    NSString *routingResp = [self sanitizeDaemonText:SyncRoutingPolicyToDaemon()];
-    if (![routingResp hasPrefix:@"OK"]) {
-        _connected = NO;
-        [self stopUptimeTimer];
-        [self updateConnectButton];
-        [self showStatus:[NSString stringWithFormat:@"Reconnect failed (routing): %@", routingResp] ok:NO];
-        return;
-    }
-    NSString *cmd = ConnectCommandForURI(newURI, protectLogs);
-    NSString *connResp = [self sanitizeDaemonText:SendCommand(cmd)];
-    if ([connResp hasPrefix:@"OK"]) {
-        _connected = YES;
-        _connectedWithProtectedLogs = protectLogs;
-        [self startUptimeTimer];
-        [self updateConnectButton];
-        [self showStatus:@"Connected (switched config)" ok:YES];
-        [self scheduleXHTTPConnectHealthCheckForURI:newURI];
-    } else {
-        _connected = NO;
-        _connectedWithProtectedLogs = NO;
-        [self stopUptimeTimer];
-        [self updateConnectButton];
-        [self showStatus:[NSString stringWithFormat:@"Reconnect failed (connect): %@", connResp] ok:NO];
-    }
+    NSString *uri = [_pendingReconnectURI copy];
+    BOOL protectLogs = _pendingReconnectProtectLogs;
+    [_pendingReconnectURI release];
+    _pendingReconnectURI = nil;
+    _pendingReconnectProtectLogs = NO;
+    _reconnectInProgress = YES;
+
+    NSString *routingCommand = [[NSString stringWithFormat:@"ROUTING\t%@\n", RoutingPolicyText()] copy];
+    NSString *connectCommand = [ConnectCommandForURI(uri, protectLogs) copy];
+
+    dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_DEFAULT, 0), ^{
+        NSAutoreleasePool *pool = [[NSAutoreleasePool alloc] init];
+        NSString *disconnectResponse = [SendCommand(@"DISCONNECT\n") copy];
+        NSString *routingResponse = nil;
+        NSString *connectResponse = nil;
+        if ([disconnectResponse hasPrefix:@"OK"]) {
+            routingResponse = [SendCommand(routingCommand) copy];
+            if ([routingResponse hasPrefix:@"OK"]) {
+                connectResponse = [SendCommand(connectCommand) copy];
+            }
+        }
+
+        dispatch_async(dispatch_get_main_queue(), ^{
+            NSString *disconnectText = [self sanitizeDaemonText:disconnectResponse];
+            NSString *routingText = [self sanitizeDaemonText:routingResponse];
+            NSString *connectText = [self sanitizeDaemonText:connectResponse];
+            BOOL disconnected = [disconnectText hasPrefix:@"OK"];
+            BOOL routingSaved = disconnected && [routingText hasPrefix:@"OK"];
+            BOOL connected = routingSaved && [connectText hasPrefix:@"OK"];
+
+            if (connected) {
+                _connected = YES;
+                _connectedWithProtectedLogs = protectLogs;
+                [self startUptimeTimer];
+                [self updateConnectButton];
+                [self showStatus:@"Connected (switched config)" ok:YES];
+            } else if (!disconnected) {
+                [self showStatus:[NSString stringWithFormat:@"Reconnect failed (disconnect): %@", disconnectText] ok:NO];
+            } else {
+                _connected = NO;
+                _connectedWithProtectedLogs = NO;
+                [self stopUptimeTimer];
+                [self updateConnectButton];
+                NSString *stage = routingSaved ? @"connect" : @"routing";
+                NSString *detail = routingSaved ? connectText : routingText;
+                [self showStatus:[NSString stringWithFormat:@"Reconnect failed (%@): %@", stage, detail] ok:NO];
+            }
+
+            _reconnectInProgress = NO;
+            if ([_pendingReconnectURI isEqualToString:uri] &&
+                _pendingReconnectProtectLogs == protectLogs) {
+                [_pendingReconnectURI release];
+                _pendingReconnectURI = nil;
+                _pendingReconnectProtectLogs = NO;
+            }
+            if ([_pendingReconnectURI length]) {
+                [self performSelector:@selector(beginPendingReconnect) withObject:nil afterDelay:0.05];
+            } else if (connected) {
+                [self scheduleXHTTPConnectHealthCheckForURI:uri];
+            }
+
+            [disconnectResponse release];
+            [routingResponse release];
+            [connectResponse release];
+            [routingCommand release];
+            [connectCommand release];
+            [uri release];
+        });
+        [pool drain];
+    });
 }
 
 - (void)togglePressed {
     if (_reorderingSection >= 0) {
         [self setMainReorderingSection:-1 showStatus:NO];
+    }
+    if (_reconnectInProgress) {
+        [self showStatus:@"Config switch is still in progress" ok:YES];
+        return;
+    }
+    if (_pendingReconnectURI) {
+        [NSObject cancelPreviousPerformRequestsWithTarget:self
+                                                 selector:@selector(beginPendingReconnect)
+                                                   object:nil];
+        [_pendingReconnectURI release];
+        _pendingReconnectURI = nil;
+        _pendingReconnectProtectLogs = NO;
     }
     if (!_connected) {
         NSString *uri = [self uriForCurrentSelection];
@@ -12199,6 +12337,20 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
     }
 }
 
+- (void)stabilizeMainTableOffsetDuringStructuralTransition {
+    if (IsPadDevice() || !_tableView || !_mainSectionTransitionInProgress ||
+        !_mainTableTransitionSnapshotValid || !_phoneConnectionCompactBeforeTransition) {
+        return;
+    }
+
+    CGFloat targetOffset = _mainTableOffsetBeforeTransition;
+    if (targetOffset < 0.0f) targetOffset = 0.0f;
+    if (fabs(_tableView.contentOffset.y - targetOffset) <= 0.5f) return;
+
+    [_tableView setContentOffset:CGPointMake(_tableView.contentOffset.x, targetOffset)
+                        animated:NO];
+}
+
 - (void)restoreMainTableAfterStructuralTransitionCompact:(BOOL)compact
                                           preservedOffset:(CGFloat)preservedOffset {
     if (IsPadDevice() || !_tableView) return;
@@ -12368,16 +12520,16 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
     UIColor *bg = VCBackgroundColor();
     self.view.backgroundColor = bg;
 
-    CGFloat topY = topInset + 10.0f;
-    CGFloat iconW = 28.0f;
-    CGFloat gap = 6.0f;
-    CGFloat right = b.size.width - 12.0f;
+    CGFloat topButtonY = topInset + 4.0f;
+    CGFloat topButtonWidth = 34.0f;
+    CGFloat topButtonHeight = 40.0f;
+    CGFloat right = b.size.width - 9.0f;
 
-    CGFloat settingsX = right - iconW;
-    CGFloat refreshX = settingsX - gap - iconW;
-    CGFloat terminalX = refreshX - gap - iconW;
-    CGFloat plusX = terminalX - gap - iconW;
-    CGFloat clearLogsY = topY + iconW + gap;
+    CGFloat settingsX = right - topButtonWidth;
+    CGFloat refreshX = settingsX - topButtonWidth;
+    CGFloat terminalX = refreshX - topButtonWidth;
+    CGFloat plusX = terminalX - topButtonWidth;
+    CGFloat clearLogsY = topInset + 44.0f;
 
     _titleLabel = [[UILabel alloc] initWithFrame:CGRectMake(12, topInset + 6.0f, plusX - 20, 28)];
     _titleLabel.text = @"vless-core";
@@ -12390,28 +12542,28 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
     CGFloat updateX = CGRectGetMinX(_titleLabel.frame) +
                       ceilf([_titleLabel.text sizeWithFont:_titleLabel.font].width) + 4.0f;
     _updateBtn = [[UIButton buttonWithType:UIButtonTypeCustom] retain];
-    _updateBtn.frame = CGRectMake(updateX, topInset + 6.0f, iconW, iconW);
+    _updateBtn.frame = CGRectMake(updateX, topInset + 6.0f, 28.0f, 28.0f);
     _updateBtn.hidden = YES;
     [_updateBtn addTarget:self action:@selector(updateIndicatorPressed) forControlEvents:UIControlEventTouchUpInside];
     [self applyTopButtonFeedbackToButton:_updateBtn];
     [self.view addSubview:_updateBtn];
 
     _plusBtn = [[UIButton buttonWithType:UIButtonTypeCustom] retain];
-    _plusBtn.frame = CGRectMake(plusX, topY, iconW, iconW);
+    _plusBtn.frame = CGRectMake(plusX, topButtonY, topButtonWidth, topButtonHeight);
     _plusBtn.autoresizingMask = UIViewAutoresizingFlexibleLeftMargin;
     [_plusBtn addTarget:self action:@selector(plusPressed) forControlEvents:UIControlEventTouchUpInside];
     [self applyTopButtonFeedbackToButton:_plusBtn];
     [self.view addSubview:_plusBtn];
 
     _terminalBtn = [[UIButton buttonWithType:UIButtonTypeCustom] retain];
-    _terminalBtn.frame = CGRectMake(terminalX, topY, iconW, iconW);
+    _terminalBtn.frame = CGRectMake(terminalX, topButtonY, topButtonWidth, topButtonHeight);
     _terminalBtn.autoresizingMask = UIViewAutoresizingFlexibleLeftMargin;
     [_terminalBtn addTarget:self action:@selector(terminalPressed) forControlEvents:UIControlEventTouchUpInside];
     [self applyTopButtonFeedbackToButton:_terminalBtn];
     [self.view addSubview:_terminalBtn];
 
     _clearLogsBtn = [[UIButton buttonWithType:UIButtonTypeCustom] retain];
-    _clearLogsBtn.frame = CGRectMake(settingsX, clearLogsY, iconW, iconW);
+    _clearLogsBtn.frame = CGRectMake(settingsX + 3.0f, clearLogsY, 28.0f, 28.0f);
     _clearLogsBtn.autoresizingMask = UIViewAutoresizingFlexibleLeftMargin;
     _clearLogsBtn.hidden = YES;
     [_clearLogsBtn addTarget:self action:@selector(clearLogsPressed) forControlEvents:UIControlEventTouchUpInside];
@@ -12419,14 +12571,14 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
     [self.view addSubview:_clearLogsBtn];
 
     _refreshBtn = [[UIButton buttonWithType:UIButtonTypeCustom] retain];
-    _refreshBtn.frame = CGRectMake(refreshX, topY, iconW, iconW);
+    _refreshBtn.frame = CGRectMake(refreshX, topButtonY, topButtonWidth, topButtonHeight);
     _refreshBtn.autoresizingMask = UIViewAutoresizingFlexibleLeftMargin;
     [_refreshBtn addTarget:self action:@selector(refreshPressed) forControlEvents:UIControlEventTouchUpInside];
     [self applyTopButtonFeedbackToButton:_refreshBtn];
     [self.view addSubview:_refreshBtn];
 
     _settingsBtn = [[UIButton buttonWithType:UIButtonTypeCustom] retain];
-    _settingsBtn.frame = CGRectMake(settingsX, topY, iconW, iconW);
+    _settingsBtn.frame = CGRectMake(settingsX, topButtonY, topButtonWidth, topButtonHeight);
     _settingsBtn.autoresizingMask = UIViewAutoresizingFlexibleLeftMargin;
     [_settingsBtn addTarget:self action:@selector(settingsPressed) forControlEvents:UIControlEventTouchUpInside];
     [self applyTopButtonFeedbackToButton:_settingsBtn];
@@ -12605,10 +12757,18 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
     [NSObject cancelPreviousPerformRequestsWithTarget:self
                                              selector:@selector(startAutomaticUpdateCheckIfNeeded)
                                                object:nil];
+    [NSObject cancelPreviousPerformRequestsWithTarget:self
+                                             selector:@selector(beginPendingReconnect)
+                                               object:nil];
+    [NSObject cancelPreviousPerformRequestsWithTarget:self
+                                             selector:@selector(flushMainStateDefaults)
+                                               object:nil];
+    [self flushMainStateDefaults];
     _updateChecker.delegate = nil;
     [_updateChecker release];
     [_availableReleaseURL release];
     [_availableUpdateVersion release];
+    [_pendingReconnectURI release];
     [_logTimer invalidate];
     [_logTimer release];
     [_uptimeTimer invalidate];
@@ -13574,6 +13734,7 @@ moveRowAtIndexPath:(NSIndexPath *)sourceIndexPath
 
 - (void)scrollViewDidScroll:(UIScrollView *)scrollView {
     if (scrollView == _tableView) {
+        [self stabilizeMainTableOffsetDuringStructuralTransition];
         [self updatePhoneConnectionLayout];
         [self updateStickyMainSectionHeader];
     }

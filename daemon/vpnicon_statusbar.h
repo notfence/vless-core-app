@@ -8,6 +8,7 @@ enum {
 };
 
 int vpnicon_statusbar_set_enabled(int enabled);
+int vpnicon_statusbar_republish(void);
 int vpnicon_statusbar_item_type(void);
 const char *vpnicon_statusbar_last_error(void);
 

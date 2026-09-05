@@ -8,6 +8,94 @@ refresh_uicache() {
   uicache >/dev/null 2>&1
 }
 
+detect_ios_major() {
+  ios_version=""
+  if [ -x /usr/bin/sw_vers ]; then
+    ios_version="$(/usr/bin/sw_vers -productVersion 2>/dev/null || true)"
+  fi
+  if [ -z "$ios_version" ] && [ -f /System/Library/CoreServices/SystemVersion.plist ]; then
+    ios_version="$(sed -n '/<key>ProductVersion<\/key>/{n;s/.*<string>\([^<]*\)<\/string>.*/\1/p;q;}' /System/Library/CoreServices/SystemVersion.plist 2>/dev/null || true)"
+  fi
+
+  ios_major="${ios_version%%.*}"
+  case "$ios_major" in
+    ''|*[!0-9]*)
+      darwin_release="$(uname -r 2>/dev/null || true)"
+      darwin_major="${darwin_release%%.*}"
+      case "$darwin_major" in
+        ''|*[!0-9]*) ios_major=0 ;;
+        *)
+          if [ "$darwin_major" -ge 17 ]; then ios_major=11; else ios_major=0; fi
+          ;;
+      esac
+      ;;
+  esac
+}
+
+activate_runtime_binary() {
+  source_path="$1"
+  destination_path="$2"
+  destination_mode="$3"
+  temporary_path="${destination_path}.vlesscore-new"
+
+  [ -f "$source_path" ] || return 1
+  cp -p "$source_path" "$temporary_path"
+  chown root:wheel "$temporary_path"
+  chmod "$destination_mode" "$temporary_path"
+  mv -f "$temporary_path" "$destination_path"
+}
+
+runtime_file_exists() {
+  [ -f "$1" ] && [ ! -L "$1" ]
+}
+
+arm64_runtime_is_active() {
+  [ "$(cat /usr/share/vless-core/runtime-architecture 2>/dev/null || true)" = "arm64" ] &&
+    runtime_file_exists /Applications/vless-core.app/vless-core &&
+    runtime_file_exists /usr/bin/vpnctld &&
+    runtime_file_exists /usr/bin/vpnctld-bootstrap &&
+    runtime_file_exists /usr/bin/vless-core-darwin-arm64 &&
+    runtime_file_exists /usr/bin/vless-core-curl &&
+    runtime_file_exists /usr/bin/redsocks-vless-core &&
+    runtime_file_exists /usr/share/vless-core/openssl-patch-status
+}
+
+detect_ios_major
+if [ "$ios_major" -ge 11 ]; then
+  if runtime_file_exists /Applications/vless-core.app/vless-core-arm64; then
+    activate_runtime_binary /Applications/vless-core.app/vless-core-arm64 /Applications/vless-core.app/vless-core 755
+    activate_runtime_binary /usr/bin/vpnctld-arm64 /usr/bin/vpnctld 755
+    activate_runtime_binary /usr/bin/vpnctld-bootstrap-arm64 /usr/bin/vpnctld-bootstrap 4755
+    activate_runtime_binary /usr/bin/vless-core-curl-arm64 /usr/bin/vless-core-curl 755
+    activate_runtime_binary /usr/bin/redsocks-vless-core-arm64 /usr/bin/redsocks-vless-core 755
+    activate_runtime_binary /usr/share/vless-core/openssl-patch-status-arm64 /usr/share/vless-core/openssl-patch-status 644
+  elif ! arm64_runtime_is_active; then
+    echo "Cannot configure vless-core: arm64 runtime files are incomplete." >&2
+    exit 1
+  fi
+  rm -f /Applications/vless-core.app/vless-core-arm64 \
+        /usr/bin/vpnctld-arm64 \
+        /usr/bin/vpnctld-bootstrap-arm64 \
+        /usr/bin/vless-core-darwin-armv7 \
+        /usr/bin/vless-core-curl-arm64 \
+        /usr/bin/redsocks-vless-core-arm64 \
+        /usr/share/vless-core/openssl-patch-status-arm64
+  runtime_core=/usr/bin/vless-core-darwin-arm64
+  printf '%s\n' arm64 >/usr/share/vless-core/runtime-architecture
+  echo "Using arm64 runtime for iOS $ios_major."
+else
+  rm -f /Applications/vless-core.app/vless-core-arm64 \
+        /usr/bin/vpnctld-arm64 \
+        /usr/bin/vpnctld-bootstrap-arm64 \
+        /usr/bin/vless-core-darwin-arm64 \
+        /usr/bin/vless-core-curl-arm64 \
+        /usr/bin/redsocks-vless-core-arm64 \
+        /usr/share/vless-core/openssl-patch-status-arm64
+  runtime_core=/usr/bin/vless-core-darwin-armv7
+  printf '%s\n' armv7 >/usr/share/vless-core/runtime-architecture
+  echo "Using legacy armv7 runtime for iOS $ios_major."
+fi
+
 chown -R root:wheel /Applications/vless-core.app || true
 chown root:wheel /Library/LaunchDaemons/com.vlesscore.vpnctld.plist || true
 chown root:wheel /usr/bin/vpnctld-bootstrap || true
@@ -29,7 +117,11 @@ chmod 755 /Applications/vless-core.app/vless-core || true
 for log in /var/log/vpnctld.log /var/log/vless-core.log; do
   [ -e "$log" ] && chmod 600 "$log" || true
 done
-for bin in /usr/bin/vpnctld /usr/bin/vless-core-darwin-armv7 /usr/bin/vless-core-curl /usr/bin/redsocks-vless-core; do
+for bin in \
+  /usr/bin/vpnctld \
+  "$runtime_core" \
+  /usr/bin/vless-core-curl \
+  /usr/bin/redsocks-vless-core; do
   [ -e "$bin" ] && chmod 755 "$bin" || true
 done
 chmod 4755 /usr/bin/vpnctld-bootstrap || true
@@ -41,10 +133,24 @@ rm -f /Library/MobileSubstrate/DynamicLibraries/vlesscorevpnicon.dylib \
       /var/mobile/Library/Preferences/com.vlesscore.vpnicon.state \
       /var/mobile/Library/vlesscore-vpnicon.log || true
 launchctl load /Library/LaunchDaemons/com.vlesscore.vpnctld.plist >/dev/null 2>&1 || true
-sleep 1
+launchctl start com.vlesscore.vpnctld >/dev/null 2>&1 || true
+daemon_wait=0
+if launchctl list com.vlesscore.vpnctld >/dev/null 2>&1; then
+  while [ ! -S /var/run/vpnctld.sock ] && [ "$daemon_wait" -lt 5 ]; do
+    sleep 1
+    daemon_wait=$((daemon_wait + 1))
+  done
+fi
 if [ ! -S /var/run/vpnctld.sock ]; then
   (/usr/bin/vpnctld >>/var/log/vpnctld.log 2>&1 </dev/null &)
-  sleep 1
+  daemon_wait=0
+  while [ ! -S /var/run/vpnctld.sock ] && [ "$daemon_wait" -lt 2 ]; do
+    sleep 1
+    daemon_wait=$((daemon_wait + 1))
+  done
+fi
+if [ ! -S /var/run/vpnctld.sock ]; then
+  echo "Warning: vpnctld did not become ready." >&2
 fi
 echo "Download this app from my GitHub repository:" || true
 echo "https://github.com/notfence/vless-core-app" || true

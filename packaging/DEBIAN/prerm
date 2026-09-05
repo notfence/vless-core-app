@@ -6,7 +6,49 @@ if killall -0 vless-core >/dev/null 2>&1; then
   sleep 1
 fi
 
+/usr/bin/vpnctld-bootstrap --disconnect >/dev/null 2>&1 || true
+killall vpnctld >/dev/null 2>&1 || true
+rm -f /var/db/vless-core/system-proxy-backup.plist.tmp >/dev/null 2>&1 || true
+rm -f /var/db/vless-core/pf-state.tmp \
+      /var/run/vlesscore-pf-previous-state.tmp >/dev/null 2>&1 || true
+attempt=0
+while [ -e /var/db/vless-core/system-proxy-backup.plist ] ||
+      [ -e /var/db/vless-core/pf-state ] ||
+      [ -e /var/db/vless-core/pf-state.tmp ] ||
+      [ -e /var/run/vlesscore-pf-previous-state ] ||
+      [ -e /var/run/vlesscore-pf.conf ] ||
+      [ -e /var/run/vlesscore-pf-dispatch.conf ] ||
+      [ -e /var/run/vlesscore-redsocks.conf ]; do
+  if [ "$attempt" -ge 15 ]; then
+    break
+  fi
+  attempt=$((attempt + 1))
+  sleep 1
+done
+
+if [ -e /var/db/vless-core/system-proxy-backup.plist ] ||
+   [ -e /var/db/vless-core/pf-state ] ||
+   [ -e /var/db/vless-core/pf-state.tmp ] ||
+   [ -e /var/run/vlesscore-pf-previous-state ] ||
+   [ -e /var/run/vlesscore-pf.conf ] ||
+   [ -e /var/run/vlesscore-pf-dispatch.conf ] ||
+   [ -e /var/run/vlesscore-redsocks.conf ]; then
+  echo "Cannot update or remove vless-core: network settings were not restored." >&2
+  exit 1
+fi
+
 launchctl unload /Library/LaunchDaemons/com.vlesscore.vpnctld.plist >/dev/null 2>&1 || true
+killall vpnctld >/dev/null 2>&1 || true
+attempt=0
+while killall -0 vpnctld >/dev/null 2>&1; do
+  if [ "$attempt" -ge 10 ]; then
+    echo "Cannot update or remove vless-core: vpnctld did not stop." >&2
+    exit 1
+  fi
+  attempt=$((attempt + 1))
+  sleep 1
+done
+
 if [ "$1" = "remove" ] || [ "$1" = "purge" ]; then
   rm -f /var/mobile/Library/Preferences/com.vlesscore.vpnicon.state >/dev/null 2>&1 || true
   rm -f /var/mobile/Library/vlesscore-vpnicon.log >/dev/null 2>&1 || true

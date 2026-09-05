@@ -7,6 +7,7 @@
   <key>ProgramArguments</key>
   <array>
     <string>/usr/bin/vpnctld</string>
+    <string>--launchd</string>
   </array>
   <key>RunAtLoad</key>
   <true/>
