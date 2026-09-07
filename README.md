@@ -18,6 +18,12 @@ See the [Issues](https://github.com/notfence/vless-core-app/issues) page for the
 
 ## Install on iOS
 
+### Install from official repo (recommended)
+
+You can get this app by downloading it from my cydia/sileo repo:
+```bash
+https://notfence.github.io/repo/
+```
 ### Install from latest release (.deb)
 
 1. Download `.deb` from [latest release](https://github.com/notfence/vless-core-app/releases/latest).
