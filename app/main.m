@@ -211,13 +211,19 @@ static BOOL VCWriteSecureStoreFile(NSData *data) {
     BOOL ok = fchmod(fd, 0600) == 0 && VCWriteAllToFileDescriptor(fd, [data bytes], [data length]) && fsync(fd) == 0;
     if (close(fd) != 0) ok = NO;
     NSString *temporaryPath = [NSString stringWithUTF8String:temporary];
-    NSDictionary *attributes = [NSDictionary dictionaryWithObjectsAndKeys:
-                                [NSNumber numberWithUnsignedLong:0600], NSFilePosixPermissions,
-                                NSFileProtectionComplete, NSFileProtectionKey,
-                                nil];
-    if (ok) ok = temporaryPath != nil && [[NSFileManager defaultManager] setAttributes:attributes
-                                                                                 ofItemAtPath:temporaryPath
-                                                                                        error:nil];
+    if (ok) ok = temporaryPath != nil;
+    if (ok) {
+        NSDictionary *protectionAttributes = [NSDictionary dictionaryWithObject:NSFileProtectionComplete
+                                                                          forKey:NSFileProtectionKey];
+        NSError *attributeError = nil;
+        if (![[NSFileManager defaultManager] setAttributes:protectionAttributes
+                                              ofItemAtPath:temporaryPath
+                                                     error:&attributeError]) {
+            BOOL knownPermissionFailure = [[attributeError domain] isEqualToString:NSCocoaErrorDomain] &&
+                                          [attributeError code] == NSFileReadNoPermissionError;
+            if (!knownPermissionFailure) ok = NO;
+        }
+    }
     if (ok) ok = rename(temporary, [kSecureStoreFilePath fileSystemRepresentation]) == 0;
     if (!ok) {
         unlink(temporary);
