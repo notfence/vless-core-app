@@ -7147,7 +7147,9 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
 - (void)applyTheme;
 - (UIView *)accessorySubscriptionHeaderAtIndex:(NSInteger)index expanded:(BOOL)expanded loading:(BOOL)loading;
 - (void)setMainReorderingSection:(NSInteger)section showStatus:(BOOL)showStatus;
+- (BOOL)mainSectionHasItems:(NSInteger)section;
 - (BOOL)isMainSectionExpanded:(NSInteger)section;
+- (void)updateMainEmptyState;
 - (void)finishMainSectionTransition:(NSNumber *)transitionNumber;
 - (void)rememberActiveLogPosition;
 - (void)reloadMainTableDataAfterExternalChange;
@@ -8000,6 +8002,7 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
     [ud setBool:_darkThemeEnabled forKey:kDefaultsDarkThemeKey];
     [ud setBool:_automaticUpdateChecksEnabled forKey:kDefaultsAutomaticUpdateChecksKey];
     [self saveMainState];
+    [self updateMainEmptyState];
     [self updateStickyMainSectionHeader];
 }
 
@@ -12527,6 +12530,102 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
     [self refreshUpdateIndicatorFromCache];
 }
 
+- (void)updateMainEmptyState {
+    if (!_tableView) return;
+
+    if ([_configs count] > 0 || [_subscriptions count] > 0) {
+        _tableView.scrollEnabled = YES;
+        _tableView.backgroundView = nil;
+        return;
+    }
+
+    if (!IsPadDevice()) {
+        CGFloat collapseDistance = kVCMainContentStartY - kVCMainCompactContentStartY;
+        _phoneConnectionCompact = NO;
+        [_tableView setContentOffset:CGPointMake(_tableView.contentOffset.x, -collapseDistance)
+                            animated:NO];
+        [self updatePhoneConnectionLayout];
+    }
+    _tableView.scrollEnabled = NO;
+
+    CGRect bounds = _tableView.bounds;
+    UIView *background = [[[UIView alloc] initWithFrame:CGRectMake(0.0f,
+                                                                   0.0f,
+                                                                   bounds.size.width,
+                                                                   bounds.size.height)] autorelease];
+    background.backgroundColor = VCBackgroundColor();
+    background.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
+
+    CGFloat containerWidth = bounds.size.width - 32.0f;
+    if (containerWidth > 300.0f) containerWidth = 300.0f;
+    if (containerWidth < 220.0f) containerWidth = 220.0f;
+    CGFloat containerHeight = 200.0f;
+    CGFloat reservedTop = IsPadDevice() ? 0.0f : (kVCMainContentStartY - kVCMainCompactContentStartY);
+    CGFloat availableHeight = bounds.size.height - reservedTop;
+    if (availableHeight < containerHeight) availableHeight = containerHeight;
+    CGFloat containerY = reservedTop + floorf((availableHeight - containerHeight) * 0.5f);
+    if (containerY < 12.0f) containerY = 12.0f;
+
+    UIView *container = [[[UIView alloc] initWithFrame:CGRectMake(floorf((bounds.size.width - containerWidth) * 0.5f),
+                                                                         containerY,
+                                                                         containerWidth,
+                                                                         containerHeight)] autorelease];
+    container.backgroundColor = [UIColor clearColor];
+    container.autoresizingMask = UIViewAutoresizingFlexibleLeftMargin |
+                                 UIViewAutoresizingFlexibleRightMargin |
+                                 UIViewAutoresizingFlexibleTopMargin |
+                                 UIViewAutoresizingFlexibleBottomMargin;
+
+    UIView *iconCircle = [[[UIView alloc] initWithFrame:CGRectMake(floorf((containerWidth - 58.0f) * 0.5f),
+                                                                          0.0f,
+                                                                          58.0f,
+                                                                          58.0f)] autorelease];
+    iconCircle.backgroundColor = VCCellBackgroundColor();
+    iconCircle.layer.cornerRadius = 29.0f;
+    iconCircle.layer.borderWidth = 1.5f;
+    iconCircle.layer.borderColor = VCAccentColor().CGColor;
+
+    UIImageView *icon = [[[UIImageView alloc] initWithFrame:CGRectMake(16.0f, 16.0f, 26.0f, 26.0f)] autorelease];
+    icon.image = TintImageWithColor(MakeIconImage(VCIconTypeAdd, 26.0f, YES), VCAccentColor());
+    icon.contentMode = UIViewContentModeCenter;
+    [iconCircle addSubview:icon];
+    [container addSubview:iconCircle];
+
+    UILabel *title = [[[UILabel alloc] initWithFrame:CGRectMake(0.0f, 72.0f, containerWidth, 24.0f)] autorelease];
+    title.backgroundColor = [UIColor clearColor];
+    title.textColor = VCPrimaryTextColor();
+    title.font = [UIFont boldSystemFontOfSize:17.0f];
+    title.textAlignment = NSTextAlignmentCenter;
+    title.text = @"Add your first connection";
+    [container addSubview:title];
+
+    UILabel *detail = [[[UILabel alloc] initWithFrame:CGRectMake(8.0f, 101.0f, containerWidth - 16.0f, 42.0f)] autorelease];
+    detail.backgroundColor = [UIColor clearColor];
+    detail.textColor = VCSecondaryTextColor();
+    detail.font = [UIFont systemFontOfSize:13.0f];
+    detail.textAlignment = NSTextAlignmentCenter;
+    detail.numberOfLines = 2;
+    detail.text = @"Import a configuration or subscription\nto start using vless-core.";
+    [container addSubview:detail];
+
+    UIButton *addButton = [UIButton buttonWithType:UIButtonTypeCustom];
+    addButton.frame = CGRectMake(floorf((containerWidth - 164.0f) * 0.5f), 156.0f, 164.0f, 40.0f);
+    addButton.titleLabel.font = [UIFont boldSystemFontOfSize:14.0f];
+    [addButton setTitle:@"Add connection" forState:UIControlStateNormal];
+    [addButton setTitleColor:[UIColor whiteColor] forState:UIControlStateNormal];
+    [addButton setBackgroundImage:SolidImageWithColor(VCAccentColor()) forState:UIControlStateNormal];
+    [addButton setBackgroundImage:SolidImageWithColor([VCAccentColor() colorWithAlphaComponent:0.72f])
+                          forState:UIControlStateHighlighted];
+    addButton.layer.cornerRadius = 8.0f;
+    addButton.layer.masksToBounds = YES;
+    addButton.accessibilityHint = @"Opens configuration and subscription import options";
+    [addButton addTarget:self action:@selector(plusPressed) forControlEvents:UIControlEventTouchUpInside];
+    [container addSubview:addButton];
+
+    [background addSubview:container];
+    _tableView.backgroundView = background;
+}
+
 - (void)applyTheme {
     _darkThemeEnabled = VCAppearanceIsDark();
     UIColor *background = VCBackgroundColor();
@@ -12552,6 +12651,7 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
     [self applyTopButtonFeedbackToButton:_updateBtn];
     [self updateTopButtonsIcons];
     [_tableView reloadData];
+    [self updateMainEmptyState];
     VCAppearanceRefreshVisibleTableHeaders(_tableView);
     [self refreshStickyMainSectionHeader];
 }
@@ -12890,8 +12990,15 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
     return _subscriptionsSectionExpanded ? [self subscriptionSectionRowCount] : 0;
 }
 
+- (BOOL)mainSectionHasItems:(NSInteger)section {
+    if (section == 0) return [_configs count] > 0;
+    if (section == 1) return [_subscriptions count] > 0;
+    return NO;
+}
+
 - (NSString *)tableView:(UITableView *)tableView titleForHeaderInSection:(NSInteger)section {
     (void)tableView;
+    if (![self mainSectionHasItems:section]) return nil;
     return (section == 0) ? @"Configurations" : @"Subscriptions";
 }
 
@@ -13049,11 +13156,17 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
 
 - (CGFloat)tableView:(UITableView *)tableView heightForHeaderInSection:(NSInteger)section {
     (void)tableView;
-    (void)section;
-    return kVCMainSectionHeaderHeight;
+    return [self mainSectionHasItems:section] ? kVCMainSectionHeaderHeight : 0.01f;
+}
+
+- (CGFloat)tableView:(UITableView *)tableView heightForFooterInSection:(NSInteger)section {
+    if (![self mainSectionHasItems:section]) return 0.01f;
+    return tableView.sectionFooterHeight;
 }
 
 - (UIView *)mainSectionHeaderViewForTable:(UITableView *)tableView section:(NSInteger)section {
+    if (![self mainSectionHasItems:section]) return nil;
+
     CGFloat width = tableView.bounds.size.width;
     UIView *header = [[[UIView alloc] initWithFrame:CGRectMake(0.0f,
                                                                0.0f,
@@ -13220,6 +13333,7 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
     _mainSectionTransitionToken++;
     [self prepareMainTableStructuralTransition];
     [_tableView reloadData];
+    [self updateMainEmptyState];
     [self completeMainTableStructuralTransition];
     VCAppearanceRefreshVisibleTableHeaders(_tableView);
     [self refreshStickyMainSectionHeader];
@@ -13242,10 +13356,12 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
 }
 
 - (UIView *)tableView:(UITableView *)tableView viewForHeaderInSection:(NSInteger)section {
+    if (![self mainSectionHasItems:section]) return nil;
     return [self mainSectionHeaderViewForTable:tableView section:section];
 }
 
 - (BOOL)isMainSectionExpanded:(NSInteger)section {
+    if (![self mainSectionHasItems:section]) return NO;
     if (section == 0) return _configurationsSectionExpanded;
     if (section == 1) return _subscriptionsSectionExpanded;
     return NO;
@@ -13787,6 +13903,7 @@ moveRowAtIndexPath:(NSIndexPath *)sourceIndexPath
 
 - (void)tableView:(UITableView *)tableView willDisplayHeaderView:(UIView *)view forSection:(NSInteger)section {
     (void)tableView;
+    if (![self mainSectionHasItems:section]) return;
     [self updateMainSectionHeaderView:view section:section animated:NO];
     VCAppearanceApplyHeaderView(view);
     VCAppearanceScheduleVisibleTableHeadersRefresh(tableView);
