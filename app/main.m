@@ -3,6 +3,7 @@
 #import <AVFoundation/AVFoundation.h>
 #import <CoreMedia/CoreMedia.h>
 #import <CoreVideo/CoreVideo.h>
+#import <SystemConfiguration/SystemConfiguration.h>
 #include "happ_crypto.h"
 #include "karing_backup.h"
 #include <zbar.h>
@@ -10,6 +11,7 @@
 #include <openssl/evp.h>
 #include <openssl/rand.h>
 #include <Block.h>
+#include <sqlite3.h>
 
 #include <sys/socket.h>
 #include <sys/types.h>
@@ -20,6 +22,7 @@
 #include <netinet/in.h>
 #include <arpa/inet.h>
 #include <netdb.h>
+#include <pthread.h>
 #include <fcntl.h>
 #include <unistd.h>
 #include <errno.h>
@@ -29,6 +32,7 @@
 #include <stdint.h>
 #include <stdlib.h>
 #include <stdio.h>
+#include <time.h>
 #include <signal.h>
 #include <sys/wait.h>
 #include <sys/utsname.h>
@@ -59,6 +63,7 @@ static NSString *const kDefaultsRoutingDefaultKey = @"vlesscore.routing.default"
 static NSString *const kDefaultsRoutingBypassLANKey = @"vlesscore.routing.bypass_lan";
 static NSString *const kDefaultsRoutingRulesKey = @"vlesscore.routing.rules";
 static NSString *const kDefaultsSubHWIDKey = @"vlesscore.subscription_hwid";
+static NSString *const kDefaultsDiagnosticAppActivityKey = @"vlesscore.diagnostics.app_activity";
 static NSString *const kSubscriptionAllowInsecureFetchKey = @"allow_insecure_fetch";
 static NSString *const kSubscriptionAllowPlainHTTPKey = @"allow_plain_http";
 static NSString *const kSubscriptionHappSourceKey = @"happ_source";
@@ -86,6 +91,9 @@ static const NSTimeInterval kAutomaticUpdateCheckInterval = 24.0 * 60.0 * 60.0;
 static NSString *const kImportDirectoryPath = @"/var/mobile/vless-core-import";
 static NSString *const kSecureStoreDirectoryPath = @"/private/var/mobile/Library/Application Support/vless-core";
 static NSString *const kSecureStoreFilePath = @"/private/var/mobile/Library/Application Support/vless-core/configs.dat";
+static NSString *const kDiagnosticEventDatabasePath = @"/private/var/mobile/Library/Application Support/vless-core/diagnostic-events.sqlite3";
+static NSString *const kVCDiagnosticEventsClearedNotification = @"VCDiagnosticEventsClearedNotification";
+static const NSUInteger kVCDiagnosticEventCapacity = 250;
 static const NSUInteger kVCMaximumConfigURIBytes = 4095;
 static const NSUInteger kVCMaximumConfigQueryParameters = 128;
 static const NSUInteger kVCMaximumConfigQueryKeyBytes = 127;
@@ -95,6 +103,7 @@ static const CGFloat kVCMainContentStartY = 246.0f;
 static const CGFloat kVCMainCompactContentStartY = 112.0f;
 static BOOL gVCSecureStoreWritable = YES;
 static NSString *SendCommand(NSString *cmdLine);
+static void VCRecordAppEvent(NSString *category, NSString *action, NSString *detail);
 
 static CGFloat VCMainStatusBarInset(void) {
     if ([[UIDevice currentDevice].systemVersion integerValue] < 7 ||
@@ -3407,6 +3416,55 @@ static UIView *VCMainListCellReorderControlInView(UIView *view) {
 }
 @end
 
+@interface VCAppEventRecorder : NSObject {
+    NSMutableArray *_events;
+    NSMutableArray *_pendingEvents;
+    dispatch_queue_t _writeQueue;
+    BOOL _flushScheduled;
+}
++ (VCAppEventRecorder *)sharedRecorder;
+- (void)recordCategory:(NSString *)category action:(NSString *)action detail:(NSString *)detail;
+- (NSArray *)eventsSnapshot;
+- (void)flushNow;
+- (void)clearEvents;
+- (void)setAppActivityEnabled:(BOOL)enabled;
+@end
+
+@interface DiagnosticEventsVC : UIViewController <UITableViewDataSource, UITableViewDelegate, UIAlertViewDelegate> {
+    UITableView *_tableView;
+    NSArray *_events;
+}
+- (id)initWithEvents:(NSArray *)events;
+@end
+
+typedef NS_ENUM(NSInteger, VCDebugSection) {
+    VCDebugSectionLiveState = 0,
+    VCDebugSectionConnectionQuality,
+    VCDebugSectionActivityLogging,
+    VCDebugSectionRecentActivity,
+    VCDebugSectionDiagnostics,
+    VCDebugSectionCount,
+};
+
+@interface DebugVC : UIViewController <UITableViewDataSource, UITableViewDelegate, UIDocumentInteractionControllerDelegate> {
+    UITableView *_tableView;
+    NSDictionary *_daemonState;
+    NSArray *_daemonEvents;
+    NSArray *_appEvents;
+    NSMutableArray *_localEvents;
+    NSArray *_displayEvents;
+    NSDictionary *_qualityState;
+    NSString *_lastNetwork;
+    NSTimer *_refreshTimer;
+    UIDocumentInteractionController *_documentController;
+    UISwitch *_appActivitySwitch;
+    BOOL _refreshing;
+    BOOL _checking;
+    BOOL _reporting;
+    NSUInteger _qualityGeneration;
+}
+@end
+
 @interface SettingsNavController : UINavigationController
 @end
 
@@ -4157,6 +4215,8 @@ static NSInteger const kRoutingRuleActionSheetTagBase = 6200;
     NSUserDefaults *ud = [NSUserDefaults standardUserDefaults];
     [ud setObject:_rules forKey:kDefaultsRoutingRulesKey];
     [ud synchronize];
+    VCRecordAppEvent(@"settings", @"Routing rules saved",
+                     [NSString stringWithFormat:@"rules=%lu", (unsigned long)[_rules count]]);
 }
 
 - (void)enabledChanged:(UISwitch *)sender {
@@ -4164,12 +4224,14 @@ static NSInteger const kRoutingRuleActionSheetTagBase = 6200;
     [ud setBool:[sender isOn] forKey:kDefaultsRoutingEnabledKey];
     [ud synchronize];
     [_tableView reloadData];
+    VCRecordAppEvent(@"settings", @"Routing changed", [sender isOn] ? @"enabled=1" : @"enabled=0");
 }
 
 - (void)bypassLANChanged:(UISwitch *)sender {
     NSUserDefaults *ud = [NSUserDefaults standardUserDefaults];
     [ud setBool:[sender isOn] forKey:kDefaultsRoutingBypassLANKey];
     [ud synchronize];
+    VCRecordAppEvent(@"settings", @"LAN bypass changed", [sender isOn] ? @"enabled=1" : @"enabled=0");
 }
 
 - (void)setDefaultAction:(NSString *)action {
@@ -4178,6 +4240,8 @@ static NSInteger const kRoutingRuleActionSheetTagBase = 6200;
     [ud synchronize];
     [_tableView reloadSections:[NSIndexSet indexSetWithIndex:1]
               withRowAnimation:UITableViewRowAnimationNone];
+    VCRecordAppEvent(@"settings", @"Routing default action changed",
+                     [NSString stringWithFormat:@"action=%@", action]);
 }
 
 - (NSString *)displayNameForAction:(NSString *)action {
@@ -4695,6 +4759,7 @@ commitEditingStyle:(UITableViewCellEditingStyle)editingStyle
     NSUserDefaults *defaults = [NSUserDefaults standardUserDefaults];
     [defaults setObject:value forKey:kDefaultsXrayVersionKey];
     [defaults synchronize];
+    VCRecordAppEvent(@"settings", @"Xray spoof version saved", nil);
     return YES;
 }
 
@@ -4705,6 +4770,8 @@ commitEditingStyle:(UITableViewCellEditingStyle)editingStyle
     NSUserDefaults *defaults = [NSUserDefaults standardUserDefaults];
     [defaults setBool:[sender isOn] forKey:kDefaultsXrayVersionSpoofEnabledKey];
     [defaults synchronize];
+    VCRecordAppEvent(@"settings", @"Xray version spoof changed",
+                     [sender isOn] ? @"enabled=1" : @"enabled=0");
 }
 
 - (BOOL)textFieldShouldReturn:(UITextField *)textField {
@@ -4881,6 +4948,1828 @@ commitEditingStyle:(UITableViewCellEditingStyle)editingStyle
 
 @end
 
+static NSArray *VCDiagnosticRedactionExpressions(void) {
+    static NSArray *expressions = nil;
+    @synchronized([NSRegularExpression class]) {
+        if (expressions) return expressions;
+        NSMutableArray *compiled = [NSMutableArray array];
+        NSArray *patterns = [NSArray arrayWithObjects:
+                             @"[A-Za-z][A-Za-z0-9+.-]*://\\S+",
+                             @"\\b[0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{12}\\b",
+                             @"\\b(?:[0-9]{1,3}\\.){3}[0-9]{1,3}\\b",
+                             @"(?i)\\b(?:[0-9a-f]{0,4}:){2,}[0-9a-f:]{0,4}\\b",
+                             @"(?i)\\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\\.[A-Z]{2,}\\b",
+                             @"\\b(?:[A-Za-z0-9-]+\\.)+[A-Za-z]{2,}\\b",
+                             @"\\b[A-Za-z0-9_+/=-]{24,}\\b",
+                             nil];
+        for (NSString *pattern in patterns) {
+            NSError *error = nil;
+            NSRegularExpression *expression = [NSRegularExpression regularExpressionWithPattern:pattern
+                                                                                          options:0
+                                                                                            error:&error];
+            if (expression && !error) [compiled addObject:expression];
+        }
+        expressions = [compiled copy];
+    }
+    return expressions;
+}
+
+static NSString *VCSanitizeDiagnosticText(NSString *value, NSUInteger maximumLength) {
+    if (![value isKindOfClass:[NSString class]] || [value length] == 0) return @"";
+    NSMutableString *safe = [NSMutableString stringWithString:value];
+    for (NSRegularExpression *expression in VCDiagnosticRedactionExpressions()) {
+        [expression replaceMatchesInString:safe
+                                   options:0
+                                     range:NSMakeRange(0, [safe length])
+                              withTemplate:@"<redacted>"];
+    }
+    [safe replaceOccurrencesOfString:@"\r" withString:@" " options:0 range:NSMakeRange(0, [safe length])];
+    [safe replaceOccurrencesOfString:@"\n" withString:@" " options:0 range:NSMakeRange(0, [safe length])];
+    [safe replaceOccurrencesOfString:@"\t" withString:@" " options:0 range:NSMakeRange(0, [safe length])];
+    if (maximumLength > 0 && [safe length] > maximumLength) {
+        [safe deleteCharactersInRange:NSMakeRange(maximumLength, [safe length] - maximumLength)];
+    }
+    return safe;
+}
+
+static NSString *VCDiagnosticErrorCategory(NSString *errorText) {
+    NSString *lower = [[errorText description] lowercaseString];
+    if ([lower rangeOfString:@"timeout"].location != NSNotFound ||
+        [lower rangeOfString:@"timed out"].location != NSNotFound) return @"timeout";
+    if ([lower rangeOfString:@"resolve"].location != NSNotFound ||
+        [lower rangeOfString:@"dns"].location != NSNotFound ||
+        [lower rangeOfString:@"name or service"].location != NSNotFound) return @"dns";
+    if ([lower rangeOfString:@"tls"].location != NSNotFound ||
+        [lower rangeOfString:@"ssl"].location != NSNotFound ||
+        [lower rangeOfString:@"certificate"].location != NSNotFound) return @"tls";
+    if ([lower rangeOfString:@"http"].location != NSNotFound) return @"http";
+    if ([lower rangeOfString:@"decrypt"].location != NSNotFound ||
+        [lower rangeOfString:@"happ"].location != NSNotFound) return @"decrypt";
+    if ([lower rangeOfString:@"too large"].location != NSNotFound ||
+        [lower rangeOfString:@"size"].location != NSNotFound) return @"size_limit";
+    if ([lower rangeOfString:@"parse"].location != NSNotFound ||
+        [lower rangeOfString:@"invalid"].location != NSNotFound ||
+        [lower rangeOfString:@"unsupported"].location != NSNotFound ||
+        [lower rangeOfString:@"empty"].location != NSNotFound) return @"format";
+    if ([lower rangeOfString:@"curl"].location != NSNotFound ||
+        [lower rangeOfString:@"exit"].location != NSNotFound) return @"transport";
+    return @"unknown";
+}
+
+static NSInteger VCDiagnosticIntegerAfterMarker(NSString *text,
+                                                NSString *marker,
+                                                NSInteger minimum,
+                                                NSInteger maximum) {
+    if (![text isKindOfClass:[NSString class]] || ![marker isKindOfClass:[NSString class]]) return -1;
+    NSString *lower = [text lowercaseString];
+    NSRange markerRange = [lower rangeOfString:[marker lowercaseString]];
+    if (markerRange.location == NSNotFound) return -1;
+    NSUInteger cursor = NSMaxRange(markerRange);
+    NSUInteger limit = MIN([text length], cursor + 24);
+    NSCharacterSet *digits = [NSCharacterSet decimalDigitCharacterSet];
+    while (cursor < limit && ![digits characterIsMember:[text characterAtIndex:cursor]]) cursor++;
+    NSUInteger start = cursor;
+    while (cursor < limit && [digits characterIsMember:[text characterAtIndex:cursor]]) cursor++;
+    if (cursor == start) return -1;
+    NSInteger value = [[text substringWithRange:NSMakeRange(start, cursor - start)] integerValue];
+    return value >= minimum && value <= maximum ? value : -1;
+}
+
+static NSString *VCDiagnosticErrorSummary(NSString *errorText) {
+    NSString *category = VCDiagnosticErrorCategory(errorText);
+    NSInteger httpStatus = VCDiagnosticIntegerAfterMarker(errorText, @"http", 100, 599);
+    if (httpStatus >= 0) {
+        return [NSString stringWithFormat:@"%@ http_status=%ld", category, (long)httpStatus];
+    }
+    NSInteger exitCode = VCDiagnosticIntegerAfterMarker(errorText, @"exited with code", 0, 255);
+    if (exitCode >= 0) {
+        return [NSString stringWithFormat:@"%@ helper_exit=%ld", category, (long)exitCode];
+    }
+    return category;
+}
+
+static void VCIncrementDiagnosticCategory(NSMutableDictionary *counts, NSString *errorText) {
+    if (![counts isKindOfClass:[NSMutableDictionary class]]) return;
+    NSString *category = VCDiagnosticErrorCategory(errorText);
+    NSUInteger count = [[counts objectForKey:category] unsignedIntegerValue];
+    [counts setObject:[NSNumber numberWithUnsignedInteger:count + 1] forKey:category];
+}
+
+static NSString *VCDiagnosticCategoryCountsText(NSDictionary *counts) {
+    if (![counts isKindOfClass:[NSDictionary class]] || [counts count] == 0) return @"none";
+    NSArray *keys = [[counts allKeys] sortedArrayUsingSelector:@selector(compare:)];
+    NSMutableArray *parts = [NSMutableArray arrayWithCapacity:[keys count]];
+    for (NSString *key in keys) {
+        [parts addObject:[NSString stringWithFormat:@"%@:%lu",
+                          key,
+                          (unsigned long)[[counts objectForKey:key] unsignedIntegerValue]]];
+    }
+    return [parts componentsJoinedByString:@","];
+}
+
+static NSDictionary *VCMakeAppDiagnosticEvent(long long timestamp,
+                                               NSString *category,
+                                               NSString *action,
+                                               NSString *detail) {
+    NSString *safeCategory = VCSanitizeDiagnosticText(category, 24);
+    NSString *safeAction = VCSanitizeDiagnosticText(action, 96);
+    NSString *safeDetail = VCSanitizeDiagnosticText(detail, 192);
+    if ([safeCategory length] == 0 || [safeAction length] == 0 || timestamp <= 0) return nil;
+    NSMutableDictionary *event = [NSMutableDictionary dictionaryWithObjectsAndKeys:
+                                  [NSNumber numberWithLongLong:timestamp], @"timestamp",
+                                  @"app", @"source",
+                                  safeCategory, @"category",
+                                  safeAction, @"action",
+                                  nil];
+    if ([safeDetail length] > 0) [event setObject:safeDetail forKey:@"detail"];
+    return event;
+}
+
+static BOOL VCAppActivityLoggingEnabled(void) {
+    return [[NSUserDefaults standardUserDefaults] boolForKey:kDefaultsDiagnosticAppActivityKey];
+}
+
+static BOOL VCIsOptionalAppDiagnosticEvent(NSString *category, NSString *action) {
+    if ([category isEqualToString:@"connection"] ||
+        [category isEqualToString:@"diagnostics"] ||
+        [category isEqualToString:@"ping"]) return NO;
+    if ([category isEqualToString:@"subscription"] &&
+        [action rangeOfString:@"update" options:NSCaseInsensitiveSearch].location != NSNotFound) return NO;
+    return YES;
+}
+
+static BOOL VCOpenDiagnosticEventDatabase(sqlite3 **databaseOut) {
+    if (!databaseOut || !VCEnsureSecureStoreDirectory()) return NO;
+    *databaseOut = NULL;
+    struct stat existing;
+    const char *path = [kDiagnosticEventDatabasePath fileSystemRepresentation];
+    if (lstat(path, &existing) == 0 &&
+        (!S_ISREG(existing.st_mode) || S_ISLNK(existing.st_mode) ||
+         existing.st_uid != geteuid() || existing.st_nlink != 1)) return NO;
+    int rc = sqlite3_open_v2([kDiagnosticEventDatabasePath fileSystemRepresentation],
+                             databaseOut,
+                             SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE,
+                             NULL);
+    if (rc != SQLITE_OK || !*databaseOut) {
+        if (*databaseOut) sqlite3_close(*databaseOut);
+        *databaseOut = NULL;
+        return NO;
+    }
+    sqlite3_busy_timeout(*databaseOut, 1000);
+    const char *setup =
+        "PRAGMA journal_mode=DELETE;"
+        "PRAGMA synchronous=NORMAL;"
+        "PRAGMA secure_delete=ON;"
+        "CREATE TABLE IF NOT EXISTS events ("
+        "id INTEGER PRIMARY KEY AUTOINCREMENT,"
+        "timestamp INTEGER NOT NULL,"
+        "category TEXT NOT NULL,"
+        "action TEXT NOT NULL,"
+        "detail TEXT"
+        ");";
+    if (sqlite3_exec(*databaseOut, setup, NULL, NULL, NULL) != SQLITE_OK) {
+        sqlite3_close(*databaseOut);
+        *databaseOut = NULL;
+        return NO;
+    }
+    (void)chmod([kDiagnosticEventDatabasePath fileSystemRepresentation], 0600);
+    return YES;
+}
+
+static NSArray *VCLoadDiagnosticEventDatabase(void) {
+    sqlite3 *database = NULL;
+    if (!VCOpenDiagnosticEventDatabase(&database)) return [NSArray array];
+    const char *query =
+        "SELECT timestamp, category, action, detail FROM ("
+        "SELECT id, timestamp, category, action, detail "
+        "FROM events ORDER BY id DESC LIMIT 250"
+        ") ORDER BY id ASC;";
+    sqlite3_stmt *statement = NULL;
+    NSMutableArray *events = [NSMutableArray array];
+    if (sqlite3_prepare_v2(database, query, -1, &statement, NULL) == SQLITE_OK) {
+        while (sqlite3_step(statement) == SQLITE_ROW) {
+            const unsigned char *categoryBytes = sqlite3_column_text(statement, 1);
+            const unsigned char *actionBytes = sqlite3_column_text(statement, 2);
+            const unsigned char *detailBytes = sqlite3_column_text(statement, 3);
+            NSString *category = categoryBytes ? [NSString stringWithUTF8String:(const char *)categoryBytes] : nil;
+            NSString *action = actionBytes ? [NSString stringWithUTF8String:(const char *)actionBytes] : nil;
+            NSString *detail = detailBytes ? [NSString stringWithUTF8String:(const char *)detailBytes] : nil;
+            NSDictionary *event = VCMakeAppDiagnosticEvent(sqlite3_column_int64(statement, 0),
+                                                           category,
+                                                           action,
+                                                           detail);
+            if (event) [events addObject:event];
+        }
+    }
+    if (statement) sqlite3_finalize(statement);
+    sqlite3_close(database);
+    return events;
+}
+
+static BOOL VCInsertDiagnosticEventBatch(NSArray *events) {
+    if (![events isKindOfClass:[NSArray class]] || [events count] == 0) return YES;
+    sqlite3 *database = NULL;
+    if (!VCOpenDiagnosticEventDatabase(&database)) return NO;
+    BOOL ok = sqlite3_exec(database, "BEGIN IMMEDIATE;", NULL, NULL, NULL) == SQLITE_OK;
+    sqlite3_stmt *statement = NULL;
+    const char *insert = "INSERT INTO events(timestamp, category, action, detail) VALUES(?, ?, ?, ?);";
+    if (ok) ok = sqlite3_prepare_v2(database, insert, -1, &statement, NULL) == SQLITE_OK;
+    for (NSDictionary *candidate in events) {
+        if (!ok) break;
+        NSDictionary *event = VCMakeAppDiagnosticEvent(
+            [[candidate objectForKey:@"timestamp"] longLongValue],
+            [candidate objectForKey:@"category"],
+            [candidate objectForKey:@"action"],
+            [candidate objectForKey:@"detail"]);
+        if (!event) continue;
+        NSString *detail = [event objectForKey:@"detail"];
+        sqlite3_bind_int64(statement, 1, [[event objectForKey:@"timestamp"] longLongValue]);
+        sqlite3_bind_text(statement, 2, [[event objectForKey:@"category"] UTF8String], -1, SQLITE_TRANSIENT);
+        sqlite3_bind_text(statement, 3, [[event objectForKey:@"action"] UTF8String], -1, SQLITE_TRANSIENT);
+        if ([detail length] > 0) sqlite3_bind_text(statement, 4, [detail UTF8String], -1, SQLITE_TRANSIENT);
+        else sqlite3_bind_null(statement, 4);
+        ok = sqlite3_step(statement) == SQLITE_DONE;
+        sqlite3_reset(statement);
+        sqlite3_clear_bindings(statement);
+    }
+    if (statement) sqlite3_finalize(statement);
+    if (ok) {
+        ok = sqlite3_exec(database,
+                          "DELETE FROM events WHERE id NOT IN (SELECT id FROM events ORDER BY id DESC LIMIT 250);",
+                          NULL, NULL, NULL) == SQLITE_OK;
+    }
+    if (ok) ok = sqlite3_exec(database, "COMMIT;", NULL, NULL, NULL) == SQLITE_OK;
+    else sqlite3_exec(database, "ROLLBACK;", NULL, NULL, NULL);
+    sqlite3_close(database);
+    return ok;
+}
+
+static void VCClearDiagnosticEventDatabase(void) {
+    sqlite3 *database = NULL;
+    if (VCOpenDiagnosticEventDatabase(&database)) {
+        sqlite3_exec(database, "DELETE FROM events;", NULL, NULL, NULL);
+        sqlite3_exec(database, "DELETE FROM sqlite_sequence WHERE name='events';", NULL, NULL, NULL);
+        sqlite3_exec(database, "VACUUM;", NULL, NULL, NULL);
+        sqlite3_close(database);
+    }
+}
+
+static void VCPurgeOptionalDiagnosticEvents(void) {
+    sqlite3 *database = NULL;
+    if (!VCOpenDiagnosticEventDatabase(&database)) return;
+    sqlite3_exec(database,
+                 "DELETE FROM events "
+                 "WHERE category NOT IN ('connection','diagnostics','ping') "
+                 "AND NOT (category='subscription' AND action LIKE '%update%');",
+                 NULL, NULL, NULL);
+    sqlite3_close(database);
+}
+
+@implementation VCAppEventRecorder
+
++ (VCAppEventRecorder *)sharedRecorder {
+    static VCAppEventRecorder *recorder = nil;
+    @synchronized(self) {
+        if (!recorder) recorder = [[VCAppEventRecorder alloc] init];
+    }
+    return recorder;
+}
+
+- (id)init {
+    self = [super init];
+    if (!self) return nil;
+    _events = [[NSMutableArray alloc] init];
+    _pendingEvents = [[NSMutableArray alloc] init];
+    _writeQueue = dispatch_queue_create("com.vlesscore.diagnostics.write", DISPATCH_QUEUE_SERIAL);
+    BOOL appActivityEnabled = VCAppActivityLoggingEnabled();
+    NSArray *stored = VCLoadDiagnosticEventDatabase();
+    for (NSDictionary *event in stored) {
+        if (appActivityEnabled ||
+            !VCIsOptionalAppDiagnosticEvent([event objectForKey:@"category"],
+                                            [event objectForKey:@"action"])) {
+            [_events addObject:event];
+        }
+    }
+    if (!appActivityEnabled && _writeQueue) {
+        dispatch_async(_writeQueue, ^{
+            NSAutoreleasePool *pool = [[NSAutoreleasePool alloc] init];
+            VCPurgeOptionalDiagnosticEvents();
+            [pool drain];
+        });
+    }
+    return self;
+}
+
+- (void)scheduleFlushOnMainThread {
+    @synchronized(self) {
+        if (!_flushScheduled) return;
+    }
+    [NSObject cancelPreviousPerformRequestsWithTarget:self
+                                             selector:@selector(flushPendingEvents)
+                                               object:nil];
+    [self performSelector:@selector(flushPendingEvents) withObject:nil afterDelay:2.0];
+}
+
+- (void)recordCategory:(NSString *)category action:(NSString *)action detail:(NSString *)detail {
+    if (!VCAppActivityLoggingEnabled() && VCIsOptionalAppDiagnosticEvent(category, action)) return;
+    NSTimeInterval seconds = [[NSDate date] timeIntervalSince1970];
+    NSDictionary *event = VCMakeAppDiagnosticEvent((long long)(seconds * 1000.0),
+                                                   category,
+                                                   action,
+                                                   detail);
+    if (!event) return;
+    @synchronized(self) {
+        [_events addObject:event];
+        [_pendingEvents addObject:event];
+        if ([_events count] > kVCDiagnosticEventCapacity) {
+            [_events removeObjectsInRange:
+             NSMakeRange(0, [_events count] - kVCDiagnosticEventCapacity)];
+        }
+        if ([_pendingEvents count] > kVCDiagnosticEventCapacity) {
+            [_pendingEvents removeObjectsInRange:
+             NSMakeRange(0, [_pendingEvents count] - kVCDiagnosticEventCapacity)];
+        }
+        _flushScheduled = YES;
+    }
+    [self performSelectorOnMainThread:@selector(scheduleFlushOnMainThread)
+                           withObject:nil
+                        waitUntilDone:NO];
+}
+
+- (NSArray *)eventsSnapshot {
+    @synchronized(self) {
+        return [[_events copy] autorelease];
+    }
+}
+
+- (void)flushPendingEvents {
+    NSArray *pending = nil;
+    @synchronized(self) {
+        if (!_flushScheduled) return;
+        _flushScheduled = NO;
+        if ([_pendingEvents count] == 0) return;
+        pending = [_pendingEvents copy];
+        [_pendingEvents removeAllObjects];
+    }
+    if (_writeQueue) {
+        dispatch_async(_writeQueue, ^{
+            NSAutoreleasePool *pool = [[NSAutoreleasePool alloc] init];
+            VCInsertDiagnosticEventBatch(pending);
+            [pending release];
+            [pool drain];
+        });
+    } else {
+        [pending release];
+    }
+}
+
+- (void)flushNow {
+    [NSObject cancelPreviousPerformRequestsWithTarget:self
+                                             selector:@selector(flushPendingEvents)
+                                               object:nil];
+    NSArray *pending = nil;
+    @synchronized(self) {
+        _flushScheduled = NO;
+        if ([_pendingEvents count] > 0) {
+            pending = [_pendingEvents copy];
+            [_pendingEvents removeAllObjects];
+        }
+    }
+    if (_writeQueue && pending) {
+        dispatch_sync(_writeQueue, ^{
+            NSAutoreleasePool *pool = [[NSAutoreleasePool alloc] init];
+            VCInsertDiagnosticEventBatch(pending);
+            [pool drain];
+        });
+    }
+    [pending release];
+}
+
+- (void)clearEvents {
+    [NSObject cancelPreviousPerformRequestsWithTarget:self
+                                             selector:@selector(flushPendingEvents)
+                                               object:nil];
+    @synchronized(self) {
+        _flushScheduled = NO;
+        [_events removeAllObjects];
+        [_pendingEvents removeAllObjects];
+    }
+    if (_writeQueue) {
+        dispatch_sync(_writeQueue, ^{
+            VCClearDiagnosticEventDatabase();
+        });
+    } else {
+        VCClearDiagnosticEventDatabase();
+    }
+}
+
+- (void)setAppActivityEnabled:(BOOL)enabled {
+    if (enabled) return;
+    @synchronized(self) {
+        for (NSInteger index = (NSInteger)[_events count] - 1; index >= 0; index--) {
+            NSDictionary *event = [_events objectAtIndex:index];
+            if (VCIsOptionalAppDiagnosticEvent([event objectForKey:@"category"],
+                                               [event objectForKey:@"action"])) {
+                [_events removeObjectAtIndex:index];
+            }
+        }
+        for (NSInteger index = (NSInteger)[_pendingEvents count] - 1; index >= 0; index--) {
+            NSDictionary *event = [_pendingEvents objectAtIndex:index];
+            if (VCIsOptionalAppDiagnosticEvent([event objectForKey:@"category"],
+                                               [event objectForKey:@"action"])) {
+                [_pendingEvents removeObjectAtIndex:index];
+            }
+        }
+    }
+    if (_writeQueue) {
+        dispatch_async(_writeQueue, ^{
+            NSAutoreleasePool *pool = [[NSAutoreleasePool alloc] init];
+            VCPurgeOptionalDiagnosticEvents();
+            [pool drain];
+        });
+    }
+}
+
+- (void)dealloc {
+    [NSObject cancelPreviousPerformRequestsWithTarget:self];
+#if !OS_OBJECT_USE_OBJC
+    if (_writeQueue) dispatch_release(_writeQueue);
+#endif
+    [_pendingEvents release];
+    [_events release];
+    [super dealloc];
+}
+
+@end
+
+static void VCRecordAppEvent(NSString *category, NSString *action, NSString *detail) {
+    [[VCAppEventRecorder sharedRecorder] recordCategory:category action:action detail:detail];
+}
+
+static NSString *VCEventTimeText(NSDictionary *event) {
+    long long milliseconds = [[event objectForKey:@"timestamp"] longLongValue];
+    time_t seconds = (time_t)(milliseconds / 1000LL);
+    struct tm local;
+    memset(&local, 0, sizeof(local));
+    if (!localtime_r(&seconds, &local)) return @"--:--:--";
+    return [NSString stringWithFormat:@"%02d:%02d:%02d",
+            local.tm_hour, local.tm_min, local.tm_sec];
+}
+
+static NSString *VCEventMessage(NSDictionary *event) {
+    NSString *message = [event objectForKey:@"message"];
+    if ([message isKindOfClass:[NSString class]] && [message length] > 0) {
+        return VCSanitizeDiagnosticText(message, 192);
+    }
+    return VCSanitizeDiagnosticText([event objectForKey:@"action"], 96);
+}
+
+static NSString *VCEventMetadata(NSDictionary *event) {
+    NSMutableArray *parts = [NSMutableArray arrayWithObject:VCEventTimeText(event)];
+    NSString *source = [event objectForKey:@"source"];
+    NSString *category = [event objectForKey:@"category"];
+    if ([source isEqualToString:@"daemon"]) {
+        [parts addObject:@"daemon"];
+    } else if ([category length] > 0) {
+        [parts addObject:category];
+    } else if ([source length] > 0) {
+        [parts addObject:source];
+    }
+    NSString *detail = VCSanitizeDiagnosticText([event objectForKey:@"detail"], 192);
+    if ([detail length] > 0) [parts addObject:detail];
+    return [parts componentsJoinedByString:@" · "];
+}
+
+static NSArray *VCCombinedDiagnosticEvents(NSArray *daemonEvents,
+                                           NSArray *appEvents,
+                                           NSArray *localEvents) {
+    NSMutableArray *events = [NSMutableArray array];
+    if (daemonEvents) [events addObjectsFromArray:daemonEvents];
+    if (appEvents) [events addObjectsFromArray:appEvents];
+    if (localEvents) [events addObjectsFromArray:localEvents];
+    NSSortDescriptor *sort = [[[NSSortDescriptor alloc] initWithKey:@"timestamp"
+                                                          ascending:YES] autorelease];
+    [events sortUsingDescriptors:[NSArray arrayWithObject:sort]];
+    if ([events count] > kVCDiagnosticEventCapacity) {
+        [events removeObjectsInRange:
+         NSMakeRange(0, [events count] - kVCDiagnosticEventCapacity)];
+    }
+    return events;
+}
+
+@implementation DiagnosticEventsVC
+
+- (id)initWithEvents:(NSArray *)events {
+    self = [super init];
+    if (self) _events = [events copy];
+    return self;
+}
+
+- (void)viewDidLoad {
+    [super viewDidLoad];
+    self.title = @"All Events";
+    self.navigationItem.rightBarButtonItem = [[[UIBarButtonItem alloc]
+                                                initWithTitle:@"Clear"
+                                                        style:UIBarButtonItemStylePlain
+                                                       target:self
+                                                       action:@selector(clearPressed)] autorelease];
+    _tableView = [[UITableView alloc] initWithFrame:self.view.bounds style:UITableViewStyleGrouped];
+    _tableView.dataSource = self;
+    _tableView.delegate = self;
+    _tableView.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
+    [self.view addSubview:_tableView];
+    self.view.backgroundColor = VCBackgroundColor();
+    VCAppearanceApplyNavigationBar(self.navigationController.navigationBar);
+    VCAppearanceApplyStatusBar();
+    VCAppearanceApplyTable(_tableView);
+    UIBarButtonItem *clearButton = self.navigationItem.rightBarButtonItem;
+    clearButton.tintColor = VCErrorColor();
+    if ([[[UIDevice currentDevice] systemVersion] integerValue] < 7) {
+        clearButton.style = UIBarButtonItemStyleDone;
+    } else {
+        [clearButton setTitleTextAttributes:
+            [NSDictionary dictionaryWithObject:VCErrorColor()
+                                        forKey:NSForegroundColorAttributeName]
+                                  forState:UIControlStateNormal];
+    }
+    clearButton.enabled = [_events count] > 0;
+}
+
+- (NSInteger)numberOfSectionsInTableView:(UITableView *)tableView {
+    (void)tableView;
+    return 1;
+}
+
+- (NSInteger)tableView:(UITableView *)tableView numberOfRowsInSection:(NSInteger)section {
+    (void)tableView;
+    (void)section;
+    return MAX((NSInteger)1, (NSInteger)[_events count]);
+}
+
+- (NSString *)tableView:(UITableView *)tableView titleForHeaderInSection:(NSInteger)section {
+    (void)tableView;
+    (void)section;
+    return [NSString stringWithFormat:@"Activity (%u)", (unsigned)[_events count]];
+}
+
+- (void)clearPressed {
+    if ([_events count] == 0) return;
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wdeprecated-declarations"
+    UIAlertView *alert = [[[UIAlertView alloc] initWithTitle:@"Clear Activity?"
+                                                     message:@"Are you sure you want to delete all recorded diagnostic activity?"
+                                                    delegate:self
+                                           cancelButtonTitle:@"Cancel"
+                                           otherButtonTitles:@"Clear", nil] autorelease];
+    [alert show];
+#pragma clang diagnostic pop
+}
+
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wdeprecated-declarations"
+- (void)alertView:(UIAlertView *)alertView clickedButtonAtIndex:(NSInteger)buttonIndex {
+    if (buttonIndex == alertView.cancelButtonIndex) return;
+#pragma clang diagnostic pop
+    [[VCAppEventRecorder sharedRecorder] clearEvents];
+    (void)SendCommand(@"CLEAR_EVENTS\n");
+    [_events release];
+    _events = [[NSArray alloc] init];
+    self.navigationItem.rightBarButtonItem.enabled = NO;
+    [_tableView reloadData];
+    [[NSNotificationCenter defaultCenter]
+        postNotificationName:kVCDiagnosticEventsClearedNotification
+                      object:nil];
+}
+
+- (UIView *)tableView:(UITableView *)tableView viewForHeaderInSection:(NSInteger)section {
+    UIView *header = [[[UIView alloc] initWithFrame:
+                       CGRectMake(0.0f, 0.0f, tableView.bounds.size.width, 32.0f)] autorelease];
+    header.backgroundColor = [UIColor clearColor];
+    UILabel *label = [[[UILabel alloc] initWithFrame:
+                       CGRectMake(18.0f, 0.0f, tableView.bounds.size.width - 36.0f, 32.0f)] autorelease];
+    label.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
+    label.backgroundColor = [UIColor clearColor];
+    label.font = [UIFont boldSystemFontOfSize:17.0f];
+    label.text = [self tableView:tableView titleForHeaderInSection:section];
+    [header addSubview:label];
+    VCAppearanceApplyHeaderView(header);
+    return header;
+}
+
+- (UITableViewCell *)tableView:(UITableView *)tableView cellForRowAtIndexPath:(NSIndexPath *)indexPath {
+    static NSString *identifier = @"DiagnosticEventListCell";
+    UITableViewCell *cell = [tableView dequeueReusableCellWithIdentifier:identifier];
+    if (!cell) {
+        cell = [[[UITableViewCell alloc] initWithStyle:UITableViewCellStyleSubtitle
+                                      reuseIdentifier:identifier] autorelease];
+    }
+    cell.selectionStyle = UITableViewCellSelectionStyleNone;
+    if ([_events count] == 0) {
+        cell.textLabel.text = @"No events recorded";
+        cell.detailTextLabel.text = @"Actions will appear here as they happen";
+    } else {
+        NSDictionary *event = [_events objectAtIndex:[_events count] - 1 - indexPath.row];
+        cell.textLabel.text = VCEventMessage(event);
+        cell.detailTextLabel.text = VCEventMetadata(event);
+    }
+    cell.textLabel.numberOfLines = 2;
+    cell.detailTextLabel.numberOfLines = 2;
+    VCAppearanceApplyCell(cell);
+    return cell;
+}
+
+- (CGFloat)tableView:(UITableView *)tableView heightForRowAtIndexPath:(NSIndexPath *)indexPath {
+    (void)tableView;
+    (void)indexPath;
+    return 62.0f;
+}
+
+- (void)tableView:(UITableView *)tableView willDisplayCell:(UITableViewCell *)cell forRowAtIndexPath:(NSIndexPath *)indexPath {
+    (void)tableView;
+    (void)indexPath;
+    VCAppearanceApplyCell(cell);
+}
+
+- (void)tableView:(UITableView *)tableView willDisplayHeaderView:(UIView *)view forSection:(NSInteger)section {
+    (void)tableView;
+    (void)section;
+    VCAppearanceApplyHeaderView(view);
+}
+
+- (BOOL)shouldAutorotateToInterfaceOrientation:(UIInterfaceOrientation)interfaceOrientation {
+    return IsPadDevice() ? (UIInterfaceOrientationIsPortrait(interfaceOrientation) ||
+                            UIInterfaceOrientationIsLandscape(interfaceOrientation))
+                         : interfaceOrientation == UIInterfaceOrientationPortrait;
+}
+
+- (BOOL)shouldAutorotate { return IsPadDevice(); }
+
+- (UIInterfaceOrientationMask)supportedInterfaceOrientations {
+    return IsPadDevice() ? UIInterfaceOrientationMaskAllButUpsideDown
+                         : UIInterfaceOrientationMaskPortrait;
+}
+
+- (void)dealloc {
+    [_tableView release];
+    [_events release];
+    [super dealloc];
+}
+
+@end
+
+static NSDictionary *VCParseDaemonDiagnostics(NSString *response) {
+    NSMutableDictionary *values = [NSMutableDictionary dictionary];
+    if (![response isKindOfClass:[NSString class]] || ![response hasPrefix:@"OK "]) {
+        [values setObject:(response ? response : @"daemon unavailable") forKey:@"error"];
+        return values;
+    }
+
+    NSArray *lines = [response componentsSeparatedByCharactersInSet:
+                      [NSCharacterSet newlineCharacterSet]];
+    for (NSString *line in lines) {
+        NSRange separator = [line rangeOfString:@"="];
+        if (separator.location == NSNotFound || separator.location == 0) continue;
+        NSString *key = [line substringToIndex:separator.location];
+        NSString *value = [line substringFromIndex:NSMaxRange(separator)];
+        if ([key length] > 0 && [value length] > 0) [values setObject:value forKey:key];
+    }
+    return values;
+}
+
+static NSArray *VCParseDaemonEvents(NSString *response) {
+    NSMutableArray *events = [NSMutableArray array];
+    if (![response isKindOfClass:[NSString class]] || ![response hasPrefix:@"OK "]) {
+        return events;
+    }
+
+    NSArray *lines = [response componentsSeparatedByCharactersInSet:
+                      [NSCharacterSet newlineCharacterSet]];
+    for (NSString *line in lines) {
+        if (![line hasPrefix:@"EVENT\t"]) continue;
+        NSArray *parts = [line componentsSeparatedByString:@"\t"];
+        if ([parts count] < 3) continue;
+        long long timestamp = [[parts objectAtIndex:1] longLongValue];
+        NSString *message = [parts objectAtIndex:2];
+        if (timestamp <= 0 || [message length] == 0) continue;
+        [events addObject:[NSDictionary dictionaryWithObjectsAndKeys:
+                           [NSNumber numberWithLongLong:timestamp], @"timestamp",
+                           @"daemon", @"source",
+                           message, @"message",
+                           nil]];
+    }
+    return events;
+}
+
+static NSString *VCMachineIdentifier(void) {
+    struct utsname info;
+    if (uname(&info) != 0 || info.machine[0] == '\0') return @"unknown";
+    return [NSString stringWithUTF8String:info.machine];
+}
+
+static NSString *VCActiveNetworkDescription(void) {
+    struct sockaddr_in address;
+    memset(&address, 0, sizeof(address));
+    address.sin_len = sizeof(address);
+    address.sin_family = AF_INET;
+
+    SCNetworkReachabilityRef reachability =
+        SCNetworkReachabilityCreateWithAddress(kCFAllocatorDefault,
+                                                (const struct sockaddr *)&address);
+    if (!reachability) return @"Unknown";
+
+    SCNetworkReachabilityFlags flags = 0;
+    BOOL valid = SCNetworkReachabilityGetFlags(reachability, &flags);
+    CFRelease(reachability);
+    if (!valid) return @"Unknown";
+
+    BOOL reachable = (flags & kSCNetworkReachabilityFlagsReachable) != 0;
+    BOOL needsConnection = (flags & kSCNetworkReachabilityFlagsConnectionRequired) != 0;
+    if (!reachable || needsConnection) return @"No active route";
+#if TARGET_OS_IPHONE
+    if ((flags & kSCNetworkReachabilityFlagsIsWWAN) != 0) {
+        return @"pdp_ip (Cellular)";
+    }
+#endif
+    return @"en0 (Wi-Fi)";
+}
+
+static NSString *VCNormalizedIPAddress(NSString *value) {
+    if (![value isKindOfClass:[NSString class]]) return nil;
+    NSString *trimmed = [value stringByTrimmingCharactersInSet:
+                         [NSCharacterSet whitespaceAndNewlineCharacterSet]];
+    if ([trimmed length] == 0 || [trimmed length] > INET6_ADDRSTRLEN) return nil;
+
+    unsigned char address[sizeof(struct in6_addr)];
+    if (inet_pton(AF_INET, [trimmed UTF8String], address) == 1 ||
+        inet_pton(AF_INET6, [trimmed UTF8String], address) == 1) {
+        return trimmed;
+    }
+    return nil;
+}
+
+static NSString *VCExternalIPThroughSOCKS(uint16_t socksPort) {
+    int fd = connect_loopback_port(socksPort, 8000);
+    if (fd < 0) return nil;
+    if (socks5_connect_domain(fd, "api.ipify.org", 80) != 0) {
+        close(fd);
+        return nil;
+    }
+
+    static const char request[] =
+        "GET / HTTP/1.0\r\n"
+        "Host: api.ipify.org\r\n"
+        "User-Agent: vless-core-app-diagnostics\r\n"
+        "Connection: close\r\n\r\n";
+    if (write_all(fd, request, sizeof(request) - 1) != 0) {
+        close(fd);
+        return nil;
+    }
+
+    char response[8192];
+    size_t used = 0;
+    while (used + 1 < sizeof(response)) {
+        ssize_t count = read(fd, response + used, sizeof(response) - used - 1);
+        if (count < 0 && errno == EINTR) continue;
+        if (count <= 0) break;
+        used += (size_t)count;
+    }
+    close(fd);
+    response[used] = '\0';
+    if (used < 12 || strncmp(response, "HTTP/", 5) != 0) return nil;
+
+    char *status = strchr(response, ' ');
+    if (!status || atoi(status + 1) < 200 || atoi(status + 1) >= 300) return nil;
+    char *body = strstr(response, "\r\n\r\n");
+    if (!body) return nil;
+    body += 4;
+    NSString *bodyText = [[[NSString alloc] initWithBytes:body
+                                                   length:used - (size_t)(body - response)
+                                                 encoding:NSUTF8StringEncoding] autorelease];
+    return VCNormalizedIPAddress(bodyText);
+}
+
+static NSString *VCExternalIPThroughSystemHTTP(void) {
+    BOOL usesATS = [[[UIDevice currentDevice] systemVersion] integerValue] >= 9;
+    NSURL *url = [NSURL URLWithString:(usesATS
+                                      ? @"https://api.ipify.org/"
+                                      : @"http://api.ipify.org/")];
+    if (!url) return nil;
+    NSMutableURLRequest *request = [NSMutableURLRequest requestWithURL:url
+                                                          cachePolicy:NSURLRequestReloadIgnoringLocalCacheData
+                                                      timeoutInterval:10.0];
+    [request setValue:@"vless-core-app-diagnostics" forHTTPHeaderField:@"User-Agent"];
+    [request setValue:@"close" forHTTPHeaderField:@"Connection"];
+    NSURLResponse *response = nil;
+    NSError *error = nil;
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wdeprecated-declarations"
+    NSData *data = [NSURLConnection sendSynchronousRequest:request
+                                         returningResponse:&response
+                                                     error:&error];
+#pragma clang diagnostic pop
+    if (!data || error) return nil;
+    if ([response isKindOfClass:[NSHTTPURLResponse class]]) {
+        NSInteger status = [(NSHTTPURLResponse *)response statusCode];
+        if (status < 200 || status >= 300) return nil;
+    }
+    NSString *body = [[[NSString alloc] initWithData:data encoding:NSUTF8StringEncoding] autorelease];
+    return VCNormalizedIPAddress(body);
+}
+
+static BOOL VCSystemHTTPProbe(void) {
+    BOOL usesATS = [[[UIDevice currentDevice] systemVersion] integerValue] >= 9;
+    NSURL *url = [NSURL URLWithString:(usesATS
+                                      ? @"https://www.gstatic.com/generate_204"
+                                      : @"http://www.gstatic.com/generate_204")];
+    if (!url) return NO;
+    NSMutableURLRequest *request = [NSMutableURLRequest requestWithURL:url
+                                                          cachePolicy:NSURLRequestReloadIgnoringLocalCacheData
+                                                      timeoutInterval:8.0];
+    [request setValue:@"vless-core-app-diagnostics" forHTTPHeaderField:@"User-Agent"];
+    [request setValue:@"close" forHTTPHeaderField:@"Connection"];
+    NSURLResponse *response = nil;
+    NSError *error = nil;
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wdeprecated-declarations"
+    (void)[NSURLConnection sendSynchronousRequest:request
+                                returningResponse:&response
+                                            error:&error];
+#pragma clang diagnostic pop
+    if (error || ![response isKindOfClass:[NSHTTPURLResponse class]]) return NO;
+    NSInteger status = [(NSHTTPURLResponse *)response statusCode];
+    return status >= 200 && status < 400;
+}
+
+typedef struct {
+    pthread_mutex_t mutex;
+    pthread_cond_t condition;
+    int finished;
+    int result;
+    int waiter_timed_out;
+} VCDNSCheckContext;
+
+static void *VCDNSCheckWorker(void *opaque) {
+    VCDNSCheckContext *context = (VCDNSCheckContext *)opaque;
+    struct addrinfo hints;
+    memset(&hints, 0, sizeof(hints));
+    hints.ai_family = AF_UNSPEC;
+    hints.ai_socktype = SOCK_STREAM;
+    struct addrinfo *result = NULL;
+    int rc = getaddrinfo("api.ipify.org", "80", &hints, &result);
+    if (result) freeaddrinfo(result);
+
+    pthread_mutex_lock(&context->mutex);
+    context->result = rc == 0;
+    context->finished = 1;
+    int timedOut = context->waiter_timed_out;
+    if (!timedOut) pthread_cond_signal(&context->condition);
+    pthread_mutex_unlock(&context->mutex);
+
+    if (timedOut) {
+        pthread_cond_destroy(&context->condition);
+        pthread_mutex_destroy(&context->mutex);
+        free(context);
+    }
+    return NULL;
+}
+
+static BOOL VCDNSCheck(void) {
+    VCDNSCheckContext *context = calloc(1, sizeof(*context));
+    if (!context) return NO;
+    if (pthread_mutex_init(&context->mutex, NULL) != 0) {
+        free(context);
+        return NO;
+    }
+    if (pthread_cond_init(&context->condition, NULL) != 0) {
+        pthread_mutex_destroy(&context->mutex);
+        free(context);
+        return NO;
+    }
+
+    pthread_t thread;
+    if (pthread_create(&thread, NULL, VCDNSCheckWorker, context) != 0) {
+        pthread_cond_destroy(&context->condition);
+        pthread_mutex_destroy(&context->mutex);
+        free(context);
+        return NO;
+    }
+
+    struct timeval now;
+    gettimeofday(&now, NULL);
+    struct timespec deadline;
+    deadline.tv_sec = now.tv_sec + 8;
+    deadline.tv_nsec = (long)now.tv_usec * 1000L;
+
+    pthread_mutex_lock(&context->mutex);
+    int waitRC = 0;
+    while (!context->finished && waitRC == 0) {
+        waitRC = pthread_cond_timedwait(&context->condition, &context->mutex, &deadline);
+    }
+    if (!context->finished) {
+        context->waiter_timed_out = 1;
+        pthread_mutex_unlock(&context->mutex);
+        (void)pthread_detach(thread);
+        return NO;
+    }
+    BOOL success = context->result != 0;
+    pthread_mutex_unlock(&context->mutex);
+    (void)pthread_join(thread, NULL);
+    pthread_cond_destroy(&context->condition);
+    pthread_mutex_destroy(&context->mutex);
+    free(context);
+    return success;
+}
+
+static NSDictionary *VCRunConnectionQualityChecks(NSDictionary *daemonState) {
+    NSMutableDictionary *quality = [NSMutableDictionary dictionary];
+    BOOL connected = [[daemonState objectForKey:@"connected"] boolValue];
+    NSInteger socksPort = [[daemonState objectForKey:@"socks_port"] integerValue];
+    if (!connected || socksPort <= 0 || socksPort > 65535) {
+        [quality setObject:@"VPN disconnected" forKey:@"server"];
+        [quality setObject:@"Not running" forKey:@"core"];
+        [quality setObject:@"Not checked" forKey:@"dns"];
+        [quality setObject:@"Not checked" forKey:@"http"];
+        [quality setObject:@"Not checked" forKey:@"webkit"];
+        [quality setObject:@"Not checked" forKey:@"leak"];
+        [quality setObject:@"VPN disconnected" forKey:@"internet"];
+        return quality;
+    }
+
+    BOOL helperRunning = [[daemonState objectForKey:@"core"] isEqualToString:@"running"];
+    BOOL listenerReady = ConnectLatencyMs("127.0.0.1", (uint16_t)socksPort, 1500,
+                                         NULL) == 0;
+    [quality setObject:(helperRunning && listenerReady ? @"Running and listening" : @"Unavailable")
+                 forKey:@"core"];
+
+    BOOL dnsWorks = VCDNSCheck();
+    [quality setObject:(dnsWorks ? @"Resolved successfully" : @"Resolution failed")
+                 forKey:@"dns"];
+
+    int proxyLatency = 0;
+    BOOL proxyHTTP = helperRunning && listenerReady &&
+        ProxyGetConnectOnceMs((uint16_t)socksPort, 8000, &proxyLatency) == 0;
+    NSString *proxyIP = proxyHTTP ? VCExternalIPThroughSOCKS((uint16_t)socksPort) : nil;
+    [quality setObject:(proxyHTTP ? @"Reachable through tunnel" : @"Tunnel request failed")
+                 forKey:@"server"];
+    [quality setObject:(proxyHTTP
+                        ? [NSString stringWithFormat:@"Passed (%d ms)", proxyLatency]
+                        : @"Failed")
+                 forKey:@"http"];
+
+    BOOL systemWorks = VCSystemHTTPProbe();
+    NSString *systemIP = systemWorks ? VCExternalIPThroughSystemHTTP() : nil;
+    BOOL exitsMatch = proxyIP && systemIP && [proxyIP isEqualToString:systemIP];
+    if (exitsMatch) {
+        [quality setObject:@"Routed through VPN" forKey:@"webkit"];
+        [quality setObject:@"Not detected" forKey:@"leak"];
+    } else if (proxyIP && systemIP) {
+        [quality setObject:@"Different network exit" forKey:@"webkit"];
+        [quality setObject:@"Detected" forKey:@"leak"];
+    } else {
+        [quality setObject:(systemWorks ? @"HTTP works; exit not verified" : @"Request failed")
+                     forKey:@"webkit"];
+        [quality setObject:@"Not checked" forKey:@"leak"];
+    }
+
+    if (dnsWorks && proxyHTTP && systemWorks && exitsMatch) {
+        [quality setObject:@"Working through VPN" forKey:@"internet"];
+    } else if (dnsWorks && proxyHTTP && systemWorks && proxyIP && systemIP) {
+        [quality setObject:@"Working with a traffic leak" forKey:@"internet"];
+    } else if (dnsWorks && proxyHTTP && systemWorks) {
+        [quality setObject:@"Working; exit not verified" forKey:@"internet"];
+    } else if (proxyHTTP || systemWorks) {
+        [quality setObject:@"Partially working" forKey:@"internet"];
+    } else {
+        [quality setObject:@"Unavailable" forKey:@"internet"];
+    }
+    return quality;
+}
+
+static NSString *VCDiagnosticValue(NSDictionary *dictionary,
+                                   NSString *key,
+                                   NSString *fallback) {
+    NSString *value = [dictionary objectForKey:key];
+    return [value isKindOfClass:[NSString class]] && [value length] > 0 ? value : fallback;
+}
+
+@implementation DebugVC
+
+- (void)stopRefreshTimer {
+    [_refreshTimer invalidate];
+    [_refreshTimer release];
+    _refreshTimer = nil;
+}
+
+- (void)startRefreshTimer {
+    if (_refreshTimer) return;
+    [self refreshDiagnostics];
+    _refreshTimer = [[NSTimer scheduledTimerWithTimeInterval:2.0
+                                                      target:self
+                                                    selector:@selector(refreshDiagnostics)
+                                                    userInfo:nil
+                                                     repeats:YES] retain];
+}
+
+- (void)applicationEnteredBackground:(NSNotification *)notification {
+    (void)notification;
+    [self stopRefreshTimer];
+}
+
+- (void)applicationBecameActive:(NSNotification *)notification {
+    (void)notification;
+    if (self.view.window) [self startRefreshTimer];
+}
+
+- (NSArray *)combinedEvents {
+    if (_displayEvents) return _displayEvents;
+    _displayEvents = [VCCombinedDiagnosticEvents(_daemonEvents, _appEvents, _localEvents) copy];
+    return _displayEvents;
+}
+
+- (void)diagnosticEventsCleared:(NSNotification *)notification {
+    (void)notification;
+    [_daemonEvents release];
+    _daemonEvents = [[NSArray alloc] init];
+    [_appEvents release];
+    _appEvents = [[NSArray alloc] init];
+    [_localEvents removeAllObjects];
+    [_displayEvents release];
+    _displayEvents = nil;
+    [_tableView reloadData];
+}
+
+- (void)addLocalEvent:(NSString *)message {
+    if (![message isKindOfClass:[NSString class]] || [message length] == 0) return;
+    NSDictionary *last = [_localEvents lastObject];
+    if ([[last objectForKey:@"message"] isEqualToString:message]) return;
+    NSTimeInterval seconds = [[NSDate date] timeIntervalSince1970];
+    [_localEvents addObject:[NSDictionary dictionaryWithObjectsAndKeys:
+                             [NSNumber numberWithLongLong:(long long)(seconds * 1000.0)], @"timestamp",
+                             @"debug", @"source",
+                             message, @"message",
+                             nil]];
+    if ([_localEvents count] > 32) [_localEvents removeObjectAtIndex:0];
+    [_displayEvents release];
+    _displayEvents = nil;
+}
+
+- (void)applyTheme {
+    self.view.backgroundColor = VCBackgroundColor();
+    VCAppearanceApplyNavigationBar(self.navigationController.navigationBar);
+    VCAppearanceApplyStatusBar();
+    VCAppearanceApplyTable(_tableView);
+    _appActivitySwitch.onTintColor = VCAccentColor();
+    [_tableView reloadData];
+    VCAppearanceScheduleVisibleTableHeadersRefresh(_tableView);
+}
+
+- (void)viewDidLoad {
+    [super viewDidLoad];
+    self.title = @"Debug";
+    _localEvents = [[NSMutableArray alloc] init];
+    VCRecordAppEvent(@"ui", @"Debug screen opened", nil);
+    _appEvents = [[[VCAppEventRecorder sharedRecorder] eventsSnapshot] copy];
+    _appActivitySwitch = [[UISwitch alloc] initWithFrame:CGRectZero];
+    [_appActivitySwitch setOn:VCAppActivityLoggingEnabled() animated:NO];
+    [_appActivitySwitch addTarget:self
+                           action:@selector(appActivitySwitchChanged:)
+                 forControlEvents:UIControlEventValueChanged];
+    _tableView = [[UITableView alloc] initWithFrame:self.view.bounds style:UITableViewStyleGrouped];
+    _tableView.dataSource = self;
+    _tableView.delegate = self;
+    _tableView.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
+    [self.view addSubview:_tableView];
+    [[NSNotificationCenter defaultCenter] addObserver:self
+                                             selector:@selector(applicationEnteredBackground:)
+                                                 name:UIApplicationDidEnterBackgroundNotification
+                                               object:nil];
+    [[NSNotificationCenter defaultCenter] addObserver:self
+                                             selector:@selector(applicationBecameActive:)
+                                                 name:UIApplicationDidBecomeActiveNotification
+                                               object:nil];
+    [[NSNotificationCenter defaultCenter] addObserver:self
+                                             selector:@selector(diagnosticEventsCleared:)
+                                                 name:kVCDiagnosticEventsClearedNotification
+                                               object:nil];
+    [self applyTheme];
+}
+
+- (void)appActivitySwitchChanged:(UISwitch *)sender {
+    BOOL enabled = [sender isOn];
+    NSUserDefaults *defaults = [NSUserDefaults standardUserDefaults];
+    [defaults setBool:enabled forKey:kDefaultsDiagnosticAppActivityKey];
+    [defaults synchronize];
+    [[VCAppEventRecorder sharedRecorder] setAppActivityEnabled:enabled];
+    VCRecordAppEvent(@"diagnostics", @"App activity logging changed",
+                     enabled ? @"enabled=1" : @"enabled=0");
+    [_appEvents release];
+    _appEvents = [[[VCAppEventRecorder sharedRecorder] eventsSnapshot] copy];
+    [_displayEvents release];
+    _displayEvents = nil;
+    [_tableView reloadData];
+}
+
+- (void)viewWillAppear:(BOOL)animated {
+    [super viewWillAppear:animated];
+    [self startRefreshTimer];
+}
+
+- (void)viewWillDisappear:(BOOL)animated {
+    [super viewWillDisappear:animated];
+    [self stopRefreshTimer];
+}
+
+- (void)refreshDiagnostics {
+    if (_refreshing) return;
+    _refreshing = YES;
+    [NSThread detachNewThreadSelector:@selector(diagnosticsWorker) toTarget:self withObject:nil];
+}
+
+- (void)diagnosticsWorker {
+    NSAutoreleasePool *pool = [[NSAutoreleasePool alloc] init];
+    NSDictionary *state = VCParseDaemonDiagnostics(SendCommand(@"DIAGNOSTICS\n"));
+    NSArray *events = VCParseDaemonEvents(SendCommand(@"EVENTS\n"));
+    NSDictionary *payload = [NSDictionary dictionaryWithObjectsAndKeys:
+                             state, @"state",
+                             events, @"events",
+                             nil];
+    [self performSelectorOnMainThread:@selector(diagnosticsFinished:)
+                           withObject:payload
+                        waitUntilDone:NO];
+    [pool drain];
+}
+
+- (void)diagnosticsFinished:(NSDictionary *)payload {
+    _refreshing = NO;
+    NSDictionary *newState = [payload objectForKey:@"state"];
+    NSArray *newEvents = [payload objectForKey:@"events"];
+    NSArray *newAppEvents = [[VCAppEventRecorder sharedRecorder] eventsSnapshot];
+    BOOL hadDaemonState = _daemonState != nil;
+    BOOL stateChanged = ![_daemonState isEqual:newState];
+    BOOL eventsChanged = ![_daemonEvents isEqual:newEvents];
+    BOOL appEventsChanged = ![_appEvents isEqual:newAppEvents];
+    [_daemonState release];
+    _daemonState = [newState copy];
+    [_daemonEvents release];
+    _daemonEvents = [newEvents copy];
+    [_appEvents release];
+    _appEvents = [newAppEvents copy];
+    if (eventsChanged || appEventsChanged) {
+        [_displayEvents release];
+        _displayEvents = nil;
+    }
+
+    NSString *network = VCActiveNetworkDescription();
+    BOOL networkChanged = !_lastNetwork || ![_lastNetwork isEqualToString:network];
+    BOOL hadNetworkState = _lastNetwork != nil;
+    if (networkChanged) {
+        BOOL changedNetwork = _lastNetwork != nil;
+        if (_lastNetwork && ![_lastNetwork isEqualToString:@"No active route"] &&
+            ![_lastNetwork isEqualToString:@"Unknown"]) {
+            NSString *oldName = [_lastNetwork rangeOfString:@"Cellular"].location != NSNotFound
+                ? @"Cellular network"
+                : @"Wi-Fi";
+            [self addLocalEvent:[NSString stringWithFormat:@"%@ disconnected", oldName]];
+        }
+        if (![network isEqualToString:@"No active route"] && ![network isEqualToString:@"Unknown"]) {
+            [self addLocalEvent:[NSString stringWithFormat:@"%@ active", network]];
+        } else if ([network isEqualToString:@"No active route"]) {
+            [self addLocalEvent:@"No active network route"];
+        }
+        [_lastNetwork release];
+        _lastNetwork = [network copy];
+        if (changedNetwork && [[_daemonState objectForKey:@"connected"] boolValue]) {
+            if ([[_daemonState objectForKey:@"pf_routing"] isEqualToString:@"active"]) {
+                [self addLocalEvent:@"PF routing verified after network change"];
+            }
+            if ([[_daemonState objectForKey:@"pac"] isEqualToString:@"active"]) {
+                [self addLocalEvent:@"PAC verified after network change"];
+            }
+        }
+    }
+
+    if ((hadDaemonState && stateChanged) || (hadNetworkState && networkChanged)) {
+        _qualityGeneration++;
+        [_qualityState release];
+        _qualityState = nil;
+    }
+
+    if (stateChanged || eventsChanged || appEventsChanged || networkChanged) [_tableView reloadData];
+    if (!_qualityState && !_checking && [[_daemonState objectForKey:@"connected"] boolValue]) {
+        [self runQualityCheck];
+    }
+}
+
+- (void)runQualityCheck {
+    if (_checking || _reporting) return;
+    if (!_daemonState || [_daemonState objectForKey:@"error"] ||
+        ![[_daemonState objectForKey:@"connected"] boolValue]) {
+        BOOL loading = _daemonState == nil;
+        BOOL unavailable = [_daemonState objectForKey:@"error"] != nil;
+        VCRecordAppEvent(@"diagnostics", @"Connection check blocked",
+                         loading ? @"reason=status_loading" :
+                         (unavailable ? @"reason=daemon_unavailable" : @"reason=vpn_disconnected"));
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wdeprecated-declarations"
+        UIAlertView *alert = [[[UIAlertView alloc]
+                               initWithTitle:(loading ? @"Please Wait" :
+                                              (unavailable ? @"Status Unavailable" : @"VPN Is Disconnected"))
+                               message:(loading
+                                        ? @"Connection status is still loading. Try again in a moment."
+                                        : (unavailable
+                                           ? @"The VPN daemon status could not be read."
+                                           : @"Connect to a configuration before running the connection check."))
+                               delegate:nil
+                               cancelButtonTitle:@"OK"
+                               otherButtonTitles:nil] autorelease];
+        [alert show];
+#pragma clang diagnostic pop
+        return;
+    }
+    VCRecordAppEvent(@"diagnostics", @"Connection check started", nil);
+    _checking = YES;
+    [_tableView reloadData];
+    NSDictionary *input = [NSDictionary dictionaryWithObjectsAndKeys:
+                           (_daemonState ? _daemonState : [NSDictionary dictionary]), @"state",
+                           [NSNumber numberWithUnsignedInteger:_qualityGeneration], @"generation",
+                           nil];
+    [NSThread detachNewThreadSelector:@selector(qualityWorker:) toTarget:self withObject:input];
+}
+
+- (void)qualityWorker:(NSDictionary *)input {
+    NSAutoreleasePool *pool = [[NSAutoreleasePool alloc] init];
+    NSDictionary *state = [input objectForKey:@"state"];
+    NSDictionary *quality = VCRunConnectionQualityChecks(state);
+    NSDictionary *output = [NSDictionary dictionaryWithObjectsAndKeys:
+                            quality, @"quality",
+                            [input objectForKey:@"generation"], @"generation",
+                            nil];
+    [self performSelectorOnMainThread:@selector(qualityFinished:)
+                           withObject:output
+                        waitUntilDone:NO];
+    [pool drain];
+}
+
+- (void)qualityFinished:(NSDictionary *)output {
+    _checking = NO;
+    if ([[output objectForKey:@"generation"] unsignedIntegerValue] != _qualityGeneration) {
+        if ([[_daemonState objectForKey:@"connected"] boolValue]) {
+            [self runQualityCheck];
+        } else {
+            [_tableView reloadData];
+        }
+        return;
+    }
+    NSDictionary *quality = [output objectForKey:@"quality"];
+    [_qualityState release];
+    _qualityState = [quality copy];
+    NSString *leak = [_qualityState objectForKey:@"leak"];
+    if ([leak isEqualToString:@"Detected"]) {
+        [self addLocalEvent:@"Traffic leak detected: system and tunnel exits differ"];
+    } else if ([leak isEqualToString:@"Not detected"]) {
+        [self addLocalEvent:@"External IP confirmed through VPN"];
+    } else if ([[[_qualityState objectForKey:@"internet"] lowercaseString] hasPrefix:@"working"]) {
+        [self addLocalEvent:@"Connection works; external IP comparison unavailable"];
+    } else {
+        [self addLocalEvent:@"Connection quality check could not be completed"];
+    }
+    VCRecordAppEvent(@"diagnostics", @"Connection check finished",
+                     [NSString stringWithFormat:@"core=%@ dns=%@ proxy=%@ webkit=%@ leak=%@ internet=%@",
+                      VCDiagnosticValue(_qualityState, @"core", @"unknown"),
+                      VCDiagnosticValue(_qualityState, @"dns", @"unknown"),
+                      VCDiagnosticValue(_qualityState, @"http", @"unknown"),
+                      VCDiagnosticValue(_qualityState, @"webkit", @"unknown"),
+                      VCDiagnosticValue(_qualityState, @"leak", @"unknown"),
+                      VCDiagnosticValue(_qualityState, @"internet", @"unknown")]);
+    [_tableView reloadData];
+}
+
+- (NSString *)buildReportWithState:(NSDictionary *)state
+                            quality:(NSDictionary *)quality
+                             events:(NSArray *)events {
+    NSDateFormatter *formatter = [[[NSDateFormatter alloc] init] autorelease];
+    formatter.dateFormat = @"yyyy-MM-dd HH:mm:ss ZZZZ";
+    NSMutableString *report = [NSMutableString string];
+    [report appendString:@"vless-core diagnostic report\n"];
+    [report appendFormat:@"Generated: %@\n\n", [formatter stringFromDate:[NSDate date]]];
+    [report appendString:@"Privacy: configuration URIs, subscription URLs, server addresses, external IP addresses, UUIDs, credentials and keys are omitted.\n\n"];
+    [report appendString:@"Application\n-----------\n"];
+    [report appendFormat:@"Version: %@ (%@)\n", AppShortVersion(), AppBuildVersion()];
+    [report appendFormat:@"Device: %@ (%@)\n", DeviceModelName(), VCMachineIdentifier()];
+    [report appendFormat:@"iOS: %@\n", [[UIDevice currentDevice] systemVersion]];
+#if defined(__LP64__)
+    [report appendString:@"Application architecture: arm64\n"];
+#else
+    [report appendString:@"Application architecture: armv7\n"];
+#endif
+    [report appendFormat:@"App activity logging: %@\n",
+     VCAppActivityLoggingEnabled() ? @"enabled" : @"disabled"];
+    [report appendFormat:@"Daemon architecture: %@\n", VCDiagnosticValue(state, @"architecture", @"unknown")];
+    [report appendFormat:@"Active network: %@\n\n", VCActiveNetworkDescription()];
+
+    [report appendString:@"Routing and helpers\n-------------------\n"];
+    [report appendFormat:@"Connection: %@\n", [[state objectForKey:@"connected"] boolValue] ? @"connected" : @"disconnected"];
+    [report appendFormat:@"Mode: %@\n", VCDiagnosticValue(state, @"mode", @"unknown")];
+    [report appendFormat:@"PF engine: %@\n", VCDiagnosticValue(state, @"pf", @"unknown")];
+    [report appendFormat:@"PF routing: %@\n", VCDiagnosticValue(state, @"pf_routing", @"unknown")];
+    [report appendFormat:@"PAC: %@\n", VCDiagnosticValue(state, @"pac", @"unknown")];
+    [report appendFormat:@"Core helper: %@\n", VCDiagnosticValue(state, @"core", @"unknown")];
+    [report appendFormat:@"Traffic redirector: %@\n", VCDiagnosticValue(state, @"redsocks", @"unknown")];
+    [report appendFormat:@"DNS helper: %@\n\n", VCDiagnosticValue(state, @"dns", @"unknown")];
+
+    [report appendString:@"Connection quality\n------------------\n"];
+    NSArray *qualityRows = [NSArray arrayWithObjects:
+                            [NSArray arrayWithObjects:@"Server path", @"server", nil],
+                            [NSArray arrayWithObjects:@"Core", @"core", nil],
+                            [NSArray arrayWithObjects:@"DNS", @"dns", nil],
+                            [NSArray arrayWithObjects:@"HTTP through proxy", @"http", nil],
+                            [NSArray arrayWithObjects:@"Safari/WebKit path", @"webkit", nil],
+                            [NSArray arrayWithObjects:@"Traffic leak", @"leak", nil],
+                            [NSArray arrayWithObjects:@"Internet", @"internet", nil],
+                            nil];
+    for (NSArray *row in qualityRows) {
+        [report appendFormat:@"%@: %@\n",
+         [row objectAtIndex:0],
+         VCDiagnosticValue(quality, [row objectAtIndex:1], @"not checked")];
+    }
+
+    [report appendString:@"\nPrivacy-safe activity history\n-----------------------------\n"];
+    if ([events count] == 0) {
+        [report appendString:@"No events recorded.\n"];
+    } else {
+        for (NSDictionary *event in events) {
+            [report appendFormat:@"%@ — %@\n",
+             VCEventMetadata(event),
+             VCEventMessage(event)];
+        }
+    }
+    return report;
+}
+
+- (void)createReport {
+    if (_reporting || _checking) return;
+    VCRecordAppEvent(@"diagnostics", @"Diagnostic report requested", nil);
+    _reporting = YES;
+    [_tableView reloadSections:[NSIndexSet indexSetWithIndex:VCDebugSectionDiagnostics]
+              withRowAnimation:UITableViewRowAnimationNone];
+    [NSThread detachNewThreadSelector:@selector(reportWorker) toTarget:self withObject:nil];
+}
+
+- (void)reportWorker {
+    NSAutoreleasePool *pool = [[NSAutoreleasePool alloc] init];
+    NSDictionary *state = VCParseDaemonDiagnostics(SendCommand(@"DIAGNOSTICS\n"));
+    NSArray *events = VCParseDaemonEvents(SendCommand(@"EVENTS\n"));
+    NSDictionary *quality = VCRunConnectionQualityChecks(state);
+    NSArray *appEvents = [[VCAppEventRecorder sharedRecorder] eventsSnapshot];
+    NSDictionary *payload = [NSDictionary dictionaryWithObjectsAndKeys:
+                             state, @"state",
+                             events, @"events",
+                             quality, @"quality",
+                             appEvents, @"app_events",
+                             nil];
+    [self performSelectorOnMainThread:@selector(reportFinished:)
+                           withObject:payload
+                        waitUntilDone:NO];
+    [pool drain];
+}
+
+- (void)reportFinished:(NSDictionary *)payload {
+    _reporting = NO;
+    NSDictionary *reportState = [payload objectForKey:@"state"];
+    NSDictionary *reportQuality = [payload objectForKey:@"quality"];
+    NSArray *events = VCCombinedDiagnosticEvents([payload objectForKey:@"events"],
+                                                  [payload objectForKey:@"app_events"],
+                                                  _localEvents);
+    NSString *report = [self buildReportWithState:reportState
+                                          quality:reportQuality
+                                           events:events];
+    NSString *path = [NSTemporaryDirectory() stringByAppendingPathComponent:
+                      @"vless-core-diagnostics.txt"];
+    NSError *error = nil;
+    BOOL written = [report writeToFile:path
+                            atomically:YES
+                              encoding:NSUTF8StringEncoding
+                                 error:&error];
+    if (!written) {
+        VCRecordAppEvent(@"diagnostics", @"Diagnostic report failed", @"stage=file_write");
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wdeprecated-declarations"
+        UIAlertView *alert = [[[UIAlertView alloc] initWithTitle:@"Report Failed"
+                                                         message:(error ? [error localizedDescription] : @"Unable to write the report.")
+                                                        delegate:nil
+                                               cancelButtonTitle:@"OK"
+                                               otherButtonTitles:nil] autorelease];
+        [alert show];
+#pragma clang diagnostic pop
+        [_tableView reloadData];
+        return;
+    }
+    (void)chmod([path fileSystemRepresentation], 0600);
+    VCRecordAppEvent(@"diagnostics", @"Diagnostic report created",
+                     [NSString stringWithFormat:@"events=%lu bytes=%lu",
+                      (unsigned long)[events count],
+                      (unsigned long)[report lengthOfBytesUsingEncoding:NSUTF8StringEncoding]]);
+
+    [_documentController release];
+    _documentController = [[UIDocumentInteractionController interactionControllerWithURL:
+                            [NSURL fileURLWithPath:path]] retain];
+    _documentController.delegate = self;
+    _documentController.name = @"vless-core diagnostics";
+    CGRect anchor = CGRectMake(CGRectGetMidX(self.view.bounds),
+                               CGRectGetMidY(self.view.bounds),
+                               1.0f,
+                               1.0f);
+    if (![_documentController presentOptionsMenuFromRect:anchor
+                                                  inView:self.view
+                                                animated:YES]) {
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wdeprecated-declarations"
+        UIAlertView *alert = [[[UIAlertView alloc] initWithTitle:@"Report Ready"
+                                                         message:path
+                                                        delegate:nil
+                                               cancelButtonTitle:@"OK"
+                                               otherButtonTitles:nil] autorelease];
+        [alert show];
+#pragma clang diagnostic pop
+    }
+    [_tableView reloadData];
+}
+
+- (UIViewController *)documentInteractionControllerViewControllerForPreview:(UIDocumentInteractionController *)controller {
+    (void)controller;
+    return self;
+}
+
+- (NSInteger)numberOfSectionsInTableView:(UITableView *)tableView {
+    (void)tableView;
+    return VCDebugSectionCount;
+}
+
+- (NSInteger)tableView:(UITableView *)tableView numberOfRowsInSection:(NSInteger)section {
+    (void)tableView;
+    if (section == VCDebugSectionLiveState) return 6;
+    if (section == VCDebugSectionConnectionQuality) return 7;
+    if (section == VCDebugSectionActivityLogging) return 1;
+    if (section == VCDebugSectionRecentActivity) {
+        NSInteger count = (NSInteger)[[self combinedEvents] count];
+        return count == 0 ? 1 : MIN((NSInteger)5, count) + 1;
+    }
+    return 2;
+}
+
+- (NSString *)tableView:(UITableView *)tableView titleForHeaderInSection:(NSInteger)section {
+    (void)tableView;
+    if (section == VCDebugSectionLiveState) return @"Live state";
+    if (section == VCDebugSectionConnectionQuality) return @"Connection quality";
+    if (section == VCDebugSectionActivityLogging) return @"Activity logging";
+    if (section == VCDebugSectionRecentActivity) return @"Recent activity";
+    return @"Diagnostics";
+}
+
+- (NSString *)tableView:(UITableView *)tableView titleForFooterInSection:(NSInteger)section {
+    (void)tableView;
+    if (section == VCDebugSectionActivityLogging) {
+        return @"Off by default. Connection, network diagnostics, ping and subscription update events are always recorded.";
+    }
+    if (section == VCDebugSectionRecentActivity) {
+        return @"Up to 250 recent events are kept only on this device. URLs, IP addresses, UUIDs, names and secrets are omitted. Nothing is sent automatically.";
+    }
+    return nil;
+}
+
+- (UIView *)tableView:(UITableView *)tableView viewForHeaderInSection:(NSInteger)section {
+    UIView *header = [[[UIView alloc] initWithFrame:
+                       CGRectMake(0.0f, 0.0f, tableView.bounds.size.width, 32.0f)] autorelease];
+    header.backgroundColor = [UIColor clearColor];
+    UILabel *label = [[[UILabel alloc] initWithFrame:
+                       CGRectMake(18.0f, 0.0f, tableView.bounds.size.width - 36.0f, 32.0f)] autorelease];
+    label.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
+    label.backgroundColor = [UIColor clearColor];
+    label.font = [UIFont boldSystemFontOfSize:17.0f];
+    label.text = [self tableView:tableView titleForHeaderInSection:section];
+    [header addSubview:label];
+    VCAppearanceApplyHeaderView(header);
+    return header;
+}
+
+- (CGFloat)tableView:(UITableView *)tableView heightForFooterInSection:(NSInteger)section {
+    (void)tableView;
+    if (section == VCDebugSectionActivityLogging) return 64.0f;
+    if (section == VCDebugSectionRecentActivity) return 82.0f;
+    return 18.0f;
+}
+
+- (UIView *)tableView:(UITableView *)tableView viewForFooterInSection:(NSInteger)section {
+    if (section != VCDebugSectionActivityLogging &&
+        section != VCDebugSectionRecentActivity) return nil;
+    CGFloat height = [self tableView:tableView heightForFooterInSection:section];
+    UIView *footer = [[[UIView alloc] initWithFrame:
+                       CGRectMake(0.0f, 0.0f, tableView.bounds.size.width, height)] autorelease];
+    footer.backgroundColor = [UIColor clearColor];
+    UILabel *label = [[[UILabel alloc] initWithFrame:
+                       CGRectMake(18.0f, 3.0f, tableView.bounds.size.width - 36.0f, height - 6.0f)] autorelease];
+    label.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
+    label.backgroundColor = [UIColor clearColor];
+    label.font = [UIFont systemFontOfSize:13.0f];
+    label.numberOfLines = 0;
+    label.lineBreakMode = NSLineBreakByWordWrapping;
+    label.text = [self tableView:tableView titleForFooterInSection:section];
+    [footer addSubview:label];
+    VCAppearanceApplyHeaderView(footer);
+    return footer;
+}
+
+- (NSString *)qualityValueForRow:(NSInteger)row {
+    if (_checking) return @"Checking...";
+    NSArray *keys = [NSArray arrayWithObjects:@"server", @"core", @"dns", @"http", @"webkit", @"leak", @"internet", nil];
+    return VCDiagnosticValue(_qualityState, [keys objectAtIndex:row], @"Not checked");
+}
+
+- (UIColor *)colorForStatus:(NSString *)status {
+    NSString *lower = [status lowercaseString];
+    if ([lower rangeOfString:@"leak"].location != NSNotFound &&
+        [lower rangeOfString:@"not detected"].location == NSNotFound) {
+        return VCErrorColor();
+    }
+    if ([lower hasPrefix:@"not detected"] ||
+        [lower hasPrefix:@"active"] ||
+        [lower hasPrefix:@"enabled"] ||
+        [lower hasPrefix:@"connected"] ||
+        [lower hasPrefix:@"running"] ||
+        [lower hasPrefix:@"reachable"] ||
+        [lower hasPrefix:@"resolved"] ||
+        [lower hasPrefix:@"passed"] ||
+        [lower hasPrefix:@"routed"] ||
+        [lower hasPrefix:@"working"]) {
+        return VCSuccessColor();
+    }
+    if ([lower hasPrefix:@"error"] ||
+        [lower hasPrefix:@"missing"] ||
+        [lower hasPrefix:@"unavailable"] ||
+        [lower hasPrefix:@"failed"] ||
+        [lower hasPrefix:@"tunnel request failed"] ||
+        [lower hasPrefix:@"resolution failed"] ||
+        [lower hasPrefix:@"different"] ||
+        [lower isEqualToString:@"detected"]) {
+        return VCErrorColor();
+    }
+    return VCSecondaryTextColor();
+}
+
+- (UITableViewCell *)statusCellInTable:(UITableView *)tableView
+                                 title:(NSString *)title
+                                detail:(NSString *)detail {
+    static NSString *identifier = @"DebugStatusCell";
+    UITableViewCell *cell = [tableView dequeueReusableCellWithIdentifier:identifier];
+    if (!cell) {
+        cell = [[[UITableViewCell alloc] initWithStyle:UITableViewCellStyleSubtitle
+                                      reuseIdentifier:identifier] autorelease];
+    }
+    cell.selectionStyle = UITableViewCellSelectionStyleNone;
+    cell.accessoryType = UITableViewCellAccessoryNone;
+    cell.accessoryView = nil;
+    cell.textLabel.text = title;
+    cell.detailTextLabel.text = detail;
+    VCAppearanceApplyCell(cell);
+    cell.textLabel.textColor = VCPrimaryTextColor();
+    cell.detailTextLabel.textColor = [self colorForStatus:detail];
+    return cell;
+}
+
+- (UITableViewCell *)tableView:(UITableView *)tableView cellForRowAtIndexPath:(NSIndexPath *)indexPath {
+    if (indexPath.section == VCDebugSectionLiveState) {
+        NSString *title = nil;
+        NSString *detail = nil;
+        NSString *error = [_daemonState objectForKey:@"error"];
+        if (indexPath.row == 0) {
+            title = @"Daemon control";
+            detail = !_daemonState ? @"Loading..." : (error ? error : @"Online");
+        } else if (indexPath.row == 1) {
+            title = @"VPN connection";
+            detail = error ? @"Unavailable" : ([[_daemonState objectForKey:@"connected"] boolValue] ? @"Connected" : @"Disconnected");
+        } else if (indexPath.row == 2) {
+            title = @"Active network";
+            detail = _lastNetwork ? _lastNetwork : VCActiveNetworkDescription();
+        } else if (indexPath.row == 3) {
+            title = @"PF routing";
+            detail = error ? @"Unavailable" : [NSString stringWithFormat:@"%@ (engine: %@)",
+                                                VCDiagnosticValue(_daemonState, @"pf_routing", @"unknown"),
+                                                VCDiagnosticValue(_daemonState, @"pf", @"unknown")];
+        } else if (indexPath.row == 4) {
+            title = @"PAC for Safari/WebKit";
+            NSString *pac = VCDiagnosticValue(_daemonState, @"pac", @"unknown");
+            detail = error ? @"Unavailable" : ([pac isEqualToString:@"not_required"] ? @"Not required on armv7" : [pac capitalizedString]);
+        } else {
+            title = @"Helper processes";
+            if (error) {
+                detail = @"Unavailable";
+            } else {
+                NSString *core = VCDiagnosticValue(_daemonState, @"core", @"unknown");
+                NSString *redirector = VCDiagnosticValue(_daemonState, @"redsocks", @"unknown");
+                NSString *dns = VCDiagnosticValue(_daemonState, @"dns", @"unknown");
+                detail = [core isEqualToString:@"running"] &&
+                         [redirector isEqualToString:@"running"] &&
+                         [dns isEqualToString:@"running"]
+                    ? @"All running"
+                    : [NSString stringWithFormat:@"core %@ · redirector %@ · DNS %@",
+                       core, redirector, dns];
+            }
+        }
+        return [self statusCellInTable:tableView title:title detail:detail];
+    }
+
+    if (indexPath.section == VCDebugSectionConnectionQuality) {
+        NSArray *titles = [NSArray arrayWithObjects:
+                           @"Server path", @"Core listener", @"DNS", @"HTTP through proxy",
+                           @"Safari/WebKit path", @"Traffic leak", @"Internet", nil];
+        return [self statusCellInTable:tableView
+                                 title:[titles objectAtIndex:indexPath.row]
+                                detail:[self qualityValueForRow:indexPath.row]];
+    }
+
+    if (indexPath.section == VCDebugSectionActivityLogging) {
+        static NSString *identifier = @"DebugAppActivityCell";
+        UITableViewCell *cell = [tableView dequeueReusableCellWithIdentifier:identifier];
+        if (!cell) {
+            cell = [[[UITableViewCell alloc] initWithStyle:UITableViewCellStyleSubtitle
+                                          reuseIdentifier:identifier] autorelease];
+        }
+        cell.selectionStyle = UITableViewCellSelectionStyleNone;
+        cell.accessoryType = UITableViewCellAccessoryNone;
+        cell.accessoryView = _appActivitySwitch;
+        cell.textLabel.text = @"Record app activity";
+        cell.detailTextLabel.text = @"UI, imports, settings and storage";
+        VCAppearanceApplyCell(cell);
+        cell.textLabel.textColor = VCPrimaryTextColor();
+        cell.detailTextLabel.textColor = VCSecondaryTextColor();
+        return cell;
+    }
+
+    if (indexPath.section == VCDebugSectionRecentActivity) {
+        NSArray *events = [self combinedEvents];
+        NSInteger recentCount = MIN((NSInteger)5, (NSInteger)[events count]);
+        BOOL viewAllRow = [events count] > 0 && indexPath.row == recentCount;
+        static NSString *identifier = @"DebugEventCell";
+        static NSString *viewAllIdentifier = @"DebugViewAllEventsCell";
+        NSString *reuseIdentifier = viewAllRow ? viewAllIdentifier : identifier;
+        UITableViewCell *cell = [tableView dequeueReusableCellWithIdentifier:reuseIdentifier];
+        if (!cell) {
+            cell = [[[UITableViewCell alloc] initWithStyle:UITableViewCellStyleSubtitle
+                                          reuseIdentifier:reuseIdentifier] autorelease];
+        }
+        if (viewAllRow) {
+            cell.selectionStyle = UITableViewCellSelectionStyleBlue;
+            cell.textLabel.text = @"View all events";
+            cell.detailTextLabel.text = [NSString stringWithFormat:@"%u recorded", (unsigned)[events count]];
+            cell.accessoryType = UITableViewCellAccessoryNone;
+            cell.accessoryView = VCCreateDisclosureAccessoryView();
+            cell.textLabel.numberOfLines = 1;
+            cell.detailTextLabel.numberOfLines = 1;
+        } else if ([events count] == 0) {
+            cell.selectionStyle = UITableViewCellSelectionStyleNone;
+            cell.accessoryType = UITableViewCellAccessoryNone;
+            cell.accessoryView = nil;
+            cell.textLabel.text = @"No events recorded";
+            cell.detailTextLabel.text = @"Privacy-safe user and system actions will appear here";
+            cell.textLabel.numberOfLines = 2;
+            cell.detailTextLabel.numberOfLines = 2;
+        } else {
+            cell.selectionStyle = UITableViewCellSelectionStyleNone;
+            cell.accessoryType = UITableViewCellAccessoryNone;
+            cell.accessoryView = nil;
+            NSDictionary *event = [events objectAtIndex:[events count] - 1 - indexPath.row];
+            cell.textLabel.text = VCEventMessage(event);
+            cell.detailTextLabel.text = VCEventMetadata(event);
+            cell.textLabel.numberOfLines = 2;
+            cell.detailTextLabel.numberOfLines = 2;
+        }
+        VCAppearanceApplyCell(cell);
+        cell.textLabel.textColor = VCPrimaryTextColor();
+        cell.detailTextLabel.textColor = VCSecondaryTextColor();
+        return cell;
+    }
+
+    static NSString *identifier = @"DebugActionCell";
+    UITableViewCell *cell = [tableView dequeueReusableCellWithIdentifier:identifier];
+    if (!cell) {
+        cell = [[[UITableViewCell alloc] initWithStyle:UITableViewCellStyleSubtitle
+                                      reuseIdentifier:identifier] autorelease];
+    }
+    BOOL operationInProgress = _checking || _reporting;
+    BOOL currentOperation = indexPath.row == 0 ? _checking : _reporting;
+    cell.selectionStyle = operationInProgress
+        ? UITableViewCellSelectionStyleNone
+        : UITableViewCellSelectionStyleBlue;
+    cell.textLabel.text = indexPath.row == 0 ? @"Run connection check" : @"Create diagnostic report";
+    cell.detailTextLabel.text = indexPath.row == 0
+        ? @"Test DNS, proxy HTTP and the Safari/WebKit path"
+        : @"Export one privacy-safe text file";
+    cell.accessoryType = UITableViewCellAccessoryNone;
+    if (currentOperation) {
+        UIActivityIndicatorViewStyle style = VCAppearanceIsDark()
+            ? UIActivityIndicatorViewStyleWhite
+            : UIActivityIndicatorViewStyleGray;
+        UIActivityIndicatorView *spinner = [[[UIActivityIndicatorView alloc]
+                                             initWithActivityIndicatorStyle:style] autorelease];
+        [spinner startAnimating];
+        cell.accessoryView = spinner;
+    } else if (operationInProgress) {
+        cell.accessoryView = nil;
+    } else {
+        cell.accessoryView = VCCreateDisclosureAccessoryView();
+    }
+    VCAppearanceApplyCell(cell);
+    cell.textLabel.textColor = VCPrimaryTextColor();
+    cell.detailTextLabel.textColor = VCSecondaryTextColor();
+    return cell;
+}
+
+- (void)tableView:(UITableView *)tableView didSelectRowAtIndexPath:(NSIndexPath *)indexPath {
+    [tableView deselectRowAtIndexPath:indexPath animated:YES];
+    if (indexPath.section == VCDebugSectionRecentActivity) {
+        NSArray *events = [self combinedEvents];
+        NSInteger recentCount = MIN((NSInteger)5, (NSInteger)[events count]);
+        if ([events count] > 0 && indexPath.row == recentCount) {
+            VCRecordAppEvent(@"ui", @"Full diagnostic event history opened", nil);
+            DiagnosticEventsVC *controller = [[[DiagnosticEventsVC alloc] initWithEvents:events] autorelease];
+            [self.navigationController pushViewController:controller animated:YES];
+        }
+        return;
+    }
+    if (indexPath.section != VCDebugSectionDiagnostics) return;
+    if (indexPath.row == 0) [self runQualityCheck];
+    else [self createReport];
+}
+
+- (CGFloat)tableView:(UITableView *)tableView heightForRowAtIndexPath:(NSIndexPath *)indexPath {
+    (void)tableView;
+    if (indexPath.section == VCDebugSectionRecentActivity) {
+        NSInteger eventCount = (NSInteger)[[self combinedEvents] count];
+        NSInteger recentCount = MIN((NSInteger)5, eventCount);
+        BOOL viewAllRow = eventCount > 0 && indexPath.row == recentCount;
+        return viewAllRow ? 48.0f : 62.0f;
+    }
+    return 48.0f;
+}
+
+- (void)tableView:(UITableView *)tableView willDisplayCell:(UITableViewCell *)cell forRowAtIndexPath:(NSIndexPath *)indexPath {
+    (void)tableView;
+    VCAppearanceApplyCell(cell);
+    cell.textLabel.textColor = VCPrimaryTextColor();
+    if (indexPath.section == VCDebugSectionLiveState ||
+        indexPath.section == VCDebugSectionConnectionQuality) {
+        cell.detailTextLabel.textColor = [self colorForStatus:cell.detailTextLabel.text];
+    } else {
+        cell.detailTextLabel.textColor = VCSecondaryTextColor();
+    }
+}
+
+- (void)tableView:(UITableView *)tableView willDisplayHeaderView:(UIView *)view forSection:(NSInteger)section {
+    (void)tableView;
+    (void)section;
+    VCAppearanceApplyHeaderView(view);
+}
+
+- (void)tableView:(UITableView *)tableView willDisplayFooterView:(UIView *)view forSection:(NSInteger)section {
+    (void)tableView;
+    (void)section;
+    VCAppearanceApplyHeaderView(view);
+}
+
+- (BOOL)shouldAutorotateToInterfaceOrientation:(UIInterfaceOrientation)interfaceOrientation {
+    return IsPadDevice() ? (UIInterfaceOrientationIsPortrait(interfaceOrientation) ||
+                            UIInterfaceOrientationIsLandscape(interfaceOrientation))
+                         : interfaceOrientation == UIInterfaceOrientationPortrait;
+}
+
+- (BOOL)shouldAutorotate {
+    return IsPadDevice();
+}
+
+- (UIInterfaceOrientationMask)supportedInterfaceOrientations {
+    return IsPadDevice() ? UIInterfaceOrientationMaskAllButUpsideDown
+                         : UIInterfaceOrientationMaskPortrait;
+}
+
+- (void)dealloc {
+    [[NSNotificationCenter defaultCenter] removeObserver:self];
+    [self stopRefreshTimer];
+    _documentController.delegate = nil;
+    [_documentController release];
+    [_appActivitySwitch release];
+    [_tableView release];
+    [_daemonState release];
+    [_daemonEvents release];
+    [_appEvents release];
+    [_localEvents release];
+    [_displayEvents release];
+    [_qualityState release];
+    [_lastNetwork release];
+    [super dealloc];
+}
+
+@end
+
 @implementation SettingsVC
 @synthesize autoUpdate = _autoUpdate;
 @synthesize preserveCustomNames = _preserveCustomNames;
@@ -4890,6 +6779,7 @@ commitEditingStyle:(UITableViewCellEditingStyle)editingStyle
 @synthesize delegate = _delegate;
 
 - (void)closePressed {
+    VCRecordAppEvent(@"ui", @"Settings closed", nil);
     [self dismissViewControllerAnimated:YES completion:nil];
 }
 
@@ -5112,7 +7002,7 @@ commitEditingStyle:(UITableViewCellEditingStyle)editingStyle
 
 - (NSInteger)numberOfSectionsInTableView:(UITableView *)tableView {
     (void)tableView;
-    return 5;
+    return 6;
 }
 
 - (NSInteger)tableView:(UITableView *)tableView numberOfRowsInSection:(NSInteger)section {
@@ -5120,6 +7010,7 @@ commitEditingStyle:(UITableViewCellEditingStyle)editingStyle
     if (section == 0) return 3;
     if (section == 1) return 3;
     if (section == 2 || section == 3) return 2;
+    if (section == 4) return 1;
     return 4;
 }
 
@@ -5129,6 +7020,7 @@ commitEditingStyle:(UITableViewCellEditingStyle)editingStyle
     if (section == 1) return @"Network";
     if (section == 2) return @"Appearance";
     if (section == 3) return @"Updates";
+    if (section == 4) return @"Debug";
     return @"About";
 }
 
@@ -5225,15 +7117,18 @@ commitEditingStyle:(UITableViewCellEditingStyle)editingStyle
         return @"Check for Updates";
     }
     if (indexPath.section == 4 && indexPath.row == 0) {
+        return @"Debug and diagnostics";
+    }
+    if (indexPath.section == 5 && indexPath.row == 0) {
         return @"About vless-core";
     }
-    if (indexPath.section == 4 && indexPath.row == 1) {
+    if (indexPath.section == 5 && indexPath.row == 1) {
         return @"Credits";
     }
-    if (indexPath.section == 4 && indexPath.row == 2) {
+    if (indexPath.section == 5 && indexPath.row == 2) {
         return @"FAQ";
     }
-    if (indexPath.section == 4 && indexPath.row == 3) {
+    if (indexPath.section == 5 && indexPath.row == 3) {
         return @"Project on GitHub";
     }
     return @"";
@@ -5271,15 +7166,18 @@ commitEditingStyle:(UITableViewCellEditingStyle)editingStyle
         return [self updateCheckDetailText];
     }
     if (indexPath.section == 4 && indexPath.row == 0) {
+        return @"Live state, connection tests, events and reports";
+    }
+    if (indexPath.section == 5 && indexPath.row == 0) {
         return @"Version and core binary info";
     }
-    if (indexPath.section == 4 && indexPath.row == 1) {
+    if (indexPath.section == 5 && indexPath.row == 1) {
         return @"Dependencies, licenses and special thanks";
     }
-    if (indexPath.section == 4 && indexPath.row == 2) {
+    if (indexPath.section == 5 && indexPath.row == 2) {
         return @"Common questions and quick answers";
     }
-    if (indexPath.section == 4 && indexPath.row == 3) {
+    if (indexPath.section == 5 && indexPath.row == 3) {
         return @"github.com/notfence/vless-core-app";
     }
     return @"";
@@ -5417,6 +7315,21 @@ commitEditingStyle:(UITableViewCellEditingStyle)editingStyle
     }
 
     if (indexPath.section == 4 && indexPath.row == 0) {
+        static NSString *kDebugCellId = @"SettingsDebugCell";
+        UITableViewCell *cell = [tableView dequeueReusableCellWithIdentifier:kDebugCellId];
+        if (!cell) {
+            cell = [[[UITableViewCell alloc] initWithStyle:UITableViewCellStyleSubtitle reuseIdentifier:kDebugCellId] autorelease];
+        }
+        cell.selectionStyle = UITableViewCellSelectionStyleBlue;
+        cell.accessoryType = UITableViewCellAccessoryNone;
+        cell.accessoryView = VCCreateDisclosureAccessoryView();
+        [self applySettingsMarqueesToCell:cell
+                                    title:@"Debug and diagnostics"
+                                   detail:@"Live state, connection tests, events and reports"];
+        return cell;
+    }
+
+    if (indexPath.section == 5 && indexPath.row == 0) {
         static NSString *kAboutCellId = @"SettingsAboutCell";
         UITableViewCell *cell = [tableView dequeueReusableCellWithIdentifier:kAboutCellId];
         if (!cell) {
@@ -5431,7 +7344,7 @@ commitEditingStyle:(UITableViewCellEditingStyle)editingStyle
         return cell;
     }
 
-    if (indexPath.section == 4 && indexPath.row == 1) {
+    if (indexPath.section == 5 && indexPath.row == 1) {
         static NSString *kCreditsCellId = @"SettingsCreditsCell";
         UITableViewCell *cell = [tableView dequeueReusableCellWithIdentifier:kCreditsCellId];
         if (!cell) {
@@ -5446,7 +7359,7 @@ commitEditingStyle:(UITableViewCellEditingStyle)editingStyle
         return cell;
     }
 
-    if (indexPath.section == 4 && indexPath.row == 2) {
+    if (indexPath.section == 5 && indexPath.row == 2) {
         static NSString *kFAQCellId = @"SettingsFAQCell";
         UITableViewCell *cell = [tableView dequeueReusableCellWithIdentifier:kFAQCellId];
         if (!cell) {
@@ -5491,9 +7404,11 @@ commitEditingStyle:(UITableViewCellEditingStyle)editingStyle
 
 - (void)tableView:(UITableView *)tableView didSelectRowAtIndexPath:(NSIndexPath *)indexPath {
     if (indexPath.section == 1 && indexPath.row == 0) {
+        VCRecordAppEvent(@"ui", @"Routing settings opened", nil);
         RoutingVC *routing = [[[RoutingVC alloc] init] autorelease];
         [self.navigationController pushViewController:routing animated:YES];
     } else if (indexPath.section == 1 && indexPath.row == 1) {
+        VCRecordAppEvent(@"ui", @"Ping type menu opened", nil);
         UIActionSheet *sheet = [[[UIActionSheet alloc] initWithTitle:@"Ping type"
                                                              delegate:self
                                                     cancelButtonTitle:@"Cancel"
@@ -5502,6 +7417,7 @@ commitEditingStyle:(UITableViewCellEditingStyle)editingStyle
         sheet.tag = kVCSettingsPingTypeActionSheetTag;
         [sheet showInView:self.view];
     } else if (indexPath.section == 1 && indexPath.row == 2) {
+        VCRecordAppEvent(@"ui", @"Xray version settings opened", nil);
         XrayVersionSpoofVC *spoof = [[[XrayVersionSpoofVC alloc] init] autorelease];
         [self.navigationController pushViewController:spoof animated:YES];
     } else if (indexPath.section == 2) {
@@ -5519,6 +7435,10 @@ commitEditingStyle:(UITableViewCellEditingStyle)editingStyle
             [self startManualUpdateCheck];
         }
     } else if (indexPath.section == 4) {
+        VCRecordAppEvent(@"ui", @"Debug settings opened", nil);
+        DebugVC *debug = [[[DebugVC alloc] init] autorelease];
+        [self.navigationController pushViewController:debug animated:YES];
+    } else if (indexPath.section == 5) {
         if (indexPath.row == 0) {
             AboutVC *about = [[[AboutVC alloc] init] autorelease];
             [self.navigationController pushViewController:about animated:YES];
@@ -5547,6 +7467,8 @@ commitEditingStyle:(UITableViewCellEditingStyle)editingStyle
     }
 
     VCPingType pingType = (VCPingType)buttonIndex;
+    VCRecordAppEvent(@"settings", @"Ping type changed",
+                     [NSString stringWithFormat:@"type=%ld", (long)pingType]);
     NSUserDefaults *defaults = [NSUserDefaults standardUserDefaults];
     [defaults setInteger:pingType forKey:kDefaultsPingTypeKey];
     [defaults synchronize];
@@ -7181,9 +9103,39 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
 - (void)updateMainSectionHeaderView:(UIView *)header section:(NSInteger)section animated:(BOOL)animated;
 - (void)updateStickyMainSectionHeader;
 - (void)refreshStickyMainSectionHeader;
+- (void)recordMainLayoutEvent:(NSString *)action section:(NSInteger)section;
 @end
 
 @implementation MainVC
+
+- (void)recordMainLayoutEvent:(NSString *)action section:(NSInteger)section {
+    if (!_tableView) return;
+    NSString *sectionName = section == 0 ? @"configurations" : (section == 1 ? @"subscriptions" : @"none");
+    CGFloat configurationsY = [self mainSectionHasItems:0]
+        ? [_tableView rectForHeaderInSection:0].origin.y
+        : -1.0f;
+    CGFloat subscriptionsY = [self mainSectionHasItems:1]
+        ? [_tableView rectForHeaderInSection:1].origin.y
+        : -1.0f;
+    NSString *detail = [NSString stringWithFormat:
+                        @"section=%@ expanded=%d compact=%d offset=%.1f content=%.1f viewport=%.1f rows=%ld headers=%.1f/%.1f button=%.1fx%.1f font=%.1f",
+                        sectionName,
+                        section == 0 ? (_configurationsSectionExpanded ? 1 : 0) :
+                                       (section == 1 ? (_subscriptionsSectionExpanded ? 1 : 0) : 0),
+                        _phoneConnectionCompact ? 1 : 0,
+                        _tableView.contentOffset.y,
+                        _tableView.contentSize.height,
+                        _tableView.bounds.size.height,
+                        (long)(section >= 0 && section < [_tableView numberOfSections]
+                                   ? [_tableView numberOfRowsInSection:section]
+                                   : 0),
+                        configurationsY,
+                        subscriptionsY,
+                        _connectBtn.bounds.size.width,
+                        _connectBtn.bounds.size.height,
+                        [_connectBtn.titleLabel.font pointSize]];
+    VCRecordAppEvent(@"layout", action, detail);
+}
 
 - (UIStatusBarStyle)preferredStatusBarStyle {
     return VCAppearancePreferredStatusBarStyle();
@@ -7992,10 +9944,18 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
 
 - (void)saveData {
     NSUserDefaults *ud = [NSUserDefaults standardUserDefaults];
-    if (gVCSecureStoreWritable && VCSaveProtectedConfigurationData(_configs, _subscriptions)) {
+    BOOL storeSaved = gVCSecureStoreWritable &&
+        VCSaveProtectedConfigurationData(_configs, _subscriptions);
+    if (storeSaved) {
         [ud removeObjectForKey:kDefaultsConfigsKey];
         [ud removeObjectForKey:kDefaultsSubsKey];
     }
+    VCRecordAppEvent(@"storage",
+                     storeSaved ? @"Configuration store saved" : @"Configuration store save failed",
+                     [NSString stringWithFormat:@"configs=%lu subscriptions=%lu writable=%d",
+                      (unsigned long)[_configs count],
+                      (unsigned long)[_subscriptions count],
+                      gVCSecureStoreWritable ? 1 : 0]);
     [ud setBool:_autoUpdateSubscriptions forKey:kDefaultsAutoUpdateSubsKey];
     [ud setBool:_preserveCustomSubscriptionNames forKey:kDefaultsPreserveCustomSubscriptionNamesKey];
     [ud setBool:_stealthModeEnabled forKey:kDefaultsStealthModeKey];
@@ -8103,6 +10063,13 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
     if (_selectedConfigIndex < 0 && _selectedSubIndex < 0 && [_configs count] > 0) {
         _selectedConfigIndex = 0;
     }
+    VCRecordAppEvent(@"storage",
+                     @"Configuration store loaded",
+                     [NSString stringWithFormat:@"configs=%lu subscriptions=%lu secure=%d writable=%d",
+                      (unsigned long)[_configs count],
+                      (unsigned long)[_subscriptions count],
+                      [protectedData isKindOfClass:[NSDictionary class]] ? 1 : 0,
+                      gVCSecureStoreWritable ? 1 : 0]);
 }
 
 - (NSArray *)subscriptionItemsAtIndex:(NSInteger)subIdx {
@@ -8323,6 +10290,7 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
             [self stopUptimeTimer];
             [self updateConnectButton];
             [self showStatus:@"Connection lost" ok:NO];
+            VCRecordAppEvent(@"connection", @"Daemon reported connection lost", nil);
         });
         [pool drain];
     });
@@ -9032,6 +11000,11 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
         ? [NSString stringWithFormat:@"%d ms", [[payload objectForKey:@"ms"] intValue]]
         : kVCPingFailureValue;
     [_pingDisplayByURI setObject:display forKey:uri];
+    if (!batchIdentifier) {
+        VCRecordAppEvent(@"ping", @"Configuration ping finished",
+                         ok ? [NSString stringWithFormat:@"success=1 latency_ms=%d", [[payload objectForKey:@"ms"] intValue]]
+                            : @"success=0");
+    }
 
     BOOL completedSubscriptionPing = NO;
     if (batchIdentifier) {
@@ -9048,6 +11021,7 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
 
     [self refreshVisiblePingAccessoriesForURI:uri];
     if (completedSubscriptionPing) {
+        VCRecordAppEvent(@"ping", @"Subscription ping batch finished", nil);
         [self refreshVisibleSubscriptionPingAccessories];
         [self refreshVisibleSubscriptionHeaderAccessories];
     }
@@ -9081,6 +11055,8 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
     if ([[_pingDisplayByURI objectForKey:uri] isEqualToString:kVCPingLoadingValue]) return;
 
     [_standalonePingURIs addObject:uri];
+    VCRecordAppEvent(@"ping", @"Configuration ping started",
+                     [NSString stringWithFormat:@"type=%ld", (long)pingType]);
     [_pingDisplayByURI setObject:kVCPingLoadingValue forKey:uri];
     [self refreshVisiblePingAccessoriesForURI:uri];
     [self enqueuePingForURI:uri
@@ -9153,6 +11129,9 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
     [_subscriptionPingOperationsByIdentifier setObject:operations forKey:identifier];
 
     VCPingType pingType = VCSelectedPingType();
+    VCRecordAppEvent(@"ping", @"Subscription ping batch started",
+                     [NSString stringWithFormat:@"configs=%lu type=%ld",
+                      (unsigned long)[urisToPing count], (long)pingType]);
     for (NSString *uri in urisToPing) {
         NSString *previous = [_pingDisplayByURI objectForKey:uri];
         if ([previous length] > 0 && ![previous isEqualToString:kVCPingLoadingValue]) {
@@ -9185,6 +11164,7 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
 
     NSArray *operations = [[_subscriptionPingOperationsByIdentifier objectForKey:identifier] copy];
     NSSet *pending = [[_subscriptionPingPendingByIdentifier objectForKey:identifier] copy];
+    NSUInteger pendingCount = [pending count];
     NSDictionary *previousDisplay = [[_subscriptionPingPreviousDisplayByIdentifier objectForKey:identifier] copy];
 
     [_subscriptionPingPendingByIdentifier removeObjectForKey:identifier];
@@ -9216,6 +11196,8 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
     [self refreshVisibleSubscriptionPingAccessories];
     [self refreshVisibleSubscriptionHeaderAccessories];
     [self showStatus:@"Subscription ping stopped" ok:YES];
+    VCRecordAppEvent(@"ping", @"Subscription ping batch canceled",
+                     [NSString stringWithFormat:@"pending=%lu", (unsigned long)pendingCount]);
 }
 
 - (void)subscriptionPingButtonPressed:(UIButton *)sender {
@@ -9860,6 +11842,8 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
 
 - (BOOL)refreshSubscriptionAtIndex:(NSInteger)idx showStatus:(BOOL)showStatus {
     if (idx < 0 || idx >= (NSInteger)[_subscriptions count]) return NO;
+    NSTimeInterval diagnosticStarted = [NSDate timeIntervalSinceReferenceDate];
+    VCRecordAppEvent(@"subscription", @"Single subscription update started", nil);
 
     NSDictionary *sub = [_subscriptions objectAtIndex:idx];
     if ([self subscriptionNeedsPlainHTTPApproval:sub]) {
@@ -9877,6 +11861,10 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
     NSString *errorText = nil;
     NSDictionary *updated = [self updatedSubscriptionDictionaryFromSource:sub errorText:&errorText];
     if (![updated isKindOfClass:[NSDictionary class]]) {
+        VCRecordAppEvent(@"subscription", @"Single subscription update failed",
+                         [NSString stringWithFormat:@"error=%@ duration_ms=%.0f",
+                          VCDiagnosticErrorSummary(errorText),
+                          ([NSDate timeIntervalSinceReferenceDate] - diagnosticStarted) * 1000.0]);
         if (showStatus) {
             [self showStatus:([errorText length] > 0 ? errorText : @"Subscription update failed") ok:NO];
             [self showSubscriptionUpdateFailures:[NSArray arrayWithObject:[self shortUpdateFailureTextForSubscription:sub errorText:errorText]]];
@@ -9894,6 +11882,10 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
         }
     }
     [self saveData];
+    VCRecordAppEvent(@"subscription", @"Single subscription update finished",
+                     [NSString stringWithFormat:@"configs=%lu duration_ms=%.0f",
+                      (unsigned long)[uris count],
+                      ([NSDate timeIntervalSinceReferenceDate] - diagnosticStarted) * 1000.0]);
     if (showStatus) {
         [self showStatus:[NSString stringWithFormat:@"Subscription updated (%lu configs)", (unsigned long)[uris count]] ok:YES];
     }
@@ -10018,8 +12010,11 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
     }
 
     _launchAutoUpdateInProgress = YES;
+    NSTimeInterval diagnosticStarted = [NSDate timeIntervalSinceReferenceDate];
 
     NSArray *refreshIndices = [[NSArray alloc] initWithArray:refreshIndicesMutable];
+    VCRecordAppEvent(@"subscription", @"Subscription update batch started",
+                     [NSString stringWithFormat:@"requested=%lu", (unsigned long)[refreshIndices count]]);
     NSString *startText = ([startStatus isKindOfClass:[NSString class]] && [startStatus length] > 0)
                               ? startStatus
                               : @"Updating subscriptions...";
@@ -10030,6 +12025,7 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
 
         NSMutableArray *updatedSubs = [[NSMutableArray alloc] initWithArray:snapshot];
         NSMutableArray *failureTexts = [[NSMutableArray alloc] init];
+        NSMutableDictionary *failureCategories = [[NSMutableDictionary alloc] init];
         NSUInteger okCount = 0;
         for (NSNumber *idxObj in refreshIndices) {
             NSInteger i = [idxObj integerValue];
@@ -10045,6 +12041,7 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
                 okCount++;
             } else {
                 [failureTexts addObject:[self shortUpdateFailureTextForSubscription:sub errorText:errorText]];
+                VCIncrementDiagnosticCategory(failureCategories, errorText);
             }
         }
 
@@ -10053,12 +12050,15 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
             _launchAutoUpdateInProgress = NO;
 
             if (![self subscriptionsMatchSnapshotForLaunchAutoUpdate:snapshot]) {
+                VCRecordAppEvent(@"subscription", @"Subscription update batch discarded",
+                                 @"reason=list_changed_during_update");
                 [self showStatus:@"Auto-update skipped: subscriptions changed" ok:YES];
                 if (_pendingImportDoneStatus) {
                     [_pendingImportDoneStatus release];
                     _pendingImportDoneStatus = nil;
                 }
                 [failureTexts release];
+                [failureCategories release];
                 [updatedSubs release];
                 [refreshIndices release];
                 [snapshot release];
@@ -10088,8 +12088,16 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
             if ([failureTexts count] > 0) {
                 [self showSubscriptionUpdateFailures:failureTexts];
             }
+            VCRecordAppEvent(@"subscription", @"Subscription update batch finished",
+                             [NSString stringWithFormat:@"requested=%lu updated=%lu failed=%lu failure_types=%@ duration_ms=%.0f",
+                              (unsigned long)[refreshIndices count],
+                              (unsigned long)okCount,
+                              (unsigned long)[failureTexts count],
+                              VCDiagnosticCategoryCountsText(failureCategories),
+                              ([NSDate timeIntervalSinceReferenceDate] - diagnosticStarted) * 1000.0]);
 
             [failureTexts release];
+            [failureCategories release];
             [updatedSubs release];
             [refreshIndices release];
             [snapshot release];
@@ -10156,6 +12164,7 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
 - (void)settingsVC:(SettingsVC *)vc didChangeAutoUpdate:(BOOL)enabled {
     (void)vc;
     _autoUpdateSubscriptions = enabled;
+    VCRecordAppEvent(@"settings", @"Subscription auto-update changed", enabled ? @"enabled=1" : @"enabled=0");
     [self saveData];
     [self showStatus:_autoUpdateSubscriptions ? @"Auto-update subscriptions: ON"
                                            : @"Auto-update subscriptions: OFF"
@@ -10165,6 +12174,7 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
 - (void)settingsVC:(SettingsVC *)vc didChangeAutomaticUpdateChecks:(BOOL)enabled {
     (void)vc;
     _automaticUpdateChecksEnabled = enabled;
+    VCRecordAppEvent(@"settings", @"Application update checks changed", enabled ? @"enabled=1" : @"enabled=0");
     [self saveData];
 
     [NSObject cancelPreviousPerformRequestsWithTarget:self
@@ -10186,6 +12196,7 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
 - (void)settingsVC:(SettingsVC *)vc didChangePreserveCustomSubscriptionNames:(BOOL)enabled {
     (void)vc;
     _preserveCustomSubscriptionNames = enabled;
+    VCRecordAppEvent(@"settings", @"Preserve custom names changed", enabled ? @"enabled=1" : @"enabled=0");
     [self saveData];
     [self showStatus:_preserveCustomSubscriptionNames ? @"Preserve custom names: ON"
                                                       : @"Preserve custom names: OFF"
@@ -10195,6 +12206,7 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
 - (void)settingsVC:(SettingsVC *)vc didChangeStealthMode:(BOOL)enabled {
     (void)vc;
     _stealthModeEnabled = enabled;
+    VCRecordAppEvent(@"settings", @"Stealth mode changed", enabled ? @"enabled=1" : @"enabled=0");
     [self saveData];
     [_tableView reloadData];
     [self showStatus:_stealthModeEnabled ? @"Stealth mode: ON"
@@ -10205,6 +12217,7 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
 - (void)settingsVC:(SettingsVC *)vc didChangeDarkTheme:(BOOL)enabled {
     (void)vc;
     _darkThemeEnabled = enabled;
+    VCRecordAppEvent(@"settings", @"Appearance changed", enabled ? @"theme=dark" : @"theme=light");
     [self saveData];
     [self applyTheme];
 }
@@ -10462,6 +12475,7 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
     }
 
     if ([cleanURLs count] == 0) {
+        VCRecordAppEvent(@"import", @"Batch subscription import rejected", @"reason=no_valid_entries");
         [self showStatus:@"Invalid subscription URL" ok:NO];
         return;
     }
@@ -10519,6 +12533,11 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
     }
 
     [self saveData];
+    VCRecordAppEvent(@"subscription",
+                     existingIndex >= 0 ? @"Subscription replaced" : @"Subscription added",
+                     [NSString stringWithFormat:@"configs=%lu subscriptions=%lu",
+                      (unsigned long)[uris count],
+                      (unsigned long)[_subscriptions count]]);
     [self selectSubscriptionAtIndex:subIndex];
 
     NSString *verb = (existingIndex >= 0) ? @"updated" : @"imported";
@@ -10670,6 +12689,10 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
     }
 
     _launchAutoUpdateInProgress = YES;
+    NSTimeInterval diagnosticStarted = [NSDate timeIntervalSinceReferenceDate];
+    VCRecordAppEvent(@"import", @"Batch subscription import started",
+                     [NSString stringWithFormat:@"requested=%lu insecure=%d",
+                      (unsigned long)[cleanURLs count], allowInsecureFetch ? 1 : 0]);
     NSString *startText = ([startStatus isKindOfClass:[NSString class]] && [startStatus length] > 0)
                               ? startStatus
                               : @"Importing subscriptions...";
@@ -10685,6 +12708,7 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
         NSMutableArray *importedSubs = [[NSMutableArray alloc] init];
         NSMutableArray *insecureURLs = [[NSMutableArray alloc] init];
         NSMutableArray *failureTexts = [[NSMutableArray alloc] init];
+        NSMutableDictionary *failureCategories = [[NSMutableDictionary alloc] init];
         NSUInteger failedCount = 0;
         NSUInteger fallbackCount = 0;
 
@@ -10696,6 +12720,7 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
                 (![subscriptionURL isKindOfClass:[NSString class]] ||
                  ![self isSubscriptionURL:subscriptionURL])) {
                 failedCount++;
+                VCIncrementDiagnosticCategory(failureCategories, @"invalid HAPP add link");
                 [failureTexts addObject:[self shortImportFailureTextForURL:urlString
                                                                 errorText:@"HAPP add link does not contain a valid subscription URL"]];
                 continue;
@@ -10726,6 +12751,7 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
                 fallbackCount++;
             } else {
                 failedCount++;
+                VCIncrementDiagnosticCategory(failureCategories, errorText);
                 [failureTexts addObject:[self shortImportFailureTextForURL:urlString errorText:errorText]];
             }
         }
@@ -10814,10 +12840,20 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
             if ([failureTexts count] > 0) {
                 [self showSubscriptionImportFailures:failureTexts];
             }
+            VCRecordAppEvent(@"import", @"Batch subscription import finished",
+                             [NSString stringWithFormat:@"requested=%lu added=%lu failed=%lu failure_types=%@ fallback=%lu pending_insecure=%lu duration_ms=%.0f",
+                              (unsigned long)[urlsToImport count],
+                              (unsigned long)addedCount,
+                              (unsigned long)failedCount,
+                              VCDiagnosticCategoryCountsText(failureCategories),
+                              (unsigned long)fallbackCount,
+                              (unsigned long)[insecureURLs count],
+                              ([NSDate timeIntervalSinceReferenceDate] - diagnosticStarted) * 1000.0]);
 
             [importedSubs release];
             [insecureURLs release];
             [failureTexts release];
+            [failureCategories release];
             [urlsToImport release];
             [prefixPart release];
             [fallbackSubscriptions release];
@@ -10828,18 +12864,22 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
 }
 
 - (void)importDirectURI:(NSString *)uri {
+    VCRecordAppEvent(@"import", @"Configuration import started", @"type=direct");
     NSString *normalizedURI = [self safeTrim:uri];
     if (![normalizedURI isKindOfClass:[NSString class]] || [normalizedURI length] == 0) {
+        VCRecordAppEvent(@"import", @"Configuration import failed", @"reason=empty");
         [self showStatus:@"Invalid configuration link" ok:NO];
         return;
     }
     if (![self isSupportedConfigTupleForURI:normalizedURI]) {
+        VCRecordAppEvent(@"import", @"Configuration import failed", @"reason=unsupported");
         [self showStatus:[self unsupportedConfigStatusTextForURI:normalizedURI] ok:NO];
         return;
     }
 
     NSInteger existing = [self existingConfigIndexForURI:normalizedURI];
     if (existing >= 0) {
+        VCRecordAppEvent(@"import", @"Configuration import skipped", @"reason=duplicate");
         _configurationsSectionExpanded = YES;
         _selectedConfigIndex = existing;
         _selectedSubIndex = -1;
@@ -10857,6 +12897,8 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
                          normalizedURI, @"uri",
                          nil];
     [_configs addObject:cfg];
+    VCRecordAppEvent(@"import", @"Configuration imported",
+                     [NSString stringWithFormat:@"configs=%lu", (unsigned long)[_configs count]]);
 
     _configurationsSectionExpanded = YES;
     _selectedConfigIndex = [_configs count] - 1;
@@ -10871,8 +12913,13 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
            allowInsecureFetch:(BOOL)allowInsecureFetch
                allowPlainHTTP:(BOOL)allowPlainHTTP
                    happSource:(BOOL)happSource {
+    NSTimeInterval diagnosticStarted = [NSDate timeIntervalSinceReferenceDate];
+    VCRecordAppEvent(@"import", @"Subscription import started",
+                     [NSString stringWithFormat:@"happ=%d insecure=%d plain_http=%d",
+                      happSource ? 1 : 0, allowInsecureFetch ? 1 : 0, allowPlainHTTP ? 1 : 0]);
     NSString *normalizedURL = [self safeTrim:urlString];
     if (![normalizedURL isKindOfClass:[NSString class]] || [normalizedURL length] == 0) {
+        VCRecordAppEvent(@"import", @"Subscription import failed", @"reason=empty");
         [self showStatus:@"Invalid subscription URL" ok:NO];
         return;
     }
@@ -10883,6 +12930,7 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
             SubscriptionDictionaryAllowsPlainHTTP([_subscriptions objectAtIndex:existing])) {
             allowPlainHTTP = YES;
         } else {
+            VCRecordAppEvent(@"import", @"Subscription import paused", @"reason=plain_http_confirmation");
             [self showPlainHTTPSubscriptionWarningForCount:1 confirmation:^{
                 [self importSubscriptionURL:normalizedURL
                          allowInsecureFetch:allowInsecureFetch
@@ -10913,6 +12961,7 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
                 [self saveData];
             }
             [self selectSubscriptionAtIndex:existing];
+            VCRecordAppEvent(@"import", @"Subscription import skipped", @"reason=duplicate");
             [self showStatus:@"Subscription already exists (skipped)" ok:YES];
             return;
         }
@@ -10935,6 +12984,10 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
                                                                     errorText:&errorText
                                                        insecureRetryAvailable:&insecureRetryAvailable];
         if ([updated isKindOfClass:[NSDictionary class]]) {
+            VCRecordAppEvent(@"import", @"Subscription fetched",
+                             [NSString stringWithFormat:@"result=update configs=%lu duration_ms=%.0f",
+                              (unsigned long)[[updated objectForKey:@"items"] count],
+                              ([NSDate timeIntervalSinceReferenceDate] - diagnosticStarted) * 1000.0]);
             [self commitUpdatedSubscription:updated existingIndex:existing];
             return;
         }
@@ -10942,11 +12995,16 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
         if (!allowInsecureFetch &&
             !SubscriptionDictionaryAllowsInsecureFetch(sub) &&
             insecureRetryAvailable) {
+            VCRecordAppEvent(@"import", @"Subscription import paused", @"reason=insecure_confirmation");
             [self showInsecureSubscriptionImportPromptForURL:normalizedURL
                                                   happSource:SubscriptionDictionaryUsesHappHeaders(sub)];
             return;
         }
 
+        VCRecordAppEvent(@"import", @"Subscription import failed",
+                         [NSString stringWithFormat:@"stage=fetch error=%@ duration_ms=%.0f",
+                          VCDiagnosticErrorSummary(errorText),
+                          ([NSDate timeIntervalSinceReferenceDate] - diagnosticStarted) * 1000.0]);
         [self showStatus:([errorText length] > 0 ? errorText : @"Subscription import failed") ok:NO];
         return;
     }
@@ -10961,15 +13019,24 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
                                                                 errorText:&errorText
                                                    insecureRetryAvailable:&insecureRetryAvailable];
     if ([updated isKindOfClass:[NSDictionary class]]) {
+        VCRecordAppEvent(@"import", @"Subscription fetched",
+                         [NSString stringWithFormat:@"result=new configs=%lu duration_ms=%.0f",
+                          (unsigned long)[[updated objectForKey:@"items"] count],
+                          ([NSDate timeIntervalSinceReferenceDate] - diagnosticStarted) * 1000.0]);
         [self commitUpdatedSubscription:updated existingIndex:-1];
         return;
     }
 
     if (!allowInsecureFetch && insecureRetryAvailable) {
+        VCRecordAppEvent(@"import", @"Subscription import paused", @"reason=insecure_confirmation");
         [self showInsecureSubscriptionImportPromptForURL:normalizedURL happSource:happSource];
         return;
     }
 
+    VCRecordAppEvent(@"import", @"Subscription import failed",
+                     [NSString stringWithFormat:@"stage=fetch error=%@ duration_ms=%.0f",
+                      VCDiagnosticErrorSummary(errorText),
+                      ([NSDate timeIntervalSinceReferenceDate] - diagnosticStarted) * 1000.0]);
     [self showStatus:([errorText length] > 0 ? errorText : @"Subscription import failed") ok:NO];
 }
 
@@ -11093,6 +13160,7 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
 - (void)importTextEntry:(NSString *)rawText {
     NSString *text = [self safeTrim:rawText];
     if ([text length] == 0) {
+        VCRecordAppEvent(@"import", @"Import rejected", @"reason=empty_text");
         [self showStatus:@"Import text is empty" ok:NO];
         return;
     }
@@ -11100,25 +13168,30 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
     NSString *karingError = nil;
     NSDictionary *karingDescriptor = VCKaringLANDownloadDescriptor(text, &karingError);
     if ([karingDescriptor isKindOfClass:[NSDictionary class]]) {
+        VCRecordAppEvent(@"import", @"Karing LAN import recognized", nil);
         [self receiveKaringBackupWithDescriptor:karingDescriptor];
         return;
     }
     if ([karingError length] > 0) {
+        VCRecordAppEvent(@"import", @"Import rejected", @"type=karing reason=invalid_descriptor");
         [self showStatus:karingError ok:NO];
         return;
     }
 
     if ([self isHappEncryptedLink:text]) {
+        VCRecordAppEvent(@"import", @"HAPP encrypted import recognized", nil);
         [self importHappEncryptedLink:text];
         return;
     }
 
     if ([self isHappAddLink:text]) {
+        VCRecordAppEvent(@"import", @"HAPP add import recognized", nil);
         [self importHappAddLink:text];
         return;
     }
 
     if ([[text lowercaseString] hasPrefix:@"happ://"]) {
+        VCRecordAppEvent(@"import", @"Import rejected", @"type=happ reason=unsupported_format");
         [self showStatus:@"Unsupported HAPP link format (use happ://add/, crypt4/ or crypt5/)" ok:NO];
         return;
     }
@@ -11236,6 +13309,12 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
         }
 
         if ([parts count] > 0) {
+            VCRecordAppEvent(@"import", @"Text import parsed",
+                             [NSString stringWithFormat:@"configs=%ld subscriptions=%ld skipped_configs=%ld skipped_subscriptions=%ld",
+                              (long)importedConfigs,
+                              (long)pendingSubs,
+                              (long)skippedConfigs,
+                              (long)skippedSubs]);
             NSString *importText = [NSString stringWithFormat:@"Imported %@", [parts componentsJoinedByString:@", "]];
             if (skippedConfigs > 0 || skippedSubs > 0) {
                 NSMutableArray *skippedParts = [NSMutableArray array];
@@ -11265,6 +13344,10 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
                 [self showStatus:importText ok:YES];
             }
         } else {
+            VCRecordAppEvent(@"import", @"Text import produced no new entries",
+                             [NSString stringWithFormat:@"skipped_configs=%ld skipped_subscriptions=%ld",
+                              (long)skippedConfigs,
+                              (long)skippedSubs]);
             if (skippedConfigs > 0 || skippedSubs > 0) {
                 NSMutableArray *skippedParts = [NSMutableArray array];
                 if (skippedConfigs > 0) {
@@ -11283,11 +13366,13 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
         return;
     }
 
+    VCRecordAppEvent(@"import", @"Import rejected", @"reason=unsupported_format");
     [self showStatus:@"Unsupported import format (use vless://, socks5://, happ://, karing://sync-download/, or an HTTP(S) subscription)" ok:NO];
 }
 
 - (void)importKaringSubscriptionEntries:(NSArray *)entries {
     if (![entries isKindOfClass:[NSArray class]] || [entries count] == 0) {
+        VCRecordAppEvent(@"import", @"Karing backup contained no entries", nil);
         [self showStatus:@"The Karing backup has no supported subscriptions" ok:NO];
         return;
     }
@@ -11325,6 +13410,10 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
     }
 
     if ([urls count] == 0) {
+        VCRecordAppEvent(@"import", @"Karing backup produced no new subscriptions",
+                         [NSString stringWithFormat:@"entries=%lu duplicates=%lu",
+                          (unsigned long)[entries count],
+                          (unsigned long)duplicateCount]);
         [self showStatus:(duplicateCount > 0
                           ? @"All Karing subscriptions already exist"
                           : @"The Karing backup has no supported subscriptions")
@@ -11332,6 +13421,12 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
         return;
     }
 
+    VCRecordAppEvent(@"import", @"Karing subscriptions parsed",
+                     [NSString stringWithFormat:@"entries=%lu queued=%lu duplicates=%lu cached=%lu",
+                      (unsigned long)[entries count],
+                      (unsigned long)[urls count],
+                      (unsigned long)duplicateCount,
+                      (unsigned long)[cachedSubscriptions count]]);
     [self startBackgroundSubscriptionImportForURLs:urls
                                allowInsecureFetch:NO
                                       startStatus:@"Importing Karing subscriptions..."
@@ -11341,6 +13436,7 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
 
 - (void)importKaringBackupData:(NSData *)data {
     if (![data isKindOfClass:[NSData class]] || [data length] == 0) {
+        VCRecordAppEvent(@"import", @"Karing backup read failed", @"reason=empty_data");
         [self showStatus:@"Unable to read the Karing backup" ok:NO];
         return;
     }
@@ -11350,6 +13446,9 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
     }
 
     _launchAutoUpdateInProgress = YES;
+    NSTimeInterval diagnosticStarted = [NSDate timeIntervalSinceReferenceDate];
+    VCRecordAppEvent(@"import", @"Karing backup parsing started",
+                     [NSString stringWithFormat:@"bytes=%lu", (unsigned long)[data length]]);
     [self showStatus:@"Reading Karing backup..." ok:YES];
     NSData *copiedData = [data copy];
     dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_DEFAULT, 0), ^{
@@ -11362,8 +13461,16 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
         dispatch_async(dispatch_get_main_queue(), ^{
             _launchAutoUpdateInProgress = NO;
             if ([copiedEntries isKindOfClass:[NSArray class]]) {
+                VCRecordAppEvent(@"import", @"Karing backup parsed",
+                                 [NSString stringWithFormat:@"entries=%lu duration_ms=%.0f",
+                                  (unsigned long)[copiedEntries count],
+                                  ([NSDate timeIntervalSinceReferenceDate] - diagnosticStarted) * 1000.0]);
                 [self importKaringSubscriptionEntries:copiedEntries];
             } else {
+                VCRecordAppEvent(@"import", @"Karing backup parsing failed",
+                                 [NSString stringWithFormat:@"error=%@ duration_ms=%.0f",
+                                  VCDiagnosticErrorSummary(copiedError),
+                                  ([NSDate timeIntervalSinceReferenceDate] - diagnosticStarted) * 1000.0]);
                 [self showStatus:([copiedError length] > 0
                                   ? copiedError
                                   : @"Unable to read the Karing backup")
@@ -11382,6 +13489,7 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
     NSInteger port = [[descriptor objectForKey:@"port"] integerValue];
     if (![hosts isKindOfClass:[NSArray class]] || [hosts count] == 0 ||
         port < 1 || port > 65535) {
+        VCRecordAppEvent(@"import", @"Karing LAN sync rejected", @"reason=invalid_descriptor");
         [self showStatus:@"Invalid Karing LAN sync address" ok:NO];
         return;
     }
@@ -11391,6 +13499,9 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
     }
 
     _launchAutoUpdateInProgress = YES;
+    NSTimeInterval diagnosticStarted = [NSDate timeIntervalSinceReferenceDate];
+    VCRecordAppEvent(@"import", @"Karing LAN sync started",
+                     [NSString stringWithFormat:@"candidate_hosts=%lu", (unsigned long)[hosts count]]);
     [self showStatus:@"Receiving Karing backup..." ok:YES];
     NSDictionary *copiedDescriptor = [descriptor copy];
     dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_DEFAULT, 0), ^{
@@ -11475,8 +13586,16 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
         dispatch_async(dispatch_get_main_queue(), ^{
             _launchAutoUpdateInProgress = NO;
             if ([copiedEntries isKindOfClass:[NSArray class]]) {
+                VCRecordAppEvent(@"import", @"Karing LAN sync finished",
+                                 [NSString stringWithFormat:@"entries=%lu duration_ms=%.0f",
+                                  (unsigned long)[copiedEntries count],
+                                  ([NSDate timeIntervalSinceReferenceDate] - diagnosticStarted) * 1000.0]);
                 [self importKaringSubscriptionEntries:copiedEntries];
             } else {
+                VCRecordAppEvent(@"import", @"Karing LAN sync failed",
+                                 [NSString stringWithFormat:@"error=%@ duration_ms=%.0f",
+                                  VCDiagnosticErrorSummary(copiedError),
+                                  ([NSDate timeIntervalSinceReferenceDate] - diagnosticStarted) * 1000.0]);
                 NSString *message = ([copiedError length] > 0)
                     ? [NSString stringWithFormat:@"Karing sync failed: %@", copiedError]
                     : @"Karing sync failed: no LAN address responded";
@@ -11510,6 +13629,7 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
 }
 
 - (void)importTextFileAtPath:(NSString *)rawPath {
+    VCRecordAppEvent(@"import", @"File import started", nil);
     NSString *path = [self safeTrim:rawPath];
     if ([path hasPrefix:@"\""] && [path hasSuffix:@"\""] && [path length] >= 2) {
         path = [path substringWithRange:NSMakeRange(1, [path length] - 2)];
@@ -11517,6 +13637,7 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
     }
     path = [path stringByExpandingTildeInPath];
     if ([path length] == 0) {
+        VCRecordAppEvent(@"import", @"File import failed", @"stage=path_validation");
         [self showStatus:@"File path is empty" ok:NO];
         return;
     }
@@ -11524,6 +13645,7 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
     BOOL isDir = NO;
     BOOL exists = [[NSFileManager defaultManager] fileExistsAtPath:path isDirectory:&isDir];
     if (exists && isDir) {
+        VCRecordAppEvent(@"import", @"File import failed", @"stage=file_selection");
         [self showStatus:@"Import file not found" ok:NO];
         return;
     }
@@ -11533,20 +13655,24 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
     NSData *data = [NSData dataWithContentsOfFile:path];
     if (!data || [data length] == 0) {
         if (!exists) {
+            VCRecordAppEvent(@"import", @"File import failed", @"stage=file_missing");
             [self showStatus:@"Import file not found" ok:NO];
             return;
         }
+        VCRecordAppEvent(@"import", @"File import failed", @"stage=file_read");
         [self showStatus:@"Failed to read import file" ok:NO];
         return;
     }
 
     if (VCKaringBackupDataLooksLikeZip(data)) {
+        VCRecordAppEvent(@"import", @"Karing backup detected", nil);
         [self importKaringBackupData:data];
         return;
     }
 
     NSString *text = [self decodeImportTextData:data];
     if (![text isKindOfClass:[NSString class]] || [text length] == 0) {
+        VCRecordAppEvent(@"import", @"File import failed", @"stage=text_decode");
         [self showStatus:@"Unsupported text encoding" ok:NO];
         return;
     }
@@ -11556,6 +13682,7 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
 
 - (void)importFileAtURL:(NSURL *)url {
     if (![url isKindOfClass:[NSURL class]] || ![url isFileURL]) {
+        VCRecordAppEvent(@"import", @"File import rejected", @"reason=unsupported_url");
         [self showStatus:@"Unsupported import file URL" ok:NO];
         return;
     }
@@ -11570,6 +13697,7 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
 - (void)startFileBrowserImportFlow {
     BOOL isDirectory = NO;
     if (![[NSFileManager defaultManager] fileExistsAtPath:kImportDirectoryPath isDirectory:&isDirectory] || !isDirectory) {
+        VCRecordAppEvent(@"import", @"File browser unavailable", nil);
         [self showStatus:@"Import directory is unavailable" ok:NO];
         return;
     }
@@ -11580,16 +13708,19 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
     UINavigationController *navigation = [[[UINavigationController alloc] initWithRootViewController:browser] autorelease];
     navigation.modalPresentationStyle = UIModalPresentationFullScreen;
     [self presentViewController:navigation animated:YES completion:nil];
+    VCRecordAppEvent(@"ui", @"File browser opened", nil);
 }
 
 - (void)importBrowserDidCancel:(UIViewController *)browser {
     (void)browser;
     [self dismissViewControllerAnimated:YES completion:nil];
+    VCRecordAppEvent(@"import", @"File browser canceled", nil);
 }
 
 - (void)importBrowser:(UIViewController *)browser didSelectFileAtPath:(NSString *)path {
     (void)browser;
     NSString *selectedPath = [path copy];
+    VCRecordAppEvent(@"import", @"File selected", nil);
     [self dismissViewControllerAnimated:YES completion:^{
         [self importTextFileAtPath:selectedPath];
         [selectedPath release];
@@ -11598,6 +13729,7 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
 
 - (void)startQRImportFlow {
     if (![UIImagePickerController isSourceTypeAvailable:UIImagePickerControllerSourceTypeCamera]) {
+        VCRecordAppEvent(@"import", @"QR scanner unavailable", @"reason=camera_unavailable");
         [self showStatus:@"Camera is unavailable" ok:NO];
         return;
     }
@@ -11606,6 +13738,7 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
     scanner.delegate = self;
     scanner.modalPresentationStyle = UIModalPresentationFullScreen;
     [self presentViewController:scanner animated:YES completion:nil];
+    VCRecordAppEvent(@"ui", @"QR scanner opened", nil);
     [self showStatus:@"Scan QR code to import links..." ok:YES];
 }
 
@@ -11663,6 +13796,7 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
     [_pendingReconnectURI release];
     _pendingReconnectURI = [newURI copy];
     _pendingReconnectProtectLogs = protectLogs;
+    VCRecordAppEvent(@"connection", @"Configuration switch queued", protectLogs ? @"protected_logs=1" : @"protected_logs=0");
     [NSObject cancelPreviousPerformRequestsWithTarget:self
                                              selector:@selector(beginPendingReconnect)
                                                object:nil];
@@ -11674,6 +13808,7 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
 
 - (void)beginPendingReconnect {
     if (_reconnectInProgress || ![_pendingReconnectURI length]) return;
+    VCRecordAppEvent(@"connection", @"Configuration switch started", nil);
 
     NSString *uri = [_pendingReconnectURI copy];
     BOOL protectLogs = _pendingReconnectProtectLogs;
@@ -11706,12 +13841,14 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
             BOOL connected = routingSaved && [connectText hasPrefix:@"OK"];
 
             if (connected) {
+                VCRecordAppEvent(@"connection", @"Configuration switch completed", nil);
                 _connected = YES;
                 _connectedWithProtectedLogs = protectLogs;
                 [self startUptimeTimer];
                 [self updateConnectButton];
                 [self showStatus:@"Connected (switched config)" ok:YES];
             } else if (!disconnected) {
+                VCRecordAppEvent(@"connection", @"Configuration switch failed", @"stage=disconnect");
                 [self showStatus:[NSString stringWithFormat:@"Reconnect failed (disconnect): %@", disconnectText] ok:NO];
             } else {
                 _connected = NO;
@@ -11719,6 +13856,8 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
                 [self stopUptimeTimer];
                 [self updateConnectButton];
                 NSString *stage = routingSaved ? @"connect" : @"routing";
+                VCRecordAppEvent(@"connection", @"Configuration switch failed",
+                                 [NSString stringWithFormat:@"stage=%@", stage]);
                 NSString *detail = routingSaved ? connectText : routingText;
                 [self showStatus:[NSString stringWithFormat:@"Reconnect failed (%@): %@", stage, detail] ok:NO];
             }
@@ -11748,10 +13887,12 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
 }
 
 - (void)togglePressed {
+    VCRecordAppEvent(@"ui", _connected ? @"Disconnect button pressed" : @"Connect button pressed", nil);
     if (_reorderingSection >= 0) {
         [self setMainReorderingSection:-1 showStatus:NO];
     }
     if (_reconnectInProgress) {
+        VCRecordAppEvent(@"connection", @"Connection action blocked", @"reason=config_switch_in_progress");
         [self showStatus:@"Config switch is still in progress" ok:YES];
         return;
     }
@@ -11766,16 +13907,19 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
     if (!_connected) {
         NSString *uri = [self uriForCurrentSelection];
         if (!uri) {
+            VCRecordAppEvent(@"connection", @"Connection failed", @"stage=selection reason=none_selected");
             [self showStatus:@"Select/import a configuration first" ok:NO];
             return;
         }
         if (![self isSupportedConfigTupleForURI:uri]) {
+            VCRecordAppEvent(@"connection", @"Connection failed", @"stage=validation reason=unsupported_config");
             [self showStatus:[self unsupportedConfigStatusTextForURI:uri] ok:NO];
             return;
         }
 
         NSString *routingResp = [self sanitizeDaemonText:SyncRoutingPolicyToDaemon()];
         if (![routingResp hasPrefix:@"OK"]) {
+            VCRecordAppEvent(@"connection", @"Connection failed", @"stage=routing_sync");
             [self showStatus:[NSString stringWithFormat:@"Routing sync failed: %@", routingResp] ok:NO];
             return;
         }
@@ -11783,6 +13927,7 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
         NSString *cmd = ConnectCommandForURI(uri, protectLogs);
         NSString *resp = [self sanitizeDaemonText:SendCommand(cmd)];
         if ([resp hasPrefix:@"OK"]) {
+            VCRecordAppEvent(@"connection", @"VPN connected", protectLogs ? @"protected_logs=1" : @"protected_logs=0");
             _connected = YES;
             _connectedWithProtectedLogs = protectLogs;
             [self startUptimeTimer];
@@ -11790,6 +13935,7 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
             [self showStatus:@"Connected" ok:YES];
             [self scheduleXHTTPConnectHealthCheckForURI:uri];
         } else {
+            VCRecordAppEvent(@"connection", @"Connection failed", @"stage=daemon_connect");
             [self showStatus:resp ok:NO];
         }
         return;
@@ -11797,17 +13943,20 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
 
     NSString *resp = [self sanitizeDaemonText:SendCommand(@"DISCONNECT\n")];
     if ([resp hasPrefix:@"OK"]) {
+        VCRecordAppEvent(@"connection", @"VPN disconnected", nil);
         _connected = NO;
         _connectedWithProtectedLogs = NO;
         [self stopUptimeTimer];
         [self updateConnectButton];
         [self showStatus:@"Ready" ok:YES];
     } else {
+        VCRecordAppEvent(@"connection", @"Disconnect failed", nil);
         [self showStatus:resp ok:NO];
     }
 }
 
 - (void)plusPressed {
+    VCRecordAppEvent(@"ui", @"Import menu opened", nil);
     if (_reorderingSection >= 0) {
         [self setMainReorderingSection:-1 showStatus:NO];
     }
@@ -11821,6 +13970,7 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
 }
 
 - (void)refreshPressed {
+    VCRecordAppEvent(@"ui", @"Refresh subscriptions button pressed", nil);
     if (_reorderingSection >= 0) {
         [self setMainReorderingSection:-1 showStatus:NO];
     }
@@ -11828,6 +13978,7 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
 }
 
 - (void)settingsPressed {
+    VCRecordAppEvent(@"ui", @"Settings opened", nil);
     if (_reorderingSection >= 0) {
         [self setMainReorderingSection:-1 showStatus:NO];
     }
@@ -11847,6 +13998,7 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
 - (void)subscriptionInfoButtonPressed:(UIButton *)sender {
     NSInteger index = sender.tag - kVCSubscriptionInfoButtonTagBase;
     if (index < 0 || index >= (NSInteger)[_subscriptions count]) return;
+    VCRecordAppEvent(@"ui", @"Subscription details opened", nil);
 
     NSDictionary *subscription = [_subscriptions objectAtIndex:index];
     SubscriptionInfoVC *info = [[[SubscriptionInfoVC alloc] initWithSubscription:subscription
@@ -11955,6 +14107,7 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
     [updated setObject:trimmed forKey:@"name"];
     [updated setObject:trimmed forKey:kSubscriptionCustomNameKey];
     [_subscriptions replaceObjectAtIndex:index withObject:updated];
+    VCRecordAppEvent(@"subscription", @"Subscription renamed", nil);
 
     [self saveData];
     [self reloadMainTableDataAfterExternalChange];
@@ -11965,6 +14118,8 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
 - (BOOL)deleteSubscriptionAtIndex:(NSInteger)subIdx {
     if (subIdx < 0 || subIdx >= (NSInteger)[_subscriptions count]) return NO;
     [_subscriptions removeObjectAtIndex:subIdx];
+    VCRecordAppEvent(@"subscription", @"Subscription deleted",
+                     [NSString stringWithFormat:@"remaining=%lu", (unsigned long)[_subscriptions count]]);
 
     if (_expandedSubscription == subIdx) {
         _expandedSubscription = -1;
@@ -11990,6 +14145,7 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
 }
 
 - (void)terminalPressed {
+    VCRecordAppEvent(@"ui", _showingTerminal ? @"Log viewer closed" : @"Log viewer opened", nil);
     if (_reorderingSection >= 0) {
         [self setMainReorderingSection:-1 showStatus:NO];
     }
@@ -12154,6 +14310,7 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
 }
 
 - (void)clearLogsPressed {
+    VCRecordAppEvent(@"ui", @"Clear logs button pressed", nil);
     NSString *resp = [self sanitizeDaemonText:ClearLogsViaDaemon()];
     [self forceRefreshLogs];
 
@@ -12182,11 +14339,13 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
 
         dispatch_async(dispatch_get_main_queue(), ^{
             if (connectedNow) {
+                VCRecordAppEvent(@"connection", @"Existing VPN session detected", protectedLogsNow ? @"protected_logs=1" : @"protected_logs=0");
                 _connected = YES;
                 _connectedWithProtectedLogs = protectedLogsNow;
                 [self startUptimeTimer];
                 [self showStatus:@"Connected" ok:YES];
             } else {
+                VCRecordAppEvent(@"connection", @"No existing VPN session", nil);
                 _connected = NO;
                 _connectedWithProtectedLogs = NO;
                 [self stopUptimeTimer];
@@ -12861,6 +15020,13 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
     [self applyTheme];
     [self refreshUpdateIndicatorFromCache];
     [self queryInitialStatus];
+    VCRecordAppEvent(@"ui", @"Main screen initialized",
+                     [NSString stringWithFormat:@"width=%.0f height=%.0f configs=%lu subscriptions=%lu ipad=%d",
+                      b.size.width,
+                      b.size.height,
+                      (unsigned long)[_configs count],
+                      (unsigned long)[_subscriptions count],
+                      IsPadDevice() ? 1 : 0]);
 }
 
 - (void)viewWillAppear:(BOOL)animated {
@@ -13081,6 +15247,7 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
     NSArray *items = (section == 0) ? (NSArray *)_configs : (NSArray *)_subscriptions;
     if ([items count] < 2) return;
     if (_reorderingSection == section) {
+        VCRecordAppEvent(@"ui", @"List reordering finished", section == 0 ? @"section=configurations" : @"section=subscriptions");
         [self setMainReorderingSection:-1 showStatus:YES];
         return;
     }
@@ -13090,12 +15257,16 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
     }
 
     [self setMainReorderingSection:section showStatus:YES];
+    VCRecordAppEvent(@"ui", @"List reordering started", section == 0 ? @"section=configurations" : @"section=subscriptions");
 }
 
 - (void)mainSectionHeaderPressed:(UIButton *)sender {
     NSInteger section = sender.tag - kVCMainSectionHeaderButtonTagBase;
     if (section < 0 || section > 1) return;
-    if (_mainSectionTransitionInProgress) return;
+    if (_mainSectionTransitionInProgress) {
+        VCRecordAppEvent(@"layout", @"Section toggle ignored", @"reason=transition_in_progress");
+        return;
+    }
     if (_reorderingSection >= 0) {
         [self showStatus:@"Finish reordering first" ok:YES];
         return;
@@ -13109,6 +15280,7 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
     }
     [self saveMainState];
     NSInteger newRowCount = [self tableView:_tableView numberOfRowsInSection:section];
+    [self recordMainLayoutEvent:@"Section toggle started" section:section];
 
     NSUInteger transitionToken = ++_mainSectionTransitionToken;
     NSNumber *transitionNumber = [NSNumber numberWithUnsignedInteger:transitionToken];
@@ -13130,6 +15302,7 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
 
     [CATransaction setCompletionBlock:^{
         [self finishMainSectionTransition:transitionNumber];
+        [self recordMainLayoutEvent:@"Section toggle finished" section:section];
     }];
 
     NSMutableArray *changedRows = [NSMutableArray array];
@@ -13146,6 +15319,7 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
         }
     } @catch (NSException *exception) {
         (void)exception;
+        VCRecordAppEvent(@"layout", @"Section animation recovered", @"reason=table_update_exception");
         [self reloadMainTableDataAfterExternalChange];
     }
     [CATransaction commit];
@@ -13550,6 +15724,8 @@ moveRowAtIndexPath:(NSIndexPath *)sourceIndexPath
         if (indexPath.row < 0 || indexPath.row >= (NSInteger)[_configs count]) return;
 
         [_configs removeObjectAtIndex:indexPath.row];
+        VCRecordAppEvent(@"configuration", @"Configuration deleted",
+                         [NSString stringWithFormat:@"remaining=%lu", (unsigned long)[_configs count]]);
 
         if (_selectedConfigIndex == indexPath.row) {
             if ([_configs count] > 0) {
@@ -13593,6 +15769,9 @@ moveRowAtIndexPath:(NSIndexPath *)sourceIndexPath
 
     NSMutableArray *updatedItems = [NSMutableArray arrayWithArray:items];
     [updatedItems removeObjectAtIndex:itemIdx];
+    VCRecordAppEvent(@"subscription", @"Subscription configuration deleted",
+                     [NSString stringWithFormat:@"remaining_in_subscription=%lu",
+                      (unsigned long)[updatedItems count]]);
 
     NSMutableDictionary *updatedSub = [NSMutableDictionary dictionaryWithDictionary:sub];
     [updatedSub setObject:updatedItems forKey:@"items"];
@@ -13951,6 +16130,7 @@ moveRowAtIndexPath:(NSIndexPath *)sourceIndexPath
     if (scrollView == _tableView) {
         [self snapPhoneConnectionLayoutIfNeededAnimated:YES];
         [self scheduleMainMarqueeRelayout];
+        [self recordMainLayoutEvent:@"Main list scroll ended" section:-1];
     } else if (scrollView == _logView) {
         [self rememberActiveLogPosition];
         [self refreshLogs];
@@ -13969,6 +16149,7 @@ moveRowAtIndexPath:(NSIndexPath *)sourceIndexPath
                 [self snapPhoneConnectionLayoutIfNeededAnimated:YES];
             }
             [self scheduleMainMarqueeRelayout];
+            [self recordMainLayoutEvent:@"Main list drag ended" section:-1];
         }
         _mainTableDragStartOffsetValid = NO;
     } else if (scrollView == _logView && !decelerate) {
@@ -14008,6 +16189,9 @@ moveRowAtIndexPath:(NSIndexPath *)sourceIndexPath
     }
 
     if (indexPath.section == 0) {
+        VCRecordAppEvent(@"ui", @"Configuration selected",
+                         [NSString stringWithFormat:@"index=%ld total=%lu",
+                          (long)indexPath.row, (unsigned long)[_configs count]]);
         NSDictionary *cfg = [_configs objectAtIndex:indexPath.row];
         NSString *name = [cfg objectForKey:@"name"];
         _selectedConfigIndex = indexPath.row;
@@ -14021,6 +16205,11 @@ moveRowAtIndexPath:(NSIndexPath *)sourceIndexPath
         BOOL isHeader = YES;
         if ([self mapSubscriptionRow:indexPath.row toSubIndex:&subIdx itemIndex:&itemIdx isHeader:&isHeader]) {
             if (isHeader) {
+                VCRecordAppEvent(@"ui", @"Subscription expanded state changed",
+                                 [NSString stringWithFormat:@"index=%ld expanded=%d configs=%lu",
+                                  (long)subIdx,
+                                  _expandedSubscription == subIdx ? 0 : 1,
+                                  (unsigned long)[[self subscriptionItemsAtIndex:subIdx] count]]);
                 animateSubscriptionsSection = YES;
                 oldExpandedSubscription = _expandedSubscription;
                 if (oldExpandedSubscription >= 0) {
@@ -14039,6 +16228,9 @@ moveRowAtIndexPath:(NSIndexPath *)sourceIndexPath
                 NSString *name = [sub objectForKey:@"name"];
                 [self showStatus:[NSString stringWithFormat:@"Subscription: %@", name ? name : @"(unnamed)"] ok:YES];
             } else {
+                VCRecordAppEvent(@"ui", @"Subscription configuration selected",
+                                 [NSString stringWithFormat:@"subscription_index=%ld item_index=%ld",
+                                  (long)subIdx, (long)itemIdx]);
                 NSArray *items = [self subscriptionItemsAtIndex:subIdx];
                 NSString *uri = (itemIdx >= 0 && itemIdx < (NSInteger)[items count]) ? [items objectAtIndex:itemIdx] : @"";
                 _selectedConfigIndex = -1;
@@ -14117,13 +16309,17 @@ moveRowAtIndexPath:(NSIndexPath *)sourceIndexPath
 - (void)actionSheet:(UIActionSheet *)actionSheet didDismissWithButtonIndex:(NSInteger)buttonIndex {
     if (actionSheet.tag == VCActionSheetTagImport) {
         if (buttonIndex == 0) {
+            VCRecordAppEvent(@"import", @"Clipboard import selected", nil);
             NSString *clip = [[UIPasteboard generalPasteboard] string];
             [self importTextEntry:clip];
         } else if (buttonIndex == 1) {
+            VCRecordAppEvent(@"import", @"File import selected", nil);
             [self startFileBrowserImportFlow];
         } else if (buttonIndex == 2) {
+            VCRecordAppEvent(@"import", @"QR import selected", nil);
             [self startQRImportFlow];
         } else if (buttonIndex == 3) {
+            VCRecordAppEvent(@"import", @"Manual import selected", nil);
             UIAlertView *av = [[[UIAlertView alloc] initWithTitle:@"Manual Import"
                                                           message:@"Paste a config or subscription link"
                                                          delegate:self
@@ -14140,6 +16336,8 @@ moveRowAtIndexPath:(NSIndexPath *)sourceIndexPath
             tf.autocorrectionType = UITextAutocorrectionTypeNo;
 
             [av show];
+        } else {
+            VCRecordAppEvent(@"import", @"Import menu canceled", nil);
         }
         return;
     }
@@ -14150,11 +16348,13 @@ moveRowAtIndexPath:(NSIndexPath *)sourceIndexPath
     (void)vc;
     [self dismissViewControllerAnimated:YES completion:nil];
     [self showStatus:@"QR import canceled" ok:YES];
+    VCRecordAppEvent(@"import", @"QR scan canceled", nil);
 }
 
 - (void)qrScanVC:(UIViewController *)vc didScanText:(NSString *)text {
     (void)vc;
     NSString *payload = [[self safeTrim:text] copy];
+    VCRecordAppEvent(@"import", @"QR payload recognized", nil);
     NSString *karingError = nil;
     NSDictionary *karingDescriptor = VCKaringLANDownloadDescriptor(payload, &karingError);
     [self dismissViewControllerAnimated:YES completion:^{
@@ -14216,7 +16416,11 @@ moveRowAtIndexPath:(NSIndexPath *)sourceIndexPath
     }
 
     if (alertView.tag == VCAlertTagImportManual) {
-        if (buttonIndex != 1) return;
+        if (buttonIndex != 1) {
+            VCRecordAppEvent(@"import", @"Manual import canceled", nil);
+            return;
+        }
+        VCRecordAppEvent(@"import", @"Manual import submitted", nil);
         NSString *txt = [[alertView textFieldAtIndex:0] text];
         [self importTextEntry:txt];
         return;
@@ -14239,8 +16443,10 @@ moveRowAtIndexPath:(NSIndexPath *)sourceIndexPath
         }
 
         if (buttonIndex != alertView.cancelButtonIndex && confirmation) {
+            VCRecordAppEvent(@"import", @"Plain HTTP subscription approved", nil);
             confirmation();
         } else {
+            VCRecordAppEvent(@"import", @"Plain HTTP subscription declined", nil);
             if (cancellation) cancellation();
             [self showStatus:@"HTTP subscription canceled" ok:YES];
         }
@@ -14257,6 +16463,8 @@ moveRowAtIndexPath:(NSIndexPath *)sourceIndexPath
         _pendingInsecureImportUsesHappHeaders = NO;
 
         if (buttonIndex == 1) {
+            VCRecordAppEvent(@"import", @"Insecure subscription fetch approved",
+                             [NSString stringWithFormat:@"count=%lu", (unsigned long)[urlStrings count]]);
             if ([urlStrings count] == 1) {
                 NSString *urlString = [urlStrings objectAtIndex:0];
                 if (useHappHeaders && [self isHappAddLink:urlString]) {
@@ -14283,6 +16491,8 @@ moveRowAtIndexPath:(NSIndexPath *)sourceIndexPath
                                                 allowPlainHTTP:includesPlainHTTP];
             }
         } else {
+            VCRecordAppEvent(@"import", @"Insecure subscription fetch declined",
+                             [NSString stringWithFormat:@"count=%lu", (unsigned long)[urlStrings count]]);
             [self showStatus:([urlStrings count] == 1 ? @"Subscription import canceled"
                                                       : @"Insecure subscriptions skipped")
                           ok:YES];
@@ -14307,6 +16517,7 @@ moveRowAtIndexPath:(NSIndexPath *)sourceIndexPath
     if (![url isKindOfClass:[NSURL class]] || ![url isFileURL]) return NO;
     UIViewController *root = _window.rootViewController;
     if (![root isKindOfClass:[MainVC class]]) return NO;
+    VCRecordAppEvent(@"import", @"File import opened by another application", nil);
     [(MainVC *)root importFileAtURL:url];
     return YES;
 }
@@ -14314,6 +16525,7 @@ moveRowAtIndexPath:(NSIndexPath *)sourceIndexPath
 - (BOOL)application:(UIApplication *)application didFinishLaunchingWithOptions:(NSDictionary *)launchOptions {
     (void)application;
 
+    VCRecordAppEvent(@"lifecycle", @"Application launched", nil);
     ClearLogsViaDaemon();
     VCAppearanceApplyStatusBar();
     _window = [[UIWindow alloc] initWithFrame:[[UIScreen mainScreen] bounds]];
@@ -14327,6 +16539,17 @@ moveRowAtIndexPath:(NSIndexPath *)sourceIndexPath
         [self performSelector:@selector(openImportURL:) withObject:launchURL afterDelay:0.15];
     }
     return YES;
+}
+
+- (void)applicationDidBecomeActive:(UIApplication *)application {
+    (void)application;
+    VCRecordAppEvent(@"lifecycle", @"Application became active", nil);
+}
+
+- (void)applicationDidEnterBackground:(UIApplication *)application {
+    (void)application;
+    VCRecordAppEvent(@"lifecycle", @"Application entered background", nil);
+    [[VCAppEventRecorder sharedRecorder] flushNow];
 }
 
 - (BOOL)application:(UIApplication *)application handleOpenURL:(NSURL *)url {
@@ -14360,6 +16583,8 @@ moveRowAtIndexPath:(NSIndexPath *)sourceIndexPath
 
 - (void)applicationWillTerminate:(UIApplication *)application {
     (void)application;
+    VCRecordAppEvent(@"lifecycle", @"Application will terminate", nil);
+    [[VCAppEventRecorder sharedRecorder] flushNow];
     ClearLogsViaDaemon();
 }
 

@@ -174,6 +174,39 @@ static int g_vpn_icon_publisher_logged = 0;
 static uid_t g_helper_uid = (uid_t)-1;
 static gid_t g_helper_gid = (gid_t)-1;
 
+#define DIAGNOSTIC_EVENT_CAPACITY 48
+#define DIAGNOSTIC_EVENT_MESSAGE_CAPACITY 128
+
+typedef struct {
+    long long timestamp_ms;
+    char message[DIAGNOSTIC_EVENT_MESSAGE_CAPACITY];
+} diagnostic_event_t;
+
+static diagnostic_event_t g_diagnostic_events[DIAGNOSTIC_EVENT_CAPACITY];
+static size_t g_diagnostic_event_next = 0;
+static size_t g_diagnostic_event_count = 0;
+
+static void diagnostic_event(const char *fmt, ...) {
+    if (!fmt) return;
+
+    struct timeval tv;
+    gettimeofday(&tv, NULL);
+    diagnostic_event_t *event = &g_diagnostic_events[g_diagnostic_event_next];
+    event->timestamp_ms = (long long)tv.tv_sec * 1000LL + (long long)(tv.tv_usec / 1000);
+
+    va_list ap;
+    va_start(ap, fmt);
+    vsnprintf(event->message, sizeof(event->message), fmt, ap);
+    va_end(ap);
+    event->message[sizeof(event->message) - 1] = '\0';
+    for (char *cursor = event->message; *cursor; cursor++) {
+        if (*cursor == '\r' || *cursor == '\n' || *cursor == '\t') *cursor = ' ';
+    }
+
+    g_diagnostic_event_next = (g_diagnostic_event_next + 1) % DIAGNOSTIC_EVENT_CAPACITY;
+    if (g_diagnostic_event_count < DIAGNOSTIC_EVENT_CAPACITY) g_diagnostic_event_count++;
+}
+
 typedef enum {
     CONTROL_CLIENT_UNAUTHORIZED = 0,
     CONTROL_CLIENT_APP = 1,
@@ -453,15 +486,24 @@ static int run_argv(char *const argv[]) {
     return wait_spawned(pid, "run");
 }
 
-static int run_argv_capture(char *const argv[], char *out, size_t out_cap) {
+static int wait_spawned_quiet(pid_t pid) {
+    int status = 0;
+    pid_t rc = 0;
+    do {
+        rc = waitpid(pid, &status, 0);
+    } while (rc < 0 && errno == EINTR);
+    return rc == pid && WIFEXITED(status) ? WEXITSTATUS(status) : -1;
+}
+
+static int run_argv_capture_impl(char *const argv[], char *out, size_t out_cap, int verbose) {
     if (!argv || !argv[0] || !out || out_cap == 0) return -1;
     out[0] = '\0';
 
-    log_argv_command("run", argv);
+    if (verbose) log_argv_command("run", argv);
 
     int pipefd[2];
     if (pipe(pipefd) != 0) {
-        log_msg("run: pipe errno=%d", errno);
+        if (verbose) log_msg("run: pipe errno=%d", errno);
         return -1;
     }
 
@@ -479,7 +521,7 @@ static int run_argv_capture(char *const argv[], char *out, size_t out_cap) {
 
     if (rc != 0) {
         close(pipefd[0]);
-        log_msg("run: spawn errno=%d", rc);
+        if (verbose) log_msg("run: spawn errno=%d", rc);
         return -1;
     }
 
@@ -490,8 +532,12 @@ static int run_argv_capture(char *const argv[], char *out, size_t out_cap) {
         if (rd < 0) {
             if (errno == EINTR) continue;
             close(pipefd[0]);
-            (void)wait_spawned(pid, "run");
-            log_msg("run: read errno=%d", errno);
+            if (verbose) {
+                (void)wait_spawned(pid, "run");
+                log_msg("run: read errno=%d", errno);
+            } else {
+                (void)wait_spawned_quiet(pid);
+            }
             return -1;
         }
         if (rd == 0) break;
@@ -508,7 +554,15 @@ static int run_argv_capture(char *const argv[], char *out, size_t out_cap) {
     }
     close(pipefd[0]);
 
-    return wait_spawned(pid, "run");
+    return verbose ? wait_spawned(pid, "run") : wait_spawned_quiet(pid);
+}
+
+static int run_argv_capture(char *const argv[], char *out, size_t out_cap) {
+    return run_argv_capture_impl(argv, out, out_cap, 1);
+}
+
+static int run_argv_capture_quiet(char *const argv[], char *out, size_t out_cap) {
+    return run_argv_capture_impl(argv, out, out_cap, 0);
 }
 
 static int can_exec(const char *path) {
@@ -1481,6 +1535,12 @@ static int child_process_running(pid_t *pid, const char *name) {
     return 0;
 }
 
+static int child_process_alive_snapshot(pid_t pid) {
+    if (pid <= 0) return 0;
+    if (kill(pid, 0) == 0) return 1;
+    return errno == EPERM;
+}
+
 static int spawn_redsocks(int socks_port, int *redir_port_out, pid_t *pid_out) {
     const char *bin = find_redsocks_bin();
     if (!bin) return -2;
@@ -1938,6 +1998,7 @@ static void monitor_springboard_icon(long long current_ms) {
     if (rc == VPNICON_STATUSBAR_OK) {
         log_msg("VPN status bar icon republished after SpringBoard restart pid=%d",
                 (int)observed_pid);
+        diagnostic_event("VPN icon restored after SpringBoard restart");
     } else if (rc == VPNICON_STATUSBAR_ERROR) {
         log_msg("VPN status bar icon republish failed: %s", vpnicon_statusbar_last_error());
     }
@@ -2262,7 +2323,7 @@ static int write_pf_conf(const char *server_ips, char ifnames[][32], size_t if_c
     return 0;
 }
 
-static pf_enabled_state_t pf_enabled_state(const char *pfctl) {
+static pf_enabled_state_t pf_enabled_state_query(const char *pfctl, int verbose) {
     if (!pfctl) return PF_ENABLED_ERROR;
     char output[4096];
     char *argv[] = {
@@ -2271,14 +2332,25 @@ static pf_enabled_state_t pf_enabled_state(const char *pfctl) {
         "info",
         NULL,
     };
-    if (run_argv_capture(argv, output, sizeof(output)) != 0) {
-        log_msg("pf status query failed");
+    int rc = verbose
+        ? run_argv_capture(argv, output, sizeof(output))
+        : run_argv_capture_quiet(argv, output, sizeof(output));
+    if (rc != 0) {
+        if (verbose) log_msg("pf status query failed");
         return PF_ENABLED_ERROR;
     }
     if (contains_ci(output, "Status: Enabled")) return PF_ENABLED;
     if (contains_ci(output, "Status: Disabled")) return PF_DISABLED;
-    log_msg("pf status query returned an unknown state");
+    if (verbose) log_msg("pf status query returned an unknown state");
     return PF_ENABLED_ERROR;
+}
+
+static pf_enabled_state_t pf_enabled_state(const char *pfctl) {
+    return pf_enabled_state_query(pfctl, 1);
+}
+
+static pf_enabled_state_t pf_enabled_state_quiet(const char *pfctl) {
+    return pf_enabled_state_query(pfctl, 0);
 }
 
 static void ensure_pf_os_file(void) {
@@ -2368,13 +2440,18 @@ static int pf_dispatch_rules_only(const char *rules, int nat_rules) {
     return nat_rules ? nat_count == 1 && rdr_count == 1 : filter_count == 1;
 }
 
-static pf_root_state_t pf_root_state(const char *pfctl) {
+static pf_root_state_t pf_root_state_query(const char *pfctl, int verbose) {
     char nat_rules[16384];
     char filter_rules[16384];
     char *nat_argv[] = { (char *)pfctl, "-sn", NULL };
     char *filter_argv[] = { (char *)pfctl, "-sr", NULL };
-    if (run_argv_capture(nat_argv, nat_rules, sizeof(nat_rules)) != 0 ||
-        run_argv_capture(filter_argv, filter_rules, sizeof(filter_rules)) != 0) {
+    int nat_rc = verbose
+        ? run_argv_capture(nat_argv, nat_rules, sizeof(nat_rules))
+        : run_argv_capture_quiet(nat_argv, nat_rules, sizeof(nat_rules));
+    int filter_rc = verbose
+        ? run_argv_capture(filter_argv, filter_rules, sizeof(filter_rules))
+        : run_argv_capture_quiet(filter_argv, filter_rules, sizeof(filter_rules));
+    if (nat_rc != 0 || filter_rc != 0) {
         return PF_ROOT_ERROR;
     }
 
@@ -2390,10 +2467,18 @@ static pf_root_state_t pf_root_state(const char *pfctl) {
     }
 
     if (text_has_nonspace(nat_rules) || text_has_nonspace(filter_rules)) {
-        log_msg("pf root rules exist without vlesscore anchor; refusing to replace them");
+        if (verbose) log_msg("pf root rules exist without vlesscore anchor; refusing to replace them");
         return PF_ROOT_CONFLICT;
     }
     return PF_ROOT_EMPTY;
+}
+
+static pf_root_state_t pf_root_state(const char *pfctl) {
+    return pf_root_state_query(pfctl, 1);
+}
+
+static pf_root_state_t pf_root_state_quiet(const char *pfctl) {
+    return pf_root_state_query(pfctl, 0);
 }
 
 static int install_pf_dispatch(const char *pfctl) {
@@ -2676,6 +2761,7 @@ static int recover_stale_pf_state(void) {
 }
 
 static int disconnect_all(void) {
+    int had_active_state = g.connected || g.core_pid > 0 || g.redsocks_pid > 0 || g.dns_pid > 0;
     int protected_logs = g.protect_logs;
     char routing[sizeof(g.routing)];
     snprintf(routing, sizeof(routing), "%s", g.routing);
@@ -2684,6 +2770,7 @@ static int disconnect_all(void) {
 #if defined(__LP64__)
     if (g.system_proxy_enabled && vc_system_proxy_disable() != 0) {
         log_msg("failed to restore system PAC settings; keeping VPN helpers alive");
+        diagnostic_event("PAC restore failed; disconnect postponed");
         return -1;
     }
 #endif
@@ -2691,6 +2778,7 @@ static int disconnect_all(void) {
     if (g.mode == MODE_PF) {
         if (clear_pf_rules() != 0) {
             log_msg("failed to clear PF rules; keeping VPN helpers alive");
+            diagnostic_event("PF cleanup failed; disconnect postponed");
             return -1;
         }
     }
@@ -2707,6 +2795,7 @@ static int disconnect_all(void) {
     snprintf(g.routing, sizeof(g.routing), "%s", routing);
     g.routing_bypass_lan = routing_bypass_lan;
     update_vpn_icon_state(0);
+    if (had_active_state) diagnostic_event("VPN disconnected and routing restored");
     if (protected_logs) {
         clear_logs();
     }
@@ -2716,12 +2805,15 @@ static int disconnect_all(void) {
 static void monitor_connected_children(void) {
     if (!g.connected) return;
 
-    int healthy = 1;
-    if (!child_process_running(&g.core_pid, "vless-core")) healthy = 0;
-    if (!child_process_running(&g.redsocks_pid, "redsocks")) healthy = 0;
-    if (!child_process_running(&g.dns_pid, "dns proxy")) healthy = 0;
+    int core_healthy = child_process_running(&g.core_pid, "vless-core");
+    int redsocks_healthy = child_process_running(&g.redsocks_pid, "redsocks");
+    int dns_healthy = child_process_running(&g.dns_pid, "dns proxy");
+    int healthy = core_healthy && redsocks_healthy && dns_healthy;
 
     if (!healthy) {
+        if (!core_healthy) diagnostic_event("Core helper stopped unexpectedly");
+        if (!redsocks_healthy) diagnostic_event("Traffic redirector stopped unexpectedly");
+        if (!dns_healthy) diagnostic_event("DNS helper stopped unexpectedly");
         log_msg("VPN helper exited unexpectedly; restoring PAC settings and clearing PF rules");
         if (disconnect_all() != 0) {
             log_msg("VPN cleanup will be retried while system proxy restoration is pending");
@@ -2735,6 +2827,7 @@ static void monitor_connected_children(void) {
         g.system_proxy_refresh_ms = current_ms;
         if (vc_system_proxy_refresh(g.socks_port) != 0) {
             log_msg("system PAC proxy refresh failed; disconnecting to prevent WebKit traffic leaks");
+            diagnostic_event("PAC refresh failed; disconnecting to prevent a leak");
             if (disconnect_all() != 0) {
                 log_msg("VPN cleanup will be retried while system proxy restoration is pending");
             }
@@ -2752,6 +2845,7 @@ static int try_connect_pf(int socks_port) {
     if (rc != 0) {
         return -30 + rc;
     }
+    diagnostic_event("Traffic redirector started");
 
     usleep(300000);
 
@@ -2760,6 +2854,7 @@ static int try_connect_pf(int socks_port) {
         stop_pid(&g.redsocks_pid);
         return -45;
     }
+    diagnostic_event("DNS helper started");
 
     const char *pf_server_ips = (g.server_ips[0] != '\0') ? g.server_ips : g.server_ip;
     int pf_rc = apply_pf_rules(pf_server_ips, redir_port, dns_port);
@@ -2771,6 +2866,7 @@ static int try_connect_pf(int socks_port) {
         stop_pid(&g.redsocks_pid);
         return -40 + pf_rc;
     }
+    diagnostic_event("PF routing activated");
 
     g.mode = MODE_PF;
     g.connected = 1;
@@ -2798,6 +2894,8 @@ static int connect_all(const char *uri, const char *xray_version, int requested_
         return 0;
     }
 
+    diagnostic_event("Connection requested");
+
     g.protect_logs = protect_logs ? 1 : 0;
     if (g.protect_logs) {
         clear_logs();
@@ -2809,6 +2907,7 @@ static int connect_all(const char *uri, const char *xray_version, int requested_
     int port = pick_port(requested_port);
     if (port <= 0) {
         snprintf(msg, msg_cap, "ERR no free local SOCKS port");
+        diagnostic_event("Connection failed: no local SOCKS port available");
         finish_failed_protected_connect();
         return -1;
     }
@@ -2816,6 +2915,7 @@ static int connect_all(const char *uri, const char *xray_version, int requested_
     char host[256];
     if (parse_server_host(uri, host, sizeof(host)) != 0) {
         snprintf(msg, msg_cap, "ERR invalid config URI (cannot parse host)");
+        diagnostic_event("Connection failed: invalid configuration address");
         finish_failed_protected_connect();
         return -1;
     }
@@ -2826,19 +2926,23 @@ static int connect_all(const char *uri, const char *xray_version, int requested_
     if (resolve_rc == -2) {
         snprintf(msg, msg_cap, "ERR server DNS timeout after %dms", kConnectResolveTimeoutMs);
         log_msg("resolve server host %s timed out after %dms", host, kConnectResolveTimeoutMs);
+        diagnostic_event("Connection failed: server DNS timed out");
         finish_failed_protected_connect();
         return -1;
     }
     if (resolve_rc != 0) {
         snprintf(msg, msg_cap, "ERR failed to resolve server host");
+        diagnostic_event("Connection failed: server DNS resolution failed");
         finish_failed_protected_connect();
         return -1;
     }
 
     log_msg("resolved server host %s -> %s in %lldms", host, g.server_ips, now_ms() - resolve_start_ms);
+    diagnostic_event("Server address resolved");
 
     if (spawn_core(uri, g.server_ips, xray_version, port, &g.core_pid) != 0) {
         snprintf(msg, msg_cap, "ERR failed to start vless-core binary");
+        diagnostic_event("Connection failed: core helper did not start");
         (void)disconnect_all();
         return -1;
     }
@@ -2846,9 +2950,11 @@ static int connect_all(const char *uri, const char *xray_version, int requested_
     usleep(500000);
     if (!child_process_running(&g.core_pid, "vless-core")) {
         snprintf(msg, msg_cap, "ERR vless-core exited during startup");
+        diagnostic_event("Connection failed: core helper exited during startup");
         (void)disconnect_all();
         return -1;
     }
+    diagnostic_event("Core helper started");
 
     int pf_rc = try_connect_pf(port);
     if (pf_rc == 0) {
@@ -2856,6 +2962,7 @@ static int connect_all(const char *uri, const char *xray_version, int requested_
             !child_process_running(&g.redsocks_pid, "redsocks") ||
             !child_process_running(&g.dns_pid, "dns proxy")) {
             snprintf(msg, msg_cap, "ERR VPN helper exited during startup");
+            diagnostic_event("Connection failed: a helper exited during startup");
             (void)disconnect_all();
             return -1;
         }
@@ -2864,21 +2971,25 @@ static int connect_all(const char *uri, const char *xray_version, int requested_
             log_msg("failed to enable system PAC proxy for WebKit");
             (void)vc_system_proxy_disable();
             snprintf(msg, msg_cap, "ERR failed to configure system proxy");
+            diagnostic_event("Connection failed: PAC configuration failed");
             (void)disconnect_all();
             return -1;
         }
         g.system_proxy_enabled = 1;
         log_msg("system PAC proxy enabled on network services port=%d", port);
+        diagnostic_event("PAC configured for WebKit traffic");
 #endif
         update_vpn_icon_state(1);
         g.springboard_pid = springboard_pid(0);
         g.springboard_poll_ms = now_ms();
+        diagnostic_event("VPN connection established");
         snprintf(msg, msg_cap, "OK connected mode=%s socks=%d redir=%d protected=%d",
                  mode_name(g.mode), g.socks_port, g.redir_port, g.protect_logs);
         return 0;
     }
 
     (void)disconnect_all();
+    diagnostic_event("Connection failed: PF routing unavailable");
     snprintf(msg, msg_cap, "ERR pf backend unavailable: pf_rc=%d (see /var/log/vpnctld.log)", pf_rc);
     return -1;
 }
@@ -3005,6 +3116,110 @@ static void handle_redsocks_natlook(int client_fd, char *command) {
     }
 }
 
+static const char *pf_enabled_state_name(pf_enabled_state_t state) {
+    if (state == PF_ENABLED) return "enabled";
+    if (state == PF_DISABLED) return "disabled";
+    return "error";
+}
+
+static const char *pf_routing_state_name(pf_enabled_state_t enabled,
+                                         pf_root_state_t root) {
+    if (!g.connected || g.mode != MODE_PF) return "inactive";
+    if (enabled == PF_ENABLED_ERROR || root == PF_ROOT_ERROR) return "error";
+    if (enabled != PF_ENABLED) return "missing";
+    if (root == PF_ROOT_OWN_DISPATCH || root == PF_ROOT_SHARED_DISPATCH) return "active";
+    if (root == PF_ROOT_CONFLICT) return "conflict";
+    return "missing";
+}
+
+static const char *pac_state_name(void) {
+#if defined(__LP64__)
+    int state = vc_system_proxy_status();
+    if (state > 0) return "active";
+    if (state == 0) return "inactive";
+    return "error";
+#else
+    return "not_required";
+#endif
+}
+
+static void send_safe_diagnostics(int client_fd) {
+    const char *pfctl = find_pfctl_bin();
+    pf_enabled_state_t enabled = pfctl ? pf_enabled_state_quiet(pfctl) : PF_ENABLED_ERROR;
+    pf_root_state_t root = pfctl ? pf_root_state_quiet(pfctl) : PF_ROOT_ERROR;
+    char response[2048];
+    int length = snprintf(response,
+                          sizeof(response),
+                          "OK diagnostics=1\n"
+                          "connected=%d\n"
+                          "mode=%s\n"
+                          "architecture=%s\n"
+                          "socks_port=%d\n"
+                          "pf=%s\n"
+                          "pf_routing=%s\n"
+                          "pac=%s\n"
+                          "core=%s\n"
+                          "redsocks=%s\n"
+                          "dns=%s\n"
+                          "protected_logs=%d\n",
+                          g.connected ? 1 : 0,
+                          mode_name(g.mode),
+#if defined(__LP64__)
+                          "arm64",
+#else
+                          "armv7",
+#endif
+                          g.socks_port,
+                          pf_enabled_state_name(enabled),
+                          pf_routing_state_name(enabled, root),
+                          pac_state_name(),
+                          child_process_alive_snapshot(g.core_pid) ? "running" : "stopped",
+                          child_process_alive_snapshot(g.redsocks_pid) ? "running" : "stopped",
+                          child_process_alive_snapshot(g.dns_pid) ? "running" : "stopped",
+                          g.protect_logs ? 1 : 0);
+    if (length <= 0 || (size_t)length >= sizeof(response)) {
+        static const char error[] = "ERR diagnostics unavailable\n";
+        (void)write_all_fd(client_fd, error, sizeof(error) - 1);
+        return;
+    }
+    (void)write_all_fd(client_fd, response, (size_t)length);
+}
+
+static void send_diagnostic_events(int client_fd) {
+    char header[64];
+    int header_length = snprintf(header,
+                                 sizeof(header),
+                                 "OK events=%u\n",
+                                 (unsigned)g_diagnostic_event_count);
+    if (header_length > 0 && (size_t)header_length < sizeof(header)) {
+        (void)write_all_fd(client_fd, header, (size_t)header_length);
+    }
+
+    size_t first = (g_diagnostic_event_next + DIAGNOSTIC_EVENT_CAPACITY -
+                    g_diagnostic_event_count) % DIAGNOSTIC_EVENT_CAPACITY;
+    for (size_t index = 0; index < g_diagnostic_event_count; index++) {
+        diagnostic_event_t *event =
+            &g_diagnostic_events[(first + index) % DIAGNOSTIC_EVENT_CAPACITY];
+        char line[DIAGNOSTIC_EVENT_MESSAGE_CAPACITY + 64];
+        int length = snprintf(line,
+                              sizeof(line),
+                              "EVENT\t%lld\t%s\n",
+                              event->timestamp_ms,
+                              event->message);
+        if (length > 0 && (size_t)length < sizeof(line)) {
+            (void)write_all_fd(client_fd, line, (size_t)length);
+        }
+    }
+}
+
+static void clear_diagnostic_events(int client_fd) {
+    memset(g_diagnostic_events, 0, sizeof(g_diagnostic_events));
+    g_diagnostic_event_next = 0;
+    g_diagnostic_event_count = 0;
+    static const char response[] = "OK cleared\n";
+    (void)write_all_fd(client_fd, response, sizeof(response) - 1);
+}
+
 static void handle_client(int cfd, control_client_t client_type) {
     char buf[sizeof(g.routing) + 32];
     ssize_t n = read(cfd, buf, sizeof(buf) - 1);
@@ -3050,6 +3265,18 @@ static void handle_client(int cfd, control_client_t client_type) {
         } else {
             (void)write_all_fd(cfd, "ERR invalid log\n", 16);
         }
+        return;
+    }
+    if (client_type == CONTROL_CLIENT_APP && strcmp(buf, "DIAGNOSTICS\n") == 0) {
+        send_safe_diagnostics(cfd);
+        return;
+    }
+    if (client_type == CONTROL_CLIENT_APP && strcmp(buf, "EVENTS\n") == 0) {
+        send_diagnostic_events(cfd);
+        return;
+    }
+    if (client_type == CONTROL_CLIENT_APP && strcmp(buf, "CLEAR_EVENTS\n") == 0) {
+        clear_diagnostic_events(cfd);
         return;
     }
     if (client_type == CONTROL_CLIENT_APP &&
@@ -3188,6 +3415,7 @@ int main(int argc, char **argv) {
     }
     g_listen_fd = lfd;
     log_msg("daemon control socket ready");
+    diagnostic_event("Daemon ready");
 
     for (;;) {
         if (g_terminate) break;

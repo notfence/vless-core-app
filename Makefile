@@ -85,10 +85,10 @@ DAEMON_HEADERS := daemon/vpnctld_protocol.h daemon/system_proxy.h
 BOOTSTRAP_SRC := daemon/vpnctld_bootstrap.c
 
 APP_CFLAGS := -fno-objc-arc -Wall -Wextra -O2 -arch armv7 -miphoneos-version-min=6.0 -isysroot $(APP_IOS_SDK) -Iintegrations/happ -Iintegrations/karing -I$(ZBAR_DIR) -I$(OPENSSL_IOS_INCLUDE)
-APP_LDFLAGS := -Wl,-pie -Wl,-platform_version,ios,6.0,$(APP_IOS_SDK_VERSION) -framework UIKit -framework Foundation -framework CoreGraphics -framework QuartzCore -framework AVFoundation -framework CoreMedia -framework CoreVideo -liconv -lz $(OPENSSL_IOS_CRYPTO_LIB)
+APP_LDFLAGS := -Wl,-pie -Wl,-platform_version,ios,6.0,$(APP_IOS_SDK_VERSION) -framework UIKit -framework Foundation -framework CoreGraphics -framework QuartzCore -framework AVFoundation -framework CoreMedia -framework CoreVideo -framework SystemConfiguration -liconv -lsqlite3 -lz $(OPENSSL_IOS_CRYPTO_LIB)
 ZBAR_CFLAGS := -w -O2 -arch armv7 -miphoneos-version-min=6.0 -isysroot $(APP_IOS_SDK) -I$(ZBAR_DIR)
 APP_ARM64_CFLAGS := -fno-objc-arc -Wall -Wextra -O2 -arch arm64 -miphoneos-version-min=$(ARM64_IOS_MIN_VERSION) -isysroot $(ARM64_IOS_SDK) -Iintegrations/happ -Iintegrations/karing -I$(ZBAR_DIR) -I$(OPENSSL_IOS_ARM64_INCLUDE)
-APP_ARM64_LDFLAGS := -Wl,-pie -framework UIKit -framework Foundation -framework CoreGraphics -framework QuartzCore -framework AVFoundation -framework CoreMedia -framework CoreVideo -liconv -lz $(OPENSSL_IOS_ARM64_CRYPTO_LIB)
+APP_ARM64_LDFLAGS := -Wl,-pie -framework UIKit -framework Foundation -framework CoreGraphics -framework QuartzCore -framework AVFoundation -framework CoreMedia -framework CoreVideo -framework SystemConfiguration -liconv -lsqlite3 -lz $(OPENSSL_IOS_ARM64_CRYPTO_LIB)
 ZBAR_ARM64_CFLAGS := -w -O2 -arch arm64 -miphoneos-version-min=$(ARM64_IOS_MIN_VERSION) -isysroot $(ARM64_IOS_SDK) -I$(ZBAR_DIR)
 ARM64_RUNTIME_DEFINES := -DVC_CORE_EXECUTABLE_PATH='"/usr/bin/vless-core-darwin-arm64"' -DVC_CORE_EXECUTABLE_NAME='"vless-core-darwin-arm64"'
 APP_ARM64_CFLAGS += $(ARM64_RUNTIME_DEFINES)

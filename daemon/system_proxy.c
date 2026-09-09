@@ -784,6 +784,10 @@ int vc_system_proxy_restore_stale(void) {
     return quarantine_corrupt_backup();
 }
 
+int vc_system_proxy_status(void) {
+    return system_has_vless_proxy();
+}
+
 #else
 
 int vc_system_proxy_enable(int socks_port) {
@@ -802,6 +806,10 @@ int vc_system_proxy_refresh(int socks_port) {
 
 int vc_system_proxy_restore_stale(void) {
     return 0;
+}
+
+int vc_system_proxy_status(void) {
+    return -2;
 }
 
 #endif
