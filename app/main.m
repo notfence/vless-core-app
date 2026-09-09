@@ -4327,22 +4327,6 @@ static NSInteger const kRoutingRuleActionSheetTagBase = 6200;
     return @"Rules — first match wins";
 }
 
-- (UIView *)tableView:(UITableView *)tableView viewForHeaderInSection:(NSInteger)section {
-    UIView *header = [[[UIView alloc] initWithFrame:
-                       CGRectMake(0.0f, 0.0f, tableView.bounds.size.width, 32.0f)] autorelease];
-    header.backgroundColor = [UIColor clearColor];
-
-    UILabel *label = [[[UILabel alloc] initWithFrame:
-                       CGRectMake(18.0f, 0.0f, tableView.bounds.size.width - 36.0f, 32.0f)] autorelease];
-    label.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
-    label.backgroundColor = [UIColor clearColor];
-    label.font = [UIFont boldSystemFontOfSize:17.0f];
-    label.text = [self tableView:tableView titleForHeaderInSection:section];
-    [header addSubview:label];
-    VCAppearanceApplyHeaderView(header);
-    return header;
-}
-
 - (NSString *)tableView:(UITableView *)tableView titleForFooterInSection:(NSInteger)section {
     (void)tableView;
     if (section == 0) {
@@ -4853,22 +4837,6 @@ commitEditingStyle:(UITableViewCellEditingStyle)editingStyle
             kDefaultXrayVersion];
 }
 
-- (UIView *)tableView:(UITableView *)tableView viewForHeaderInSection:(NSInteger)section {
-    UIView *header = [[[UIView alloc] initWithFrame:
-                       CGRectMake(0.0f, 0.0f, tableView.bounds.size.width, 32.0f)] autorelease];
-    header.backgroundColor = [UIColor clearColor];
-
-    UILabel *label = [[[UILabel alloc] initWithFrame:
-                       CGRectMake(18.0f, 0.0f, tableView.bounds.size.width - 36.0f, 32.0f)] autorelease];
-    label.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
-    label.backgroundColor = [UIColor clearColor];
-    label.font = [UIFont boldSystemFontOfSize:17.0f];
-    label.text = [self tableView:tableView titleForHeaderInSection:section];
-    [header addSubview:label];
-    VCAppearanceApplyHeaderView(header);
-    return header;
-}
-
 - (CGFloat)tableView:(UITableView *)tableView heightForFooterInSection:(NSInteger)section {
     NSString *text = [self tableView:tableView titleForFooterInSection:section];
     CGFloat width = MAX(1.0f, tableView.bounds.size.width - 36.0f);
@@ -4923,6 +4891,7 @@ commitEditingStyle:(UITableViewCellEditingStyle)editingStyle
     (void)tableView;
     (void)section;
     VCAppearanceApplyHeaderView(view);
+    VCAppearanceScheduleVisibleTableHeadersRefresh(tableView);
 }
 
 - (void)tableView:(UITableView *)tableView willDisplayFooterView:(UIView *)view forSection:(NSInteger)section {
@@ -5541,21 +5510,6 @@ static NSArray *VCCombinedDiagnosticEvents(NSArray *daemonEvents,
                       object:nil];
 }
 
-- (UIView *)tableView:(UITableView *)tableView viewForHeaderInSection:(NSInteger)section {
-    UIView *header = [[[UIView alloc] initWithFrame:
-                       CGRectMake(0.0f, 0.0f, tableView.bounds.size.width, 32.0f)] autorelease];
-    header.backgroundColor = [UIColor clearColor];
-    UILabel *label = [[[UILabel alloc] initWithFrame:
-                       CGRectMake(18.0f, 0.0f, tableView.bounds.size.width - 36.0f, 32.0f)] autorelease];
-    label.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
-    label.backgroundColor = [UIColor clearColor];
-    label.font = [UIFont boldSystemFontOfSize:17.0f];
-    label.text = [self tableView:tableView titleForHeaderInSection:section];
-    [header addSubview:label];
-    VCAppearanceApplyHeaderView(header);
-    return header;
-}
-
 - (UITableViewCell *)tableView:(UITableView *)tableView cellForRowAtIndexPath:(NSIndexPath *)indexPath {
     static NSString *identifier = @"DiagnosticEventListCell";
     UITableViewCell *cell = [tableView dequeueReusableCellWithIdentifier:identifier];
@@ -5594,6 +5548,7 @@ static NSArray *VCCombinedDiagnosticEvents(NSArray *daemonEvents,
     (void)tableView;
     (void)section;
     VCAppearanceApplyHeaderView(view);
+    VCAppearanceScheduleVisibleTableHeadersRefresh(tableView);
 }
 
 - (BOOL)shouldAutorotateToInterfaceOrientation:(UIInterfaceOrientation)interfaceOrientation {
@@ -6437,21 +6392,6 @@ static NSString *VCDiagnosticValue(NSDictionary *dictionary,
     return nil;
 }
 
-- (UIView *)tableView:(UITableView *)tableView viewForHeaderInSection:(NSInteger)section {
-    UIView *header = [[[UIView alloc] initWithFrame:
-                       CGRectMake(0.0f, 0.0f, tableView.bounds.size.width, 32.0f)] autorelease];
-    header.backgroundColor = [UIColor clearColor];
-    UILabel *label = [[[UILabel alloc] initWithFrame:
-                       CGRectMake(18.0f, 0.0f, tableView.bounds.size.width - 36.0f, 32.0f)] autorelease];
-    label.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
-    label.backgroundColor = [UIColor clearColor];
-    label.font = [UIFont boldSystemFontOfSize:17.0f];
-    label.text = [self tableView:tableView titleForHeaderInSection:section];
-    [header addSubview:label];
-    VCAppearanceApplyHeaderView(header);
-    return header;
-}
-
 - (CGFloat)tableView:(UITableView *)tableView heightForFooterInSection:(NSInteger)section {
     (void)tableView;
     if (section == VCDebugSectionActivityLogging) return 64.0f;
@@ -6728,6 +6668,7 @@ static NSString *VCDiagnosticValue(NSDictionary *dictionary,
     (void)tableView;
     (void)section;
     VCAppearanceApplyHeaderView(view);
+    VCAppearanceScheduleVisibleTableHeadersRefresh(tableView);
 }
 
 - (void)tableView:(UITableView *)tableView willDisplayFooterView:(UIView *)view forSection:(NSInteger)section {
