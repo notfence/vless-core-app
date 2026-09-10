@@ -44,11 +44,15 @@
     <key>CFBundlePackageType</key>
     <string>APPL</string>
     <key>CFBundleShortVersionString</key>
-    <string>0.6.0</string>
+    <string>0.6.1</string>
     <key>CFBundleVersion</key>
-    <string>61</string>
+    <string>62</string>
     <key>LSRequiresIPhoneOS</key>
     <true/>
+    <key>LSApplicationQueriesSchemes</key>
+    <array>
+        <string>githublegacy</string>
+    </array>
     <key>NSCameraUsageDescription</key>
     <string>Camera is used to scan QR codes for importing links.</string>
     <key>MinimumOSVersion</key>

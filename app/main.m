@@ -64,6 +64,7 @@ static NSString *const kDefaultsRoutingBypassLANKey = @"vlesscore.routing.bypass
 static NSString *const kDefaultsRoutingRulesKey = @"vlesscore.routing.rules";
 static NSString *const kDefaultsSubHWIDKey = @"vlesscore.subscription_hwid";
 static NSString *const kDefaultsDiagnosticAppActivityKey = @"vlesscore.diagnostics.app_activity";
+static NSString *const kDefaultsPreferGitHubLegacyKey = @"vlesscore.links.prefer_github_legacy";
 static NSString *const kSubscriptionAllowInsecureFetchKey = @"allow_insecure_fetch";
 static NSString *const kSubscriptionAllowPlainHTTPKey = @"allow_plain_http";
 static NSString *const kSubscriptionHappSourceKey = @"happ_source";
@@ -87,6 +88,9 @@ static NSString *const kDefaultXrayVersion = @"26.3.27";
 static NSString *const kVCQRMetadataType = @"org.iso.QRCode";
 static NSString *const kUpdateAPIURL = @"https://api.github.com/repos/notfence/vless-core-app/releases/latest";
 static NSString *const kUpdateReleasesURL = @"https://github.com/notfence/vless-core-app/releases";
+static NSString *const kProjectURL = @"https://github.com/notfence/vless-core-app";
+static NSString *const kGitHubLegacyProjectURL = @"githublegacy://repo/notfence/vless-core-app";
+static NSString *const kGitHubLegacyLatestReleaseURL = @"githublegacy://release/notfence/vless-core-app/latest";
 static const NSTimeInterval kAutomaticUpdateCheckInterval = 24.0 * 60.0 * 60.0;
 static NSString *const kImportDirectoryPath = @"/var/mobile/vless-core-import";
 static NSString *const kSecureStoreDirectoryPath = @"/private/var/mobile/Library/Application Support/vless-core";
@@ -446,6 +450,38 @@ static BOOL IsPadDevice(void) {
     }
 
     return NO;
+}
+
+static BOOL VCPreferGitHubLegacy(void) {
+    NSUserDefaults *defaults = [NSUserDefaults standardUserDefaults];
+    return [defaults objectForKey:kDefaultsPreferGitHubLegacyKey] == nil ||
+           [defaults boolForKey:kDefaultsPreferGitHubLegacyKey];
+}
+
+static void VCOpenURLWithFallback(NSString *preferredURLString, NSString *fallbackURLString) {
+    UIApplication *application = [UIApplication sharedApplication];
+    NSURL *preferredURL = [NSURL URLWithString:preferredURLString];
+    BOOL opened = NO;
+
+    if (VCPreferGitHubLegacy() && preferredURL && [application canOpenURL:preferredURL]) {
+        opened = [application openURL:preferredURL];
+    }
+
+    if (!opened) {
+        NSURL *fallbackURL = [NSURL URLWithString:fallbackURLString];
+        if (fallbackURL) {
+            [application openURL:fallbackURL];
+        }
+    }
+}
+
+static void VCOpenGitHubProject(void) {
+    VCOpenURLWithFallback(kGitHubLegacyProjectURL, kProjectURL);
+}
+
+static void VCOpenGitHubLatestRelease(NSString *fallbackURLString) {
+    NSString *fallback = [fallbackURLString length] > 0 ? fallbackURLString : kUpdateReleasesURL;
+    VCOpenURLWithFallback(kGitHubLegacyLatestReleaseURL, fallback);
 }
 
 static UIInterfaceOrientation CurrentInterfaceOrientation(void) {
@@ -3391,6 +3427,7 @@ static UIView *VCMainListCellReorderControlInView(UIView *view) {
     UISwitch *_preserveCustomNamesSwitch;
     UISwitch *_stealthSwitch;
     UISwitch *_automaticUpdateChecksSwitch;
+    UISwitch *_preferGitHubLegacySwitch;
     VCUpdateChecker *_updateChecker;
     NSString *_availableReleaseURL;
     BOOL _autoUpdate;
@@ -6752,6 +6789,15 @@ static NSString *VCDiagnosticValue(NSDictionary *dictionary,
     }
 }
 
+- (void)preferGitHubLegacySwitchChanged:(UISwitch *)sw {
+    BOOL enabled = [sw isOn];
+    NSUserDefaults *defaults = [NSUserDefaults standardUserDefaults];
+    [defaults setBool:enabled forKey:kDefaultsPreferGitHubLegacyKey];
+    [defaults synchronize];
+    VCRecordAppEvent(@"settings", @"GitHub Legacy priority changed",
+                     enabled ? @"enabled=1" : @"enabled=0");
+}
+
 - (NSString *)updateCheckDetailText {
     if (_updateChecker) return @"Checking GitHub Releases...";
 
@@ -6872,6 +6918,7 @@ static NSString *VCDiagnosticValue(NSDictionary *dictionary,
     _preserveCustomNamesSwitch.onTintColor = VCAccentColor();
     _stealthSwitch.onTintColor = VCAccentColor();
     _automaticUpdateChecksSwitch.onTintColor = VCAccentColor();
+    _preferGitHubLegacySwitch.onTintColor = VCAccentColor();
     [_tableView reloadData];
     [self updateSettingsFooterForWidth:_tableView.bounds.size.width];
     VCAppearanceRefreshVisibleTableHeaders(_tableView);
@@ -6914,6 +6961,12 @@ static NSString *VCDiagnosticValue(NSDictionary *dictionary,
                                      action:@selector(automaticUpdateChecksSwitchChanged:)
                            forControlEvents:UIControlEventValueChanged];
 
+    _preferGitHubLegacySwitch = [[UISwitch alloc] initWithFrame:CGRectZero];
+    [_preferGitHubLegacySwitch setOn:VCPreferGitHubLegacy() animated:NO];
+    [_preferGitHubLegacySwitch addTarget:self
+                                  action:@selector(preferGitHubLegacySwitchChanged:)
+                        forControlEvents:UIControlEventValueChanged];
+
     [self applyTheme];
 }
 
@@ -6943,7 +6996,7 @@ static NSString *VCDiagnosticValue(NSDictionary *dictionary,
 
 - (NSInteger)numberOfSectionsInTableView:(UITableView *)tableView {
     (void)tableView;
-    return 6;
+    return 7;
 }
 
 - (NSInteger)tableView:(UITableView *)tableView numberOfRowsInSection:(NSInteger)section {
@@ -6951,7 +7004,7 @@ static NSString *VCDiagnosticValue(NSDictionary *dictionary,
     if (section == 0) return 3;
     if (section == 1) return 3;
     if (section == 2 || section == 3) return 2;
-    if (section == 4) return 1;
+    if (section == 4 || section == 5) return 1;
     return 4;
 }
 
@@ -6962,6 +7015,7 @@ static NSString *VCDiagnosticValue(NSDictionary *dictionary,
     if (section == 2) return @"Appearance";
     if (section == 3) return @"Updates";
     if (section == 4) return @"Debug";
+    if (section == 5) return @"Advanced";
     return @"About";
 }
 
@@ -7061,15 +7115,18 @@ static NSString *VCDiagnosticValue(NSDictionary *dictionary,
         return @"Debug and diagnostics";
     }
     if (indexPath.section == 5 && indexPath.row == 0) {
+        return @"Prefer GitHub Legacy";
+    }
+    if (indexPath.section == 6 && indexPath.row == 0) {
         return @"About vless-core";
     }
-    if (indexPath.section == 5 && indexPath.row == 1) {
+    if (indexPath.section == 6 && indexPath.row == 1) {
         return @"Credits";
     }
-    if (indexPath.section == 5 && indexPath.row == 2) {
+    if (indexPath.section == 6 && indexPath.row == 2) {
         return @"FAQ";
     }
-    if (indexPath.section == 5 && indexPath.row == 3) {
+    if (indexPath.section == 6 && indexPath.row == 3) {
         return @"Project on GitHub";
     }
     return @"";
@@ -7110,15 +7167,18 @@ static NSString *VCDiagnosticValue(NSDictionary *dictionary,
         return @"Live state, connection tests, events and reports";
     }
     if (indexPath.section == 5 && indexPath.row == 0) {
+        return @"Open GitHub links in the app before the browser";
+    }
+    if (indexPath.section == 6 && indexPath.row == 0) {
         return @"Version and core binary info";
     }
-    if (indexPath.section == 5 && indexPath.row == 1) {
+    if (indexPath.section == 6 && indexPath.row == 1) {
         return @"Dependencies, licenses and special thanks";
     }
-    if (indexPath.section == 5 && indexPath.row == 2) {
+    if (indexPath.section == 6 && indexPath.row == 2) {
         return @"Common questions and quick answers";
     }
-    if (indexPath.section == 5 && indexPath.row == 3) {
+    if (indexPath.section == 6 && indexPath.row == 3) {
         return @"github.com/notfence/vless-core-app";
     }
     return @"";
@@ -7271,6 +7331,23 @@ static NSString *VCDiagnosticValue(NSDictionary *dictionary,
     }
 
     if (indexPath.section == 5 && indexPath.row == 0) {
+        static NSString *kGitHubLegacyCellId = @"SettingsGitHubLegacyCell";
+        UITableViewCell *cell = [tableView dequeueReusableCellWithIdentifier:kGitHubLegacyCellId];
+        if (!cell) {
+            cell = [[[UITableViewCell alloc] initWithStyle:UITableViewCellStyleSubtitle
+                                           reuseIdentifier:kGitHubLegacyCellId] autorelease];
+        }
+        cell.selectionStyle = UITableViewCellSelectionStyleNone;
+        cell.accessoryType = UITableViewCellAccessoryNone;
+        [_preferGitHubLegacySwitch setOn:VCPreferGitHubLegacy() animated:NO];
+        cell.accessoryView = _preferGitHubLegacySwitch;
+        [self applySettingsMarqueesToCell:cell
+                                    title:@"Prefer GitHub Legacy"
+                                   detail:@"Open GitHub links in the app before the browser"];
+        return cell;
+    }
+
+    if (indexPath.section == 6 && indexPath.row == 0) {
         static NSString *kAboutCellId = @"SettingsAboutCell";
         UITableViewCell *cell = [tableView dequeueReusableCellWithIdentifier:kAboutCellId];
         if (!cell) {
@@ -7285,7 +7362,7 @@ static NSString *VCDiagnosticValue(NSDictionary *dictionary,
         return cell;
     }
 
-    if (indexPath.section == 5 && indexPath.row == 1) {
+    if (indexPath.section == 6 && indexPath.row == 1) {
         static NSString *kCreditsCellId = @"SettingsCreditsCell";
         UITableViewCell *cell = [tableView dequeueReusableCellWithIdentifier:kCreditsCellId];
         if (!cell) {
@@ -7300,7 +7377,7 @@ static NSString *VCDiagnosticValue(NSDictionary *dictionary,
         return cell;
     }
 
-    if (indexPath.section == 5 && indexPath.row == 2) {
+    if (indexPath.section == 6 && indexPath.row == 2) {
         static NSString *kFAQCellId = @"SettingsFAQCell";
         UITableViewCell *cell = [tableView dequeueReusableCellWithIdentifier:kFAQCellId];
         if (!cell) {
@@ -7379,7 +7456,7 @@ static NSString *VCDiagnosticValue(NSDictionary *dictionary,
         VCRecordAppEvent(@"ui", @"Debug settings opened", nil);
         DebugVC *debug = [[[DebugVC alloc] init] autorelease];
         [self.navigationController pushViewController:debug animated:YES];
-    } else if (indexPath.section == 5) {
+    } else if (indexPath.section == 6) {
         if (indexPath.row == 0) {
             AboutVC *about = [[[AboutVC alloc] init] autorelease];
             [self.navigationController pushViewController:about animated:YES];
@@ -7389,11 +7466,8 @@ static NSString *VCDiagnosticValue(NSDictionary *dictionary,
         } else if (indexPath.row == 2) {
             FAQVC *faq = [[[FAQVC alloc] init] autorelease];
             [self.navigationController pushViewController:faq animated:YES];
-        } else {
-            NSURL *url = [NSURL URLWithString:@"https://github.com/notfence/vless-core-app"];
-            if (url) {
-                [[UIApplication sharedApplication] openURL:url];
-            }
+        } else if (indexPath.row == 3) {
+            VCOpenGitHubProject();
         }
     }
     [tableView deselectRowAtIndexPath:indexPath animated:YES];
@@ -7421,10 +7495,7 @@ static NSString *VCDiagnosticValue(NSDictionary *dictionary,
 - (void)alertView:(UIAlertView *)alertView clickedButtonAtIndex:(NSInteger)buttonIndex {
     if (alertView.tag != kVCSettingsUpdateAlertTag || buttonIndex == alertView.cancelButtonIndex) return;
 
-    NSURL *url = [NSURL URLWithString:_availableReleaseURL ? _availableReleaseURL : kUpdateReleasesURL];
-    if (url) {
-        [[UIApplication sharedApplication] openURL:url];
-    }
+    VCOpenGitHubLatestRelease(_availableReleaseURL);
 }
 
 - (BOOL)shouldAutorotateToInterfaceOrientation:(UIInterfaceOrientation)interfaceOrientation {
@@ -7465,6 +7536,7 @@ static NSString *VCDiagnosticValue(NSDictionary *dictionary,
     [_preserveCustomNamesSwitch release];
     [_stealthSwitch release];
     [_automaticUpdateChecksSwitch release];
+    [_preferGitHubLegacySwitch release];
     [super dealloc];
 }
 
@@ -16348,10 +16420,7 @@ moveRowAtIndexPath:(NSIndexPath *)sourceIndexPath
 - (void)alertView:(UIAlertView *)alertView clickedButtonAtIndex:(NSInteger)buttonIndex {
     if (alertView.tag == VCAlertTagUpdateAvailable) {
         if (buttonIndex != alertView.cancelButtonIndex) {
-            NSURL *url = [NSURL URLWithString:_availableReleaseURL ? _availableReleaseURL : kUpdateReleasesURL];
-            if (url) {
-                [[UIApplication sharedApplication] openURL:url];
-            }
+            VCOpenGitHubLatestRelease(_availableReleaseURL);
         }
         return;
     }
