@@ -3590,7 +3590,7 @@ typedef NS_ENUM(NSInteger, VCDebugSection) {
 
     NSArray *compatibility = [NSArray arrayWithObject:
         [self question:@"Which devices are supported?"
-                 answer:@"A jailbreak is required. The package requires iOS 6 - iOS 10 and contains ARMv7 binaries. It supports compatible 32-bit devices as well as 64-bit devices (ARM64) running iOS 10 or earlier through 32-bit compatibility. It is tested on iOS 6.1.3 and iOS 10.3.3; other device and iOS combinations are not guaranteed."]];
+                 answer:@"A rootful jailbreak is required. vless-core supports iOS 6 through iOS 14. On iOS 6 - iOS 10 it uses the ARMv7 runtime, including ARM64 devices through 32-bit compatibility. On iOS 11 - iOS 14 it uses the native ARM64 runtime. The package selects the correct runtime automatically during installation."]];
 
     NSArray *newSections = [[NSArray alloc] initWithObjects:
         [self sectionWithTitle:@"Getting started" questions:gettingStarted],
