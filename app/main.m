@@ -108,6 +108,7 @@ static const CGFloat kVCMainCompactContentStartY = 112.0f;
 static BOOL gVCSecureStoreWritable = YES;
 static NSString *SendCommand(NSString *cmdLine);
 static void VCRecordAppEvent(NSString *category, NSString *action, NSString *detail);
+static void VCRecordDaemonAuthorizationFailure(NSString *response);
 
 static CGFloat VCMainStatusBarInset(void) {
     if ([[UIDevice currentDevice].systemVersion integerValue] < 7 ||
@@ -795,7 +796,9 @@ static NSString *SendCommand(NSString *cmdLine) {
             char buf[65536];
             ssize_t rd = SendRawCommand(outData, &cmd_tv, 500, buf, sizeof(buf), &last_errno, &connected);
             if (rd > 0) {
-                return [NSString stringWithUTF8String:buf];
+                NSString *response = [NSString stringWithUTF8String:buf];
+                VCRecordDaemonAuthorizationFailure(response);
+                return response;
             }
 
             if (connected) {
@@ -4998,6 +5001,28 @@ static NSString *VCSanitizeDiagnosticText(NSString *value, NSUInteger maximumLen
     return safe;
 }
 
+static void VCRecordDaemonAuthorizationFailure(NSString *response) {
+    static NSString *previousDetail = nil;
+    static NSTimeInterval previousTimestamp = 0;
+    if (![response isKindOfClass:[NSString class]] ||
+        ![response hasPrefix:@"ERR unauthorized client"]) return;
+
+    NSString *safeDetail = VCSanitizeDiagnosticText(response, 192);
+    NSTimeInterval timestamp = CACurrentMediaTime();
+    BOOL shouldRecord = NO;
+    @synchronized([VCAppEventRecorder class]) {
+        if (![previousDetail isEqualToString:safeDetail] || timestamp - previousTimestamp >= 60.0) {
+            [previousDetail release];
+            previousDetail = [safeDetail copy];
+            previousTimestamp = timestamp;
+            shouldRecord = YES;
+        }
+    }
+    if (shouldRecord) {
+        VCRecordAppEvent(@"daemon", @"Daemon authorization rejected", safeDetail);
+    }
+}
+
 static NSString *VCDiagnosticErrorCategory(NSString *errorText) {
     NSString *lower = [[errorText description] lowercaseString];
     if ([lower rangeOfString:@"timeout"].location != NSNotFound ||
@@ -5097,6 +5122,7 @@ static BOOL VCAppActivityLoggingEnabled(void) {
 
 static BOOL VCIsOptionalAppDiagnosticEvent(NSString *category, NSString *action) {
     if ([category isEqualToString:@"connection"] ||
+        [category isEqualToString:@"daemon"] ||
         [category isEqualToString:@"diagnostics"] ||
         [category isEqualToString:@"ping"]) return NO;
     if ([category isEqualToString:@"subscription"] &&
@@ -6256,6 +6282,13 @@ static NSString *VCDiagnosticValue(NSDictionary *dictionary,
 #endif
     [report appendFormat:@"App activity logging: %@\n",
      VCAppActivityLoggingEnabled() ? @"enabled" : @"disabled"];
+    NSString *daemonControlError = [state objectForKey:@"error"];
+    if ([daemonControlError isKindOfClass:[NSString class]] && [daemonControlError length] > 0) {
+        [report appendFormat:@"Daemon control: %@\n",
+         VCSanitizeDiagnosticText(daemonControlError, 192)];
+    } else {
+        [report appendString:@"Daemon control: online\n"];
+    }
     [report appendFormat:@"Daemon architecture: %@\n", VCDiagnosticValue(state, @"architecture", @"unknown")];
     [report appendFormat:@"Active network: %@\n\n", VCActiveNetworkDescription()];
 

@@ -215,6 +215,27 @@ typedef enum {
     CONTROL_CLIENT_REDSOCKS = 4,
 } control_client_t;
 
+typedef enum {
+    CONTROL_AUTH_FAILURE_NONE = 0,
+    CONTROL_AUTH_FAILURE_INVALID_ARGUMENTS,
+    CONTROL_AUTH_FAILURE_PEER_PID,
+    CONTROL_AUTH_FAILURE_ARGMAX_QUERY,
+    CONTROL_AUTH_FAILURE_ARGMAX_VALUE,
+    CONTROL_AUTH_FAILURE_NO_MEMORY,
+    CONTROL_AUTH_FAILURE_PROCARGS_QUERY,
+    CONTROL_AUTH_FAILURE_PROCARGS_FORMAT,
+    CONTROL_AUTH_FAILURE_PATH_LENGTH,
+    CONTROL_AUTH_FAILURE_PATH_MISMATCH,
+    CONTROL_AUTH_FAILURE_TRUSTED_EXECUTABLE,
+} control_auth_failure_t;
+
+typedef struct {
+    control_auth_failure_t failure;
+    int error_number;
+    pid_t peer_pid;
+    char executable[PATH_MAX];
+} control_auth_diagnostic_t;
+
 static void stop_pid(pid_t *p);
 static void truncate_log_file(const char *path);
 static void clear_logs(void);
@@ -574,24 +595,53 @@ static int path_exists(const char *path) {
     return stat(path, &st) == 0;
 }
 
-static int process_executable_path(pid_t pid, char *path, size_t path_cap) {
-    if (pid <= 0 || !path || path_cap == 0) return -1;
+static int process_executable_path(pid_t pid,
+                                   char *path,
+                                   size_t path_cap,
+                                   control_auth_diagnostic_t *diagnostic) {
+    if (pid <= 0 || !path || path_cap == 0) {
+        if (diagnostic) diagnostic->failure = CONTROL_AUTH_FAILURE_INVALID_ARGUMENTS;
+        return -1;
+    }
 
     int argmax_mib[2] = { CTL_KERN, KERN_ARGMAX };
     int argmax = 0;
     size_t argmax_size = sizeof(argmax);
-    if (sysctl(argmax_mib, 2, &argmax, &argmax_size, NULL, 0) != 0 ||
-        argmax <= (int)sizeof(int) || argmax > 1024 * 1024) {
+    int argmax_rc = sysctl(argmax_mib, 2, &argmax, &argmax_size, NULL, 0);
+    if (argmax_rc != 0) {
+        if (diagnostic) {
+            diagnostic->failure = CONTROL_AUTH_FAILURE_ARGMAX_QUERY;
+            diagnostic->error_number = errno;
+        }
+        return -1;
+    }
+    if (argmax <= (int)sizeof(int) || argmax > 1024 * 1024) {
+        if (diagnostic) diagnostic->failure = CONTROL_AUTH_FAILURE_ARGMAX_VALUE;
         return -1;
     }
 
     char *arguments = (char *)calloc(1, (size_t)argmax);
-    if (!arguments) return -1;
+    if (!arguments) {
+        if (diagnostic) {
+            diagnostic->failure = CONTROL_AUTH_FAILURE_NO_MEMORY;
+            diagnostic->error_number = ENOMEM;
+        }
+        return -1;
+    }
 
     int process_mib[3] = { CTL_KERN, KERN_PROCARGS2, pid };
     size_t arguments_size = (size_t)argmax;
     int rc = sysctl(process_mib, 3, arguments, &arguments_size, NULL, 0);
-    if (rc != 0 || arguments_size <= sizeof(int)) {
+    if (rc != 0) {
+        if (diagnostic) {
+            diagnostic->failure = CONTROL_AUTH_FAILURE_PROCARGS_QUERY;
+            diagnostic->error_number = errno;
+        }
+        free(arguments);
+        return -1;
+    }
+    if (arguments_size <= sizeof(int)) {
+        if (diagnostic) diagnostic->failure = CONTROL_AUTH_FAILURE_PROCARGS_FORMAT;
         free(arguments);
         return -1;
     }
@@ -600,12 +650,14 @@ static int process_executable_path(pid_t pid, char *path, size_t path_cap) {
     size_t available = arguments_size - sizeof(int);
     const char *terminator = (const char *)memchr(executable, '\0', available);
     if (!terminator) {
+        if (diagnostic) diagnostic->failure = CONTROL_AUTH_FAILURE_PROCARGS_FORMAT;
         free(arguments);
         return -1;
     }
 
     size_t length = (size_t)(terminator - executable);
     if (length == 0 || length >= path_cap) {
+        if (diagnostic) diagnostic->failure = CONTROL_AUTH_FAILURE_PATH_LENGTH;
         free(arguments);
         return -1;
     }
@@ -615,23 +667,139 @@ static int process_executable_path(pid_t pid, char *path, size_t path_cap) {
     return 0;
 }
 
-static control_client_t control_client_type(int client_fd) {
-    pid_t peer_pid = 0;
-    socklen_t peer_pid_size = (socklen_t)sizeof(peer_pid);
-    if (getsockopt(client_fd, SOL_LOCAL, LOCAL_PEERPID, &peer_pid, &peer_pid_size) != 0 ||
-        peer_pid_size != sizeof(peer_pid) || peer_pid <= 0) {
-        return CONTROL_CLIENT_UNAUTHORIZED;
+static int executable_path_matches(const char *actual,
+                                   const char *expected,
+                                   int *trust_error) {
+    if (trust_error) *trust_error = 0;
+    if (!actual || !expected) return 0;
+
+    int path_matches = strcmp(actual, expected) == 0;
+    if (!path_matches) {
+        char expected_resolved[PATH_MAX];
+        if (!realpath(expected, expected_resolved) ||
+            strcmp(actual, expected_resolved) != 0) {
+            return 0;
+        }
     }
 
-    char executable[PATH_MAX];
-    if (process_executable_path(peer_pid, executable, sizeof(executable)) != 0) {
+    struct stat trusted;
+    if (stat(expected, &trusted) != 0) {
+        if (trust_error) *trust_error = errno;
+        return -1;
+    }
+    if (!S_ISREG(trusted.st_mode) ||
+        trusted.st_uid != 0 ||
+        trusted.st_nlink != 1 ||
+        (trusted.st_mode & 022) != 0) {
+        if (trust_error) *trust_error = EPERM;
+        return -1;
+    }
+    return 1;
+}
+
+static control_client_t control_client_type(int client_fd,
+                                            control_auth_diagnostic_t *diagnostic) {
+    if (diagnostic) memset(diagnostic, 0, sizeof(*diagnostic));
+    pid_t peer_pid = 0;
+    socklen_t peer_pid_size = (socklen_t)sizeof(peer_pid);
+    int peer_pid_rc = getsockopt(client_fd, SOL_LOCAL, LOCAL_PEERPID, &peer_pid, &peer_pid_size);
+    if (peer_pid_rc != 0 ||
+        peer_pid_size != sizeof(peer_pid) || peer_pid <= 0) {
+        if (diagnostic) {
+            diagnostic->failure = CONTROL_AUTH_FAILURE_PEER_PID;
+            diagnostic->error_number = peer_pid_rc != 0 ? errno : 0;
+            diagnostic->peer_pid = peer_pid;
+        }
         return CONTROL_CLIENT_UNAUTHORIZED;
     }
-    if (strcmp(executable, VC_APP_EXECUTABLE_PATH) == 0) return CONTROL_CLIENT_APP;
-    if (strcmp(executable, VC_BOOTSTRAP_EXECUTABLE_PATH) == 0) return CONTROL_CLIENT_BOOTSTRAP;
-    if (strcmp(executable, VC_CORE_EXECUTABLE_PATH) == 0) return CONTROL_CLIENT_CORE;
-    if (strcmp(executable, VC_REDSOCKS_EXECUTABLE_PATH) == 0) return CONTROL_CLIENT_REDSOCKS;
+    if (diagnostic) diagnostic->peer_pid = peer_pid;
+
+    char executable[PATH_MAX];
+    if (process_executable_path(peer_pid,
+                                executable,
+                                sizeof(executable),
+                                diagnostic) != 0) {
+        return CONTROL_CLIENT_UNAUTHORIZED;
+    }
+    if (diagnostic) snprintf(diagnostic->executable,
+                             sizeof(diagnostic->executable),
+                             "%s",
+                             executable);
+    const char *expected_paths[] = {
+        VC_APP_EXECUTABLE_PATH,
+        VC_BOOTSTRAP_EXECUTABLE_PATH,
+        VC_CORE_EXECUTABLE_PATH,
+        VC_REDSOCKS_EXECUTABLE_PATH,
+    };
+    const control_client_t expected_clients[] = {
+        CONTROL_CLIENT_APP,
+        CONTROL_CLIENT_BOOTSTRAP,
+        CONTROL_CLIENT_CORE,
+        CONTROL_CLIENT_REDSOCKS,
+    };
+    for (size_t index = 0; index < sizeof(expected_paths) / sizeof(expected_paths[0]); index++) {
+        int trust_error = 0;
+        int match = executable_path_matches(executable, expected_paths[index], &trust_error);
+        if (match > 0) return expected_clients[index];
+        if (match < 0) {
+            if (diagnostic) {
+                diagnostic->failure = CONTROL_AUTH_FAILURE_TRUSTED_EXECUTABLE;
+                diagnostic->error_number = trust_error;
+            }
+            return CONTROL_CLIENT_UNAUTHORIZED;
+        }
+    }
+    if (diagnostic) diagnostic->failure = CONTROL_AUTH_FAILURE_PATH_MISMATCH;
     return CONTROL_CLIENT_UNAUTHORIZED;
+}
+
+static const char *control_auth_failure_name(control_auth_failure_t failure) {
+    switch (failure) {
+        case CONTROL_AUTH_FAILURE_INVALID_ARGUMENTS: return "invalid_arguments";
+        case CONTROL_AUTH_FAILURE_PEER_PID: return "peer_pid";
+        case CONTROL_AUTH_FAILURE_ARGMAX_QUERY: return "argmax_query";
+        case CONTROL_AUTH_FAILURE_ARGMAX_VALUE: return "argmax_value";
+        case CONTROL_AUTH_FAILURE_NO_MEMORY: return "no_memory";
+        case CONTROL_AUTH_FAILURE_PROCARGS_QUERY: return "procargs_query";
+        case CONTROL_AUTH_FAILURE_PROCARGS_FORMAT: return "procargs_format";
+        case CONTROL_AUTH_FAILURE_PATH_LENGTH: return "path_length";
+        case CONTROL_AUTH_FAILURE_PATH_MISMATCH: return "path_mismatch";
+        case CONTROL_AUTH_FAILURE_TRUSTED_EXECUTABLE: return "trusted_executable";
+        default: return "unknown";
+    }
+}
+
+static void sanitize_control_text(const char *source, char *destination, size_t capacity) {
+    if (!destination || capacity == 0) return;
+    size_t used = 0;
+    if (source) {
+        while (*source && used + 1 < capacity) {
+            unsigned char byte = (unsigned char)*source++;
+            destination[used++] = (byte < 0x20 || byte == 0x7f) ? '?' : (char)byte;
+        }
+    }
+    destination[used] = '\0';
+}
+
+static const char *control_executable_class(const char *path) {
+    if (!path || !*path) return "unavailable";
+    if (strstr(path, "/private/var/db/stash/") || strstr(path, "/var/stash/")) return "stash";
+    if (strstr(path, "/var/jb/")) return "rootless";
+    if (strstr(path, "/Containers/Bundle/Application/")) return "app_container";
+    if (strstr(path, "/Applications/")) return "applications";
+    return "other";
+}
+
+static int should_record_auth_failure(control_auth_failure_t failure) {
+    static control_auth_failure_t previous_failure = CONTROL_AUTH_FAILURE_NONE;
+    static long long previous_timestamp_ms = 0;
+    struct timeval now;
+    gettimeofday(&now, NULL);
+    long long timestamp_ms = (long long)now.tv_sec * 1000LL + (long long)(now.tv_usec / 1000);
+    if (failure == previous_failure && timestamp_ms - previous_timestamp_ms < 60000LL) return 0;
+    previous_failure = failure;
+    previous_timestamp_ms = timestamp_ms;
+    return 1;
 }
 
 static const char *mode_name(vpn_mode_t mode) {
@@ -3367,6 +3535,58 @@ static void handle_client(int cfd, control_client_t client_type) {
     write(cfd, reply, strlen(reply));
 }
 
+static void reject_control_client(int client_fd,
+                                  const control_auth_diagnostic_t *diagnostic) {
+    if (!diagnostic ||
+        (diagnostic->failure == CONTROL_AUTH_FAILURE_PEER_PID &&
+         diagnostic->error_number == ENOTCONN)) {
+        return;
+    }
+
+    const char *reason = control_auth_failure_name(diagnostic->failure);
+    if (should_record_auth_failure(diagnostic->failure)) {
+        char safe_executable[PATH_MAX];
+        sanitize_control_text(diagnostic->executable,
+                              safe_executable,
+                              sizeof(safe_executable));
+        if (safe_executable[0]) {
+            log_msg("control authorization rejected reason=%s errno=%d pid=%d executable=%s",
+                    reason,
+                    diagnostic->error_number,
+                    (int)diagnostic->peer_pid,
+                    safe_executable);
+        } else {
+            log_msg("control authorization rejected reason=%s errno=%d pid=%d",
+                    reason,
+                    diagnostic->error_number,
+                    (int)diagnostic->peer_pid);
+        }
+        diagnostic_event("Control authorization rejected reason=%s errno=%d",
+                         reason,
+                         diagnostic->error_number);
+    }
+
+    char response[192];
+    int response_length;
+    if (diagnostic->executable[0]) {
+        response_length = snprintf(response,
+                                   sizeof(response),
+                                   "ERR unauthorized client reason=%s errno=%d executable_class=%s\n",
+                                   reason,
+                                   diagnostic->error_number,
+                                   control_executable_class(diagnostic->executable));
+    } else {
+        response_length = snprintf(response,
+                                   sizeof(response),
+                                   "ERR unauthorized client reason=%s errno=%d\n",
+                                   reason,
+                                   diagnostic->error_number);
+    }
+    if (response_length > 0 && (size_t)response_length < sizeof(response)) {
+        (void)write_all_fd(client_fd, response, (size_t)response_length);
+    }
+}
+
 int main(int argc, char **argv) {
     int launched_by_launchd = argc == 2 && strcmp(argv[1], "--launchd") == 0;
     if (argc != 1 && !launched_by_launchd) return 1;
@@ -3449,10 +3669,10 @@ int main(int argc, char **argv) {
 
         monitor_connected_children();
 
-        control_client_t client_type = control_client_type(cfd);
+        control_auth_diagnostic_t auth_diagnostic;
+        control_client_t client_type = control_client_type(cfd, &auth_diagnostic);
         if (client_type == CONTROL_CLIENT_UNAUTHORIZED) {
-            static const char denied[] = "ERR unauthorized client\n";
-            (void)write(cfd, denied, sizeof(denied) - 1);
+            reject_control_client(cfd, &auth_diagnostic);
             close(cfd);
             continue;
         }
