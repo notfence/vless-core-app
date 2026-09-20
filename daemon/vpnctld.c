@@ -28,6 +28,7 @@
 #include <sys/un.h>
 #include <sys/ioctl.h>
 #include <sys/wait.h>
+#include <time.h>
 #include <unistd.h>
 
 #include "vpnicon_statusbar.h"
@@ -142,6 +143,7 @@ typedef struct {
     int dns_port;
     pid_t core_pid;
     pid_t redsocks_pid;
+    pid_t redsocks_log_relay_pid;
     pid_t dns_pid;
     vpn_mode_t mode;
     int pf_enabled_before;
@@ -237,9 +239,25 @@ typedef struct {
 } control_auth_diagnostic_t;
 
 static void stop_pid(pid_t *p);
+static void finish_log_relay(pid_t *p);
 static void truncate_log_file(const char *path);
 static void clear_logs(void);
 static void restart_system_dns_resolver(void);
+
+#if defined(__GNUC__) || defined(__clang__)
+#define VC_PRINTF_FORMAT(format_index, arguments_index) \
+    __attribute__((format(printf, format_index, arguments_index)))
+#else
+#define VC_PRINTF_FORMAT(format_index, arguments_index)
+#endif
+
+static void log_msg(const char *fmt, ...) VC_PRINTF_FORMAT(1, 2);
+static void log_warning(const char *fmt, ...) VC_PRINTF_FORMAT(1, 2);
+static void log_error(const char *fmt, ...) VC_PRINTF_FORMAT(1, 2);
+static void core_log_event(const char *level, const char *fmt, ...)
+    VC_PRINTF_FORMAT(2, 3);
+
+#undef VC_PRINTF_FORMAT
 
 static void handle_term_signal(int sig) {
     (void)sig;
@@ -434,19 +452,171 @@ static int drop_helper_privileges(void) {
     return geteuid() == g_helper_uid && getegid() == g_helper_gid ? 0 : -1;
 }
 
-static void log_msg(const char *fmt, ...) {
-    if (g.protect_logs) return;
+static int log_token_equals(const char *token, size_t length, const char *expected) {
+    return token && expected && strlen(expected) == length &&
+           strncmp(token, expected, length) == 0;
+}
 
+static const char *child_log_record(const char *component, const char *line,
+                                    const char **level_out) {
+    const char *payload = line ? line : "";
+    const char *level = "I";
+    if (component && strcmp(component, "redsocks") == 0 && isdigit((unsigned char)*payload)) {
+        const char *cursor = payload;
+        while (isdigit((unsigned char)*cursor)) cursor++;
+        if (*cursor == '.') {
+            cursor++;
+            while (isdigit((unsigned char)*cursor)) cursor++;
+            if (*cursor == ' ') {
+                while (*cursor == ' ') cursor++;
+                const char *priority = cursor;
+                while (*cursor && *cursor != ' ') cursor++;
+                size_t priority_length = (size_t)(cursor - priority);
+                const char *priority_level = "I";
+                if (log_token_equals(priority, priority_length, "emerg") ||
+                    log_token_equals(priority, priority_length, "alert") ||
+                    log_token_equals(priority, priority_length, "crit") ||
+                    log_token_equals(priority, priority_length, "err")) {
+                    priority_level = "E";
+                } else if (log_token_equals(priority, priority_length, "warning")) {
+                    priority_level = "W";
+                } else if (log_token_equals(priority, priority_length, "notice") ||
+                           log_token_equals(priority, priority_length, "info")) {
+                    priority_level = "I";
+                } else if (log_token_equals(priority, priority_length, "debug")) {
+                    priority_level = "D";
+                }
+                while (*cursor == ' ') cursor++;
+                if (*cursor) payload = cursor;
+                level = priority_level;
+            }
+        }
+    }
+    if (level_out) *level_out = level;
+    return payload;
+}
+
+static void format_log_timestamp(char *destination, size_t capacity) {
+    if (!destination || capacity == 0) return;
     struct timeval tv;
     gettimeofday(&tv, NULL);
+    unsigned int milliseconds = (unsigned int)(tv.tv_usec / 1000);
+    time_t seconds = tv.tv_sec;
+    struct tm local_time;
+    char calendar[24];
+    if (localtime_r(&seconds, &local_time) == NULL ||
+        strftime(calendar, sizeof(calendar), "%Y-%m-%d %H:%M:%S", &local_time) == 0) {
+        snprintf(destination, capacity, "%ld.%03u",
+                 (long)tv.tv_sec, milliseconds);
+        return;
+    }
+    snprintf(destination, capacity, "%s.%03u", calendar, milliseconds);
+}
 
-    fprintf(stderr, "[%ld.%03ld] ", (long)tv.tv_sec, (long)(tv.tv_usec / 1000));
+static void sanitize_log_message(const char *source, char *destination, size_t capacity) {
+    if (!destination || capacity == 0) return;
+    size_t used = 0;
+    if (source) {
+        while (*source && used + 1 < capacity) {
+            unsigned char byte = (unsigned char)*source++;
+            destination[used++] = (byte < 0x20 || byte == 0x7f) ? ' ' : (char)byte;
+        }
+    }
+    while (used > 0 && destination[used - 1] == ' ') used--;
+    destination[used] = '\0';
+}
+
+static int write_log_record_fd(int fd, const char *component,
+                               const char *level, const char *message) {
+    char timestamp[40];
+    char safe_message[3072];
+    char record[3328];
+    format_log_timestamp(timestamp, sizeof(timestamp));
+    sanitize_log_message(message, safe_message, sizeof(safe_message));
+
+    int length;
+    if (component && *component) {
+        length = snprintf(record, sizeof(record), "%s %s [%s] %s\n",
+                          timestamp,
+                          level && *level ? level : "I",
+                          component,
+                          safe_message);
+    } else {
+        length = snprintf(record, sizeof(record), "%s %s %s\n",
+                          timestamp,
+                          level && *level ? level : "I",
+                          safe_message);
+    }
+    if (length <= 0) return -1;
+    size_t remaining = (size_t)length < sizeof(record) ? (size_t)length : sizeof(record) - 1;
+    size_t offset = 0;
+    while (offset < remaining) {
+        ssize_t written = write(fd, record + offset, remaining - offset);
+        if (written < 0 && errno == EINTR) continue;
+        if (written <= 0) return -1;
+        offset += (size_t)written;
+    }
+    return 0;
+}
+
+static void format_log_message(char *destination, size_t capacity,
+                               const char *format, va_list arguments) {
+    if (!destination || capacity == 0) return;
+    destination[0] = '\0';
+    int length = vsnprintf(destination, capacity, format, arguments);
+    if (length < 0) {
+        snprintf(destination, capacity, "log message formatting failed");
+    } else if ((size_t)length >= capacity && capacity >= 4) {
+        memcpy(destination + capacity - 4, "...", 3);
+        destination[capacity - 1] = '\0';
+    }
+}
+
+static void log_vmessage(const char *level, const char *fmt, va_list ap) {
+    if (g.protect_logs || !fmt) return;
+    int saved_errno = errno;
+    char message[2048];
+    format_log_message(message, sizeof(message), fmt, ap);
+    (void)write_log_record_fd(STDERR_FILENO, NULL, level, message);
+    errno = saved_errno;
+}
+
+static void log_msg(const char *fmt, ...) {
     va_list ap;
     va_start(ap, fmt);
-    vfprintf(stderr, fmt, ap);
+    log_vmessage("I", fmt, ap);
     va_end(ap);
-    fputc('\n', stderr);
-    fflush(stderr);
+}
+
+static void log_warning(const char *fmt, ...) {
+    va_list ap;
+    va_start(ap, fmt);
+    log_vmessage("W", fmt, ap);
+    va_end(ap);
+}
+
+static void log_error(const char *fmt, ...) {
+    va_list ap;
+    va_start(ap, fmt);
+    log_vmessage("E", fmt, ap);
+    va_end(ap);
+}
+
+static void core_log_event(const char *level, const char *fmt, ...) {
+    if (g.protect_logs || !fmt) return;
+    char message[1024];
+    va_list ap;
+    va_start(ap, fmt);
+    format_log_message(message, sizeof(message), fmt, ap);
+    va_end(ap);
+
+    int fd = open("/var/log/vless-core.log",
+                  O_WRONLY | O_CREAT | O_APPEND | O_NOFOLLOW,
+                  0600);
+    if (fd < 0) return;
+    (void)fchmod(fd, 0600);
+    (void)write_log_record_fd(fd, "session", level, message);
+    close(fd);
 }
 
 static void log_argv_command(const char *prefix, char *const argv[]) {
@@ -473,16 +643,20 @@ static int wait_spawned(pid_t pid, const char *label) {
     } while (rc < 0 && errno == EINTR);
 
     if (rc < 0) {
-        log_msg("%s: waitpid errno=%d", label ? label : "run", errno);
+        log_error("%s: waitpid errno=%d", label ? label : "run", errno);
         return -1;
     }
     if (WIFEXITED(status)) {
         int st = WEXITSTATUS(status);
-        log_msg("%s: rc=%d", label ? label : "run", st);
+        if (st == 0) {
+            log_msg("%s: rc=%d", label ? label : "run", st);
+        } else {
+            log_error("%s: rc=%d", label ? label : "run", st);
+        }
         return st;
     }
 
-    log_msg("%s: abnormal exit", label ? label : "run");
+    log_error("%s: abnormal exit", label ? label : "run");
     return -1;
 }
 
@@ -500,7 +674,7 @@ static int run_argv(char *const argv[]) {
     int rc = posix_spawn(&pid, argv[0], &actions, NULL, argv, kSafeRootEnvironment);
     posix_spawn_file_actions_destroy(&actions);
     if (rc != 0) {
-        log_msg("run: spawn errno=%d", rc);
+        log_error("run: spawn errno=%d", rc);
         return -1;
     }
 
@@ -524,7 +698,7 @@ static int run_argv_capture_impl(char *const argv[], char *out, size_t out_cap, 
 
     int pipefd[2];
     if (pipe(pipefd) != 0) {
-        if (verbose) log_msg("run: pipe errno=%d", errno);
+        if (verbose) log_error("run: pipe errno=%d", errno);
         return -1;
     }
 
@@ -542,7 +716,7 @@ static int run_argv_capture_impl(char *const argv[], char *out, size_t out_cap, 
 
     if (rc != 0) {
         close(pipefd[0]);
-        if (verbose) log_msg("run: spawn errno=%d", rc);
+        if (verbose) log_error("run: spawn errno=%d", rc);
         return -1;
     }
 
@@ -555,7 +729,7 @@ static int run_argv_capture_impl(char *const argv[], char *out, size_t out_cap, 
             close(pipefd[0]);
             if (verbose) {
                 (void)wait_spawned(pid, "run");
-                log_msg("run: read errno=%d", errno);
+                log_error("run: read errno=%d", errno);
             } else {
                 (void)wait_spawned_quiet(pid);
             }
@@ -1248,13 +1422,13 @@ static int resolve_host_ipv4_all_bounded(const char *host, char *first_ip, size_
 
     int pipefd[2];
     if (pipe(pipefd) != 0) {
-        log_msg("resolver pipe failed errno=%d", errno);
+        log_error("resolver pipe failed errno=%d", errno);
         return -1;
     }
 
     pid_t pid = fork();
     if (pid < 0) {
-        log_msg("resolver fork failed errno=%d", errno);
+        log_error("resolver fork failed errno=%d", errno);
         close(pipefd[0]);
         close(pipefd[1]);
         return -1;
@@ -1441,7 +1615,42 @@ static void send_log_tail(int client_fd, const char *path) {
     }
 
     off_t start = st.st_size > (off_t)maximum_tail ? st.st_size - (off_t)maximum_tail : 0;
-    if (lseek(fd, start, SEEK_SET) < 0 || write_all_fd(client_fd, "OK\n", 3) != 0) {
+    if (start > 0) {
+        char previous = '\0';
+        ssize_t previous_count;
+        if (lseek(fd, start - 1, SEEK_SET) < 0) {
+            close(fd);
+            return;
+        }
+        do {
+            previous_count = read(fd, &previous, 1);
+        } while (previous_count < 0 && errno == EINTR);
+        if (previous_count != 1) {
+            close(fd);
+            return;
+        }
+        if (previous != '\n') {
+            char byte = '\0';
+            int found_newline = 0;
+            for (;;) {
+                ssize_t count = read(fd, &byte, 1);
+                if (count < 0 && errno == EINTR) continue;
+                if (count != 1) break;
+                if (byte == '\n') {
+                    found_newline = 1;
+                    break;
+                }
+            }
+            if (!found_newline && lseek(fd, start, SEEK_SET) < 0) {
+                close(fd);
+                return;
+            }
+        }
+    } else if (lseek(fd, 0, SEEK_SET) < 0) {
+        close(fd);
+        return;
+    }
+    if (write_all_fd(client_fd, "OK\n", 3) != 0) {
         close(fd);
         return;
     }
@@ -1549,9 +1758,81 @@ static void send_secure_store_key(int client_fd, int create_if_missing) {
     secure_zero(response, sizeof(response));
 }
 
-static int spawn_logged(const char *bin, char *const argv[], const char *stdin_data, pid_t *pid_out) {
+static void relay_child_log_stream(int input_fd, int output_fd, const char *component) {
+    char line[2048];
+    size_t used = 0;
+    char buffer[512];
+    for (;;) {
+        ssize_t count = read(input_fd, buffer, sizeof(buffer));
+        if (count < 0 && errno == EINTR) continue;
+        if (count <= 0) break;
+
+        for (ssize_t index = 0; index < count; index++) {
+            unsigned char byte = (unsigned char)buffer[index];
+            if (byte == '\n') {
+                while (used > 0 && line[used - 1] == '\r') used--;
+                line[used] = '\0';
+                if (used > 0) {
+                    const char *level = NULL;
+                    const char *message = child_log_record(component, line, &level);
+                    (void)write_log_record_fd(output_fd, component, level, message);
+                }
+                used = 0;
+                continue;
+            }
+            if (used + 1 == sizeof(line)) {
+                line[used] = '\0';
+                const char *level = NULL;
+                const char *message = child_log_record(component, line, &level);
+                (void)write_log_record_fd(output_fd, component, level, message);
+                used = 0;
+            }
+            line[used++] = (char)byte;
+        }
+    }
+    while (used > 0 && line[used - 1] == '\r') used--;
+    line[used] = '\0';
+    if (used > 0) {
+        const char *level = NULL;
+        const char *message = child_log_record(component, line, &level);
+        (void)write_log_record_fd(output_fd, component, level, message);
+    }
+}
+
+static void finish_log_relay(pid_t *p) {
+    if (!p || *p <= 0) return;
+    pid_t pid = *p;
+    for (int attempt = 0; attempt < 50; attempt++) {
+        pid_t result = waitpid(pid, NULL, WNOHANG);
+        if (result == pid || (result < 0 && errno == ECHILD)) {
+            *p = 0;
+            return;
+        }
+        if (result < 0 && errno != EINTR) break;
+        usleep(10000);
+    }
+    (void)kill(pid, SIGTERM);
+    while (waitpid(pid, NULL, 0) < 0 && errno == EINTR) {
+    }
+    *p = 0;
+}
+
+static int spawn_logged(const char *bin, char *const argv[], const char *stdin_data,
+                        const char *relay_component, pid_t *pid_out,
+                        pid_t *relay_pid_out) {
+    if (!bin || !argv || !pid_out || (relay_component && !relay_pid_out)) return -1;
+    *pid_out = 0;
+    if (relay_pid_out) *relay_pid_out = 0;
+
     int input_pipe[2] = {-1, -1};
+    int relay_pipe[2] = {-1, -1};
+    int relay_output = !g.protect_logs && relay_component != NULL;
     if (stdin_data != NULL && pipe(input_pipe) != 0) return -1;
+    if (relay_output && pipe(relay_pipe) != 0) {
+        if (input_pipe[0] >= 0) close(input_pipe[0]);
+        if (input_pipe[1] >= 0) close(input_pipe[1]);
+        return -1;
+    }
 
     const char *output_path = g.protect_logs ? "/dev/null" : "/var/log/vless-core.log";
     int output_flags = g.protect_logs ? O_WRONLY : (O_WRONLY | O_CREAT | O_APPEND | O_NOFOLLOW);
@@ -1562,26 +1843,57 @@ static int spawn_logged(const char *bin, char *const argv[], const char *stdin_d
         if (input_fd >= 0 && input_fd != input_pipe[0]) close(input_fd);
         if (input_pipe[0] >= 0) close(input_pipe[0]);
         if (input_pipe[1] >= 0) close(input_pipe[1]);
+        if (relay_pipe[0] >= 0) close(relay_pipe[0]);
+        if (relay_pipe[1] >= 0) close(relay_pipe[1]);
         return -1;
     }
     if (!g.protect_logs) (void)fchmod(output_fd, 0600);
 
+    pid_t relay_pid = 0;
+    int helper_output_fd = output_fd;
+    if (relay_output) {
+        relay_pid = fork();
+        if (relay_pid == 0) {
+            if (dup2(relay_pipe[0], STDIN_FILENO) < 0 ||
+                dup2(output_fd, STDOUT_FILENO) < 0) {
+                _exit(126);
+            }
+            close_inherited_descriptors();
+            relay_child_log_stream(STDIN_FILENO, STDOUT_FILENO, relay_component);
+            _exit(0);
+        }
+        if (relay_pid < 0) {
+            close(output_fd);
+            close(input_fd);
+            if (input_pipe[1] >= 0) close(input_pipe[1]);
+            close(relay_pipe[0]);
+            close(relay_pipe[1]);
+            return -1;
+        }
+        close(relay_pipe[0]);
+        close(output_fd);
+        helper_output_fd = relay_pipe[1];
+    }
+
     pid_t pid = fork();
     if (pid == 0) {
-        if (dup2(input_fd, STDIN_FILENO) < 0 || dup2(output_fd, STDOUT_FILENO) < 0 || dup2(output_fd, STDERR_FILENO) < 0) _exit(126);
-        long maximum = sysconf(_SC_OPEN_MAX);
-        if (maximum < 0 || maximum > 4096) maximum = 4096;
-        for (int fd = STDERR_FILENO + 1; fd < maximum; fd++) close(fd);
+        if (dup2(input_fd, STDIN_FILENO) < 0 ||
+            dup2(helper_output_fd, STDOUT_FILENO) < 0 ||
+            dup2(helper_output_fd, STDERR_FILENO) < 0) {
+            _exit(126);
+        }
+        close_inherited_descriptors();
         if (drop_helper_privileges() != 0) _exit(126);
         execve(bin, argv, kSafeHelperEnvironment);
         _exit(127);
     }
 
-    close(output_fd);
+    close(helper_output_fd);
     if (input_fd >= 0) close(input_fd);
     if (input_pipe[0] >= 0 && input_pipe[0] != input_fd) close(input_pipe[0]);
     if (pid < 0) {
         if (input_pipe[1] >= 0) close(input_pipe[1]);
+        finish_log_relay(&relay_pid);
         return -1;
     }
     if (stdin_data != NULL) {
@@ -1591,15 +1903,18 @@ static int spawn_logged(const char *bin, char *const argv[], const char *stdin_d
         if (write_result != 0) {
             kill(pid, SIGTERM);
             (void)waitpid(pid, NULL, 0);
+            finish_log_relay(&relay_pid);
             return -1;
         }
     }
 
     *pid_out = pid;
+    if (relay_pid_out) *relay_pid_out = relay_pid;
     return 0;
 }
 
-static int spawn_core(const char *uri, const char *server_ips, const char *xray_version, int port, pid_t *pid_out) {
+static int spawn_core(const char *uri, const char *server_ips, const char *xray_version,
+                      int port, pid_t *pid_out) {
     const char *core_bin = find_vless_core_bin();
     if (!core_bin) return -2;
 
@@ -1630,7 +1945,8 @@ static int spawn_core(const char *uri, const char *server_ips, const char *xray_
     }
     argv[argc] = NULL;
 
-    int result = spawn_logged(core_bin, argv, connection_data, pid_out);
+    int result = spawn_logged(core_bin, argv, connection_data,
+                              NULL, pid_out, NULL);
     secure_zero(connection_data, sizeof(connection_data));
     return result;
 }
@@ -1688,17 +2004,22 @@ static int child_process_running(pid_t *pid, const char *name) {
     }
     if (rc == *pid) {
         if (WIFEXITED(status)) {
-            log_msg("%s pid=%d exited, status=%d", name, (int)*pid, WEXITSTATUS(status));
+            int exit_status = WEXITSTATUS(status);
+            if (exit_status == 0) {
+                log_msg("%s pid=%d exited, status=%d", name, (int)*pid, exit_status);
+            } else {
+                log_error("%s pid=%d exited, status=%d", name, (int)*pid, exit_status);
+            }
         } else if (WIFSIGNALED(status)) {
-            log_msg("%s pid=%d terminated by signal=%d", name, (int)*pid, WTERMSIG(status));
+            log_error("%s pid=%d terminated by signal=%d", name, (int)*pid, WTERMSIG(status));
         } else {
-            log_msg("%s pid=%d exited", name, (int)*pid);
+            log_warning("%s pid=%d exited with an unrecognized wait status", name, (int)*pid);
         }
         *pid = 0;
         return 0;
     }
 
-    log_msg("%s pid=%d waitpid failed errno=%d", name, (int)*pid, errno);
+    log_error("%s pid=%d waitpid failed errno=%d", name, (int)*pid, errno);
     *pid = 0;
     return 0;
 }
@@ -1709,7 +2030,8 @@ static int child_process_alive_snapshot(pid_t pid) {
     return errno == EPERM;
 }
 
-static int spawn_redsocks(int socks_port, int *redir_port_out, pid_t *pid_out) {
+static int spawn_redsocks(int socks_port, int *redir_port_out,
+                          pid_t *pid_out, pid_t *relay_pid_out) {
     const char *bin = find_redsocks_bin();
     if (!bin) return -2;
 
@@ -1728,19 +2050,22 @@ static int spawn_redsocks(int socks_port, int *redir_port_out, pid_t *pid_out) {
     };
 
     pid_t pid = 0;
-    if (spawn_logged(bin, argv, NULL, &pid) != 0) {
+    pid_t relay_pid = 0;
+    if (spawn_logged(bin, argv, NULL, "redsocks", &pid, &relay_pid) != 0) {
         return -5;
     }
 
     usleep(300000);
     if (!child_process_running(&pid, "redsocks")) {
         stop_pid(&pid);
-        log_msg("redsocks failed with redirector=pf");
+        finish_log_relay(&relay_pid);
+        log_error("redsocks failed with redirector=pf");
         return -6;
     }
 
     log_msg("redsocks started pid=%d redirector=pf port=%d", (int)pid, redir_port);
     *pid_out = pid;
+    *relay_pid_out = relay_pid;
     *redir_port_out = redir_port;
     return 0;
 }
@@ -1924,7 +2249,7 @@ static void *dns_proxy_worker_loop(void *opaque) {
         if (n < 0) {
             if (errno == EINTR) continue;
             if (errno == EAGAIN || errno == EWOULDBLOCK) continue;
-            log_msg("dns proxy worker=%d recv failed errno=%d", worker->index, errno);
+            log_error("dns proxy worker=%d recv failed errno=%d", worker->index, errno);
             continue;
         }
         if (n < 12) {
@@ -1934,13 +2259,13 @@ static void *dns_proxy_worker_loop(void *opaque) {
         size_t reply_len = 0;
         int error_no = 0;
         if (dns_proxy_query_tcp(worker->socks_port, &upstream_fd, query, (size_t)n, reply, sizeof(reply), &reply_len, &error_no) != 0) {
-            log_msg("dns proxy query failed worker=%d bytes=%ld errno=%d", worker->index, (long)n, error_no);
+            log_error("dns proxy query failed worker=%d bytes=%ld errno=%d", worker->index, (long)n, error_no);
             continue;
         }
         upstream_last_used_ms = now_ms();
 
         if (sendto(worker->udp_fd, reply, reply_len, 0, (struct sockaddr *)&peer, peer_len) < 0) {
-            log_msg("dns proxy worker=%d reply failed errno=%d", worker->index, errno);
+            log_error("dns proxy worker=%d reply failed errno=%d", worker->index, errno);
         }
     }
 
@@ -1964,7 +2289,7 @@ static void dns_proxy_loop(int udp_fd, int socks_port) {
         worker_args[i].index = i;
         int thread_rc = pthread_create(&workers[i], NULL, dns_proxy_worker_loop, &worker_args[i]);
         if (thread_rc != 0) {
-            log_msg("dns proxy worker=%d start failed error=%d", i, thread_rc);
+            log_error("dns proxy worker=%d start failed error=%d", i, thread_rc);
             break;
         }
         worker_count++;
@@ -2052,7 +2377,7 @@ static void update_vpn_icon_state(int enabled) {
             g_vpn_icon_publisher_logged = 1;
         }
     } else if (publisher_rc == VPNICON_STATUSBAR_ERROR) {
-        log_msg("VPN status bar publisher unavailable: %s", vpnicon_statusbar_last_error());
+        log_warning("VPN status bar publisher unavailable: %s", vpnicon_statusbar_last_error());
     }
 }
 
@@ -2168,14 +2493,14 @@ static void monitor_springboard_icon(long long current_ms) {
                 (int)observed_pid);
         diagnostic_event("VPN icon restored after SpringBoard restart");
     } else if (rc == VPNICON_STATUSBAR_ERROR) {
-        log_msg("VPN status bar icon republish failed: %s", vpnicon_statusbar_last_error());
+        log_warning("VPN status bar icon republish failed: %s", vpnicon_statusbar_last_error());
     }
 }
 
 static int bind_control_socket(void) {
     int lfd = socket(AF_UNIX, SOCK_STREAM, 0);
     if (lfd < 0) {
-        log_msg("control socket() failed errno=%d", errno);
+        log_error("control socket() failed errno=%d", errno);
         return -1;
     }
 
@@ -2187,19 +2512,19 @@ static int bind_control_socket(void) {
     unlink(VC_DAEMON_SOCKET_PATH);
 
     if (bind(lfd, (struct sockaddr *)&sa, (socklen_t)sa.sun_len) != 0) {
-        log_msg("bind(%s) failed errno=%d", VC_DAEMON_SOCKET_PATH, errno);
+        log_error("bind(%s) failed errno=%d", VC_DAEMON_SOCKET_PATH, errno);
         close(lfd);
         return -1;
     }
     if (chmod(VC_DAEMON_SOCKET_PATH, 0666) != 0) {
-        log_msg("chmod(%s) failed errno=%d", VC_DAEMON_SOCKET_PATH, errno);
+        log_error("chmod(%s) failed errno=%d", VC_DAEMON_SOCKET_PATH, errno);
         close(lfd);
         unlink(VC_DAEMON_SOCKET_PATH);
         return -1;
     }
 
     if (listen(lfd, 16) != 0) {
-        log_msg("listen(%s) failed errno=%d", VC_DAEMON_SOCKET_PATH, errno);
+        log_error("listen(%s) failed errno=%d", VC_DAEMON_SOCKET_PATH, errno);
         close(lfd);
         unlink(VC_DAEMON_SOCKET_PATH);
         return -1;
@@ -2504,12 +2829,12 @@ static pf_enabled_state_t pf_enabled_state_query(const char *pfctl, int verbose)
         ? run_argv_capture(argv, output, sizeof(output))
         : run_argv_capture_quiet(argv, output, sizeof(output));
     if (rc != 0) {
-        if (verbose) log_msg("pf status query failed");
+        if (verbose) log_warning("pf status query failed");
         return PF_ENABLED_ERROR;
     }
     if (contains_ci(output, "Status: Enabled")) return PF_ENABLED;
     if (contains_ci(output, "Status: Disabled")) return PF_DISABLED;
-    if (verbose) log_msg("pf status query returned an unknown state");
+    if (verbose) log_warning("pf status query returned an unknown state");
     return PF_ENABLED_ERROR;
 }
 
@@ -2526,7 +2851,7 @@ static void ensure_pf_os_file(void) {
 
     int fd = open("/etc/pf.os", O_WRONLY | O_CREAT | O_TRUNC, 0644);
     if (fd < 0) {
-        log_msg("cannot create /etc/pf.os errno=%d", errno);
+        log_error("cannot create /etc/pf.os errno=%d", errno);
         return;
     }
 
@@ -2635,7 +2960,7 @@ static pf_root_state_t pf_root_state_query(const char *pfctl, int verbose) {
     }
 
     if (text_has_nonspace(nat_rules) || text_has_nonspace(filter_rules)) {
-        if (verbose) log_msg("pf root rules exist without vlesscore anchor; refusing to replace them");
+        if (verbose) log_warning("pf root rules exist without vlesscore anchor; refusing to replace them");
         return PF_ROOT_CONFLICT;
     }
     return PF_ROOT_EMPTY;
@@ -2668,7 +2993,7 @@ static int install_pf_dispatch(const char *pfctl) {
         NULL,
     };
     if (run_argv(load_argv) != 0) {
-        log_msg("pf failed to install vlesscore anchor dispatch");
+        log_error("pf failed to install vlesscore anchor dispatch");
         return -1;
     }
     log_msg("pf vlesscore anchor dispatch installed");
@@ -2680,7 +3005,7 @@ static int remove_owned_pf_dispatch(const char *pfctl) {
     if (state == PF_ROOT_ERROR) return -1;
     if (state == PF_ROOT_EMPTY) return 0;
     if (state != PF_ROOT_OWN_DISPATCH) {
-        log_msg("pf root rules changed while VPN was active; leaving root dispatch untouched");
+        log_warning("pf root rules changed while VPN was active; leaving root dispatch untouched");
         return 0;
     }
 
@@ -2700,7 +3025,7 @@ static int remove_owned_pf_dispatch(const char *pfctl) {
 static int apply_pf_rules(const char *server_ips, int redir_port, int dns_port) {
     const char *pfctl = find_pfctl_bin();
     if (!pfctl) {
-        log_msg("pfctl binary not found");
+        log_error("pfctl binary not found");
         return -1;
     }
 
@@ -2716,7 +3041,7 @@ static int apply_pf_rules(const char *server_ips, int redir_port, int dns_port) 
     g.pf_dispatch_installed =
         root_state == PF_ROOT_EMPTY || root_state == PF_ROOT_OWN_DISPATCH;
     if (write_pf_previous_state(g.pf_enabled_before, g.pf_dispatch_installed) != 0) {
-        log_msg("failed to persist previous PF state");
+        log_error("failed to persist previous PF state");
         return -1;
     }
     if (root_state == PF_ROOT_EMPTY && install_pf_dispatch(pfctl) != 0) return -7;
@@ -2729,7 +3054,7 @@ static int apply_pf_rules(const char *server_ips, int redir_port, int dns_port) 
     memset(ifnames, 0, sizeof(ifnames));
     size_t if_count = collect_pf_interfaces(ifnames, sizeof(ifnames) / sizeof(ifnames[0]));
     if (if_count == 0) {
-        log_msg("pf: no suitable interfaces found (expected en*/pdp_ip*)");
+        log_error("pf: no suitable interfaces found (expected en*/pdp_ip*)");
         return -6;
     }
 
@@ -2897,13 +3222,13 @@ static int recover_stale_pf_state(void) {
         if (!stale_dispatch_present) return 0;
         g.pf_enabled_before = 1;
         g.pf_dispatch_installed = root_state == PF_ROOT_OWN_DISPATCH;
-        log_msg("recovering orphaned PF dispatch without state file");
+        log_warning("recovering orphaned PF dispatch without state file");
         if (clear_pf_rules() != 0) return -1;
         restart_system_dns_resolver();
         return 0;
     }
     if (state_result != 0) {
-        log_msg("invalid PF state file; recovering conservatively");
+        log_warning("invalid PF state file; recovering conservatively");
         g.pf_enabled_before = 1;
         g.pf_dispatch_installed = root_state == PF_ROOT_OWN_DISPATCH;
         if (stale_dispatch_present && clear_pf_rules() != 0) return -1;
@@ -2917,9 +3242,9 @@ static int recover_stale_pf_state(void) {
         dispatch_installed = root_state == PF_ROOT_OWN_DISPATCH;
     }
     g.pf_dispatch_installed = dispatch_installed;
-    log_msg("recovering stale PF state previous_enabled=%d dispatch_installed=%d",
-            was_enabled,
-            dispatch_installed);
+    log_warning("recovering stale PF state previous_enabled=%d dispatch_installed=%d",
+                was_enabled,
+                dispatch_installed);
     if (clear_pf_rules() != 0) return -1;
     (void)unlink("/var/run/vlesscore-redsocks.conf");
     (void)unlink("/var/run/vlesscore-pf.conf");
@@ -2929,7 +3254,8 @@ static int recover_stale_pf_state(void) {
 }
 
 static int disconnect_all(void) {
-    int had_active_state = g.connected || g.core_pid > 0 || g.redsocks_pid > 0 || g.dns_pid > 0;
+    int had_active_state = g.connected || g.core_pid > 0 || g.redsocks_pid > 0 ||
+                           g.redsocks_log_relay_pid > 0 || g.dns_pid > 0;
     int protected_logs = g.protect_logs;
     char routing[sizeof(g.routing)];
     snprintf(routing, sizeof(routing), "%s", g.routing);
@@ -2937,7 +3263,7 @@ static int disconnect_all(void) {
 
 #if defined(__LP64__)
     if (g.system_proxy_enabled && vc_system_proxy_disable() != 0) {
-        log_msg("failed to restore system PAC settings; keeping VPN helpers alive");
+        log_error("failed to restore system PAC settings; keeping VPN helpers alive");
         diagnostic_event("PAC restore failed; disconnect postponed");
         return -1;
     }
@@ -2945,15 +3271,22 @@ static int disconnect_all(void) {
 
     if (g.mode == MODE_PF) {
         if (clear_pf_rules() != 0) {
-            log_msg("failed to clear PF rules; keeping VPN helpers alive");
+            log_error("failed to clear PF rules; keeping VPN helpers alive");
             diagnostic_event("PF cleanup failed; disconnect postponed");
             return -1;
         }
     }
 
+    if (had_active_state && !protected_logs) {
+        core_log_event("I", "VPN session stopping");
+    }
     stop_pid(&g.redsocks_pid);
     stop_pid(&g.dns_pid);
     stop_pid(&g.core_pid);
+    finish_log_relay(&g.redsocks_log_relay_pid);
+    if (had_active_state && !protected_logs) {
+        core_log_event("I", "VPN session stopped");
+    }
 
     unlink("/var/run/vlesscore-redsocks.conf");
     unlink("/var/run/vlesscore-pf.conf");
@@ -2982,9 +3315,9 @@ static void monitor_connected_children(void) {
         if (!core_healthy) diagnostic_event("Core helper stopped unexpectedly");
         if (!redsocks_healthy) diagnostic_event("Traffic redirector stopped unexpectedly");
         if (!dns_healthy) diagnostic_event("DNS helper stopped unexpectedly");
-        log_msg("VPN helper exited unexpectedly; restoring PAC settings and clearing PF rules");
+        log_error("VPN helper exited unexpectedly; restoring PAC settings and clearing PF rules");
         if (disconnect_all() != 0) {
-            log_msg("VPN cleanup will be retried while system proxy restoration is pending");
+            log_warning("VPN cleanup will be retried while system proxy restoration is pending");
         }
         return;
     }
@@ -2994,10 +3327,10 @@ static void monitor_connected_children(void) {
     if (g.system_proxy_enabled && current_ms - g.system_proxy_refresh_ms >= 1000) {
         g.system_proxy_refresh_ms = current_ms;
         if (vc_system_proxy_refresh(g.socks_port) != 0) {
-            log_msg("system PAC proxy refresh failed; disconnecting to prevent WebKit traffic leaks");
+            log_error("system PAC proxy refresh failed; disconnecting to prevent WebKit traffic leaks");
             diagnostic_event("PAC refresh failed; disconnecting to prevent a leak");
             if (disconnect_all() != 0) {
-                log_msg("VPN cleanup will be retried while system proxy restoration is pending");
+                log_warning("VPN cleanup will be retried while system proxy restoration is pending");
             }
         }
     }
@@ -3009,7 +3342,8 @@ static void monitor_connected_children(void) {
 
 static int try_connect_pf(int socks_port) {
     int redir_port = 0;
-    int rc = spawn_redsocks(socks_port, &redir_port, &g.redsocks_pid);
+    int rc = spawn_redsocks(socks_port, &redir_port,
+                            &g.redsocks_pid, &g.redsocks_log_relay_pid);
     if (rc != 0) {
         return -30 + rc;
     }
@@ -3020,6 +3354,7 @@ static int try_connect_pf(int socks_port) {
     int dns_port = 0;
     if (spawn_dns_proxy(socks_port, &dns_port, &g.dns_pid) != 0) {
         stop_pid(&g.redsocks_pid);
+        finish_log_relay(&g.redsocks_log_relay_pid);
         return -45;
     }
     diagnostic_event("DNS helper started");
@@ -3028,10 +3363,11 @@ static int try_connect_pf(int socks_port) {
     int pf_rc = apply_pf_rules(pf_server_ips, redir_port, dns_port);
     if (pf_rc != 0) {
         if (clear_pf_rules() != 0) {
-            log_msg("failed to roll back PF after connection error");
+            log_error("failed to roll back PF after connection error");
         }
         stop_pid(&g.dns_pid);
         stop_pid(&g.redsocks_pid);
+        finish_log_relay(&g.redsocks_log_relay_pid);
         return -40 + pf_rc;
     }
     diagnostic_event("PF routing activated");
@@ -3093,7 +3429,7 @@ static int connect_all(const char *uri, const char *xray_version, int requested_
                                                    kConnectResolveTimeoutMs);
     if (resolve_rc == -2) {
         snprintf(msg, msg_cap, "ERR server DNS timeout after %dms", kConnectResolveTimeoutMs);
-        log_msg("resolve server host %s timed out after %dms", host, kConnectResolveTimeoutMs);
+        log_error("resolve server host %s timed out after %dms", host, kConnectResolveTimeoutMs);
         diagnostic_event("Connection failed: server DNS timed out");
         finish_failed_protected_connect();
         return -1;
@@ -3107,9 +3443,13 @@ static int connect_all(const char *uri, const char *xray_version, int requested_
 
     log_msg("resolved server host %s -> %s in %lldms", host, g.server_ips, now_ms() - resolve_start_ms);
     diagnostic_event("Server address resolved");
+    log_msg("VPN session starting server=%s local_socks=%d", host, port);
+    core_log_event("I", "VPN session starting | server=%s | local_socks=%d",
+                   host, port);
 
     if (spawn_core(uri, g.server_ips, xray_version, port, &g.core_pid) != 0) {
         snprintf(msg, msg_cap, "ERR failed to start vless-core binary");
+        core_log_event("E", "VPN session failed | vless-core did not start");
         diagnostic_event("Connection failed: core helper did not start");
         (void)disconnect_all();
         return -1;
@@ -3136,7 +3476,7 @@ static int connect_all(const char *uri, const char *xray_version, int requested_
         }
 #if defined(__LP64__)
         if (vc_system_proxy_enable(port) != 0) {
-            log_msg("failed to enable system PAC proxy for WebKit");
+            log_error("failed to enable system PAC proxy for WebKit");
             (void)vc_system_proxy_disable();
             snprintf(msg, msg_cap, "ERR failed to configure system proxy");
             diagnostic_event("Connection failed: PAC configuration failed");
@@ -3150,6 +3490,10 @@ static int connect_all(const char *uri, const char *xray_version, int requested_
         update_vpn_icon_state(1);
         g.springboard_pid = springboard_pid(0);
         g.springboard_poll_ms = now_ms();
+        log_msg("VPN session established mode=%s socks=%d redir=%d dns=%d",
+                mode_name(g.mode), g.socks_port, g.redir_port, g.dns_port);
+        core_log_event("I", "VPN session established | mode=%s | socks=%d | redir=%d | dns=%d",
+                       mode_name(g.mode), g.socks_port, g.redir_port, g.dns_port);
         diagnostic_event("VPN connection established");
         snprintf(msg, msg_cap, "OK connected mode=%s socks=%d redir=%d protected=%d",
                  mode_name(g.mode), g.socks_port, g.redir_port, g.protect_logs);
@@ -3550,16 +3894,16 @@ static void reject_control_client(int client_fd,
                               safe_executable,
                               sizeof(safe_executable));
         if (safe_executable[0]) {
-            log_msg("control authorization rejected reason=%s errno=%d pid=%d executable=%s",
-                    reason,
-                    diagnostic->error_number,
-                    (int)diagnostic->peer_pid,
-                    safe_executable);
+            log_warning("control authorization rejected reason=%s errno=%d pid=%d executable=%s",
+                        reason,
+                        diagnostic->error_number,
+                        (int)diagnostic->peer_pid,
+                        safe_executable);
         } else {
-            log_msg("control authorization rejected reason=%s errno=%d pid=%d",
-                    reason,
-                    diagnostic->error_number,
-                    (int)diagnostic->peer_pid);
+            log_warning("control authorization rejected reason=%s errno=%d pid=%d",
+                        reason,
+                        diagnostic->error_number,
+                        (int)diagnostic->peer_pid);
         }
         diagnostic_event("Control authorization rejected reason=%s errno=%d",
                          reason,
@@ -3597,7 +3941,7 @@ int main(int argc, char **argv) {
     g_instance_lock_fd = acquire_instance_lock(launched_by_launchd);
     if (g_instance_lock_fd < 0) {
         if (!launched_by_launchd && (errno == EACCES || errno == EAGAIN)) return 0;
-        log_msg("daemon instance lock unavailable errno=%d", errno);
+        log_error("daemon instance lock unavailable errno=%d", errno);
         return 1;
     }
     if (load_helper_identity() != 0) return 1;
@@ -3618,19 +3962,19 @@ int main(int argc, char **argv) {
     g.routing_bypass_lan = 1;
 #if defined(__LP64__)
     if (vc_system_proxy_restore_stale() != 0) {
-        log_msg("fatal: cannot restore stale system PAC settings");
+        log_error("fatal: cannot restore stale system PAC settings");
         return 1;
     }
 #endif
     if (recover_stale_pf_state() != 0) {
-        log_msg("fatal: cannot restore stale PF state");
+        log_error("fatal: cannot restore stale PF state");
         return 1;
     }
     update_vpn_icon_state(0);
 
     int lfd = bind_control_socket();
     if (lfd < 0) {
-        log_msg("fatal: cannot bind daemon control socket");
+        log_error("fatal: cannot bind daemon control socket");
         return 1;
     }
     g_listen_fd = lfd;
@@ -3656,7 +4000,7 @@ int main(int argc, char **argv) {
         int ready = select(lfd + 1, &read_fds, NULL, NULL, timeout_ptr);
         if (ready < 0) {
             if (errno == EINTR) continue;
-            log_msg("control socket select failed errno=%d", errno);
+            log_error("control socket select failed errno=%d", errno);
             break;
         }
         if (ready == 0) continue;

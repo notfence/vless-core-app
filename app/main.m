@@ -2448,7 +2448,14 @@ static NSString *ReadDaemonLog(NSInteger index, NSUInteger maxBytes) {
         return @"(empty)\n";
     }
     if (maxBytes > 0 && [data length] > maxBytes) {
-        data = [data subdataWithRange:NSMakeRange([data length] - maxBytes, maxBytes)];
+        NSUInteger start = [data length] - maxBytes;
+        const unsigned char *bytes = (const unsigned char *)[data bytes];
+        if (start > 0 && bytes[start - 1] != '\n') {
+            NSUInteger nextLine = start;
+            while (nextLine < [data length] && bytes[nextLine] != '\n') nextLine++;
+            if (nextLine < [data length]) start = nextLine + 1;
+        }
+        data = [data subdataWithRange:NSMakeRange(start, [data length] - start)];
     }
 
     NSString *txt = [[[NSString alloc] initWithData:data encoding:NSUTF8StringEncoding] autorelease];
@@ -2463,6 +2470,95 @@ static NSString *ReadDaemonLog(NSInteger index, NSUInteger maxBytes) {
 
 static NSString *ReadLogAtIndex(NSInteger index) {
     return ReadDaemonLog(index, 8192);
+}
+
+static UIFont *VCLogRegularFont(void) {
+    UIFont *font = [UIFont fontWithName:@"CourierNewPSMT" size:10.0f];
+    if (!font) font = [UIFont fontWithName:@"Courier" size:10.0f];
+    return font ? font : [UIFont systemFontOfSize:10.0f];
+}
+
+static UIFont *VCLogBoldFont(void) {
+    UIFont *font = [UIFont fontWithName:@"CourierNewPS-BoldMT" size:10.0f];
+    if (!font) font = [UIFont fontWithName:@"Courier-Bold" size:10.0f];
+    return font ? font : [UIFont boldSystemFontOfSize:10.0f];
+}
+
+static UIColor *VCLogLevelColor(unichar level) {
+    if (level == 'E') return VCErrorColor();
+    if (level == 'W') {
+        return VCAppearanceIsDark()
+            ? [UIColor colorWithRed:1.0f green:0.70f blue:0.22f alpha:1.0f]
+            : [UIColor colorWithRed:0.72f green:0.40f blue:0.02f alpha:1.0f];
+    }
+    if (level == 'I') return VCAccentColor();
+    return VCSecondaryTextColor();
+}
+
+static NSAttributedString *VCFormattedLogText(NSString *text) {
+    NSString *source = text ? text : @"";
+    NSMutableParagraphStyle *paragraph = [[[NSMutableParagraphStyle alloc] init] autorelease];
+    paragraph.lineSpacing = 1.0f;
+    paragraph.paragraphSpacing = 5.0f;
+    paragraph.firstLineHeadIndent = 0.0f;
+    paragraph.headIndent = 12.0f;
+    paragraph.lineBreakMode = NSLineBreakByWordWrapping;
+
+    NSDictionary *baseAttributes = [NSDictionary dictionaryWithObjectsAndKeys:
+        VCLogRegularFont(), NSFontAttributeName,
+        VCPrimaryTextColor(), NSForegroundColorAttributeName,
+        paragraph, NSParagraphStyleAttributeName,
+        nil];
+    NSMutableAttributedString *formatted = [[[NSMutableAttributedString alloc]
+        initWithString:source attributes:baseAttributes] autorelease];
+
+    NSUInteger sourceLength = [source length];
+    NSUInteger lineStart = 0;
+    while (lineStart < sourceLength) {
+        NSRange searchRange = NSMakeRange(lineStart, sourceLength - lineStart);
+        NSRange newline = [source rangeOfString:@"\n" options:0 range:searchRange];
+        NSUInteger lineEnd = newline.location == NSNotFound ? sourceLength : newline.location;
+        NSUInteger lineLength = lineEnd - lineStart;
+
+        if (lineLength >= 26 &&
+            [source characterAtIndex:lineStart + 4] == '-' &&
+            [source characterAtIndex:lineStart + 10] == ' ' &&
+            [source characterAtIndex:lineStart + 23] == ' ' &&
+            [source characterAtIndex:lineStart + 25] == ' ') {
+            unichar level = [source characterAtIndex:lineStart + 24];
+            if (level == 'D' || level == 'I' || level == 'W' || level == 'E') {
+                [formatted addAttribute:NSForegroundColorAttributeName
+                                  value:VCSecondaryTextColor()
+                                  range:NSMakeRange(lineStart, 23)];
+                [formatted addAttribute:NSFontAttributeName
+                                  value:VCLogBoldFont()
+                                  range:NSMakeRange(lineStart + 24, 1)];
+                [formatted addAttribute:NSForegroundColorAttributeName
+                                  value:VCLogLevelColor(level)
+                                  range:NSMakeRange(lineStart + 24, 1)];
+
+                if (lineLength > 27 && [source characterAtIndex:lineStart + 26] == '[') {
+                    NSUInteger componentStart = lineStart + 26;
+                    NSRange componentSearch = NSMakeRange(lineStart + 27, lineLength - 27);
+                    NSRange componentEnd = [source rangeOfString:@"]" options:0 range:componentSearch];
+                    if (componentEnd.location != NSNotFound) {
+                        NSRange componentRange = NSMakeRange(componentStart,
+                                                             componentEnd.location - componentStart + 1);
+                        [formatted addAttribute:NSForegroundColorAttributeName
+                                          value:VCSecondaryTextColor()
+                                          range:componentRange];
+                        [formatted addAttribute:NSFontAttributeName
+                                          value:VCLogBoldFont()
+                                          range:componentRange];
+                    }
+                }
+            }
+        }
+
+        if (newline.location == NSNotFound) break;
+        lineStart = newline.location + 1;
+    }
+    return formatted;
 }
 
 static int Base64Value(unsigned char c) {
@@ -14252,7 +14348,7 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
     NSString *copiedText = [(text ? text : @"") copy];
     [_logTexts[index] release];
     _logTexts[index] = copiedText;
-    _logView.text = _logTexts[index];
+    _logView.attributedText = VCFormattedLogText(_logTexts[index]);
     [_logView setNeedsLayout];
     [_logView layoutIfNeeded];
 
@@ -14841,6 +14937,12 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
     [self updateLogSelectorAnimated:NO];
     _logView.backgroundColor = background;
     _logView.textColor = VCPrimaryTextColor();
+    if (_logView && _activeLogIndex >= 0 && _activeLogIndex <= 1 &&
+        _logTexts[_activeLogIndex]) {
+        CGPoint savedLogOffset = _logView.contentOffset;
+        _logView.attributedText = VCFormattedLogText(_logTexts[_activeLogIndex]);
+        [_logView setContentOffset:savedLogOffset animated:NO];
+    }
     _logView.indicatorStyle = VCAppearanceIsDark() ? UIScrollViewIndicatorStyleWhite
                                                     : UIScrollViewIndicatorStyleDefault;
     VCAppearanceApplyTable(_tableView);
@@ -15046,7 +15148,7 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
     CGRect logFrame = CGRectMake(0.0f, logY + 32.0f, b.size.width, logH - 32.0f);
     _logView = [[UITextView alloc] initWithFrame:logFrame];
     _logView.editable = NO;
-    _logView.font = [UIFont systemFontOfSize:10.0f];
+    _logView.font = VCLogRegularFont();
     _logView.backgroundColor = bg;
     _logView.textColor = VCPrimaryTextColor();
     _logView.indicatorStyle = VCAppearanceIsDark() ? UIScrollViewIndicatorStyleWhite
