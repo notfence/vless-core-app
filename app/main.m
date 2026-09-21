@@ -3634,6 +3634,18 @@ static CGFloat VCSubscriptionCardHeight(NSString *description,
     return ceilf(height + 32.0f);
 }
 
+@interface VCDirectTouchHighlightButton : UIButton
+@end
+
+@implementation VCDirectTouchHighlightButton
+
+- (void)setHighlighted:(BOOL)highlighted {
+    if (highlighted && !self.tracking) return;
+    [super setHighlighted:highlighted];
+}
+
+@end
+
 @interface VCSubscriptionHeaderCell : VCMainListCell {
     UILabel *_providerDescriptionLabel;
     UILabel *_lastUpdatedLabel;
@@ -3671,12 +3683,12 @@ static CGFloat VCSubscriptionCardHeight(NSString *description,
     _lastUpdatedLabel.lineBreakMode = NSLineBreakByTruncatingTail;
     [self addSubview:_lastUpdatedLabel];
 
-    _webPageButton = [[UIButton buttonWithType:UIButtonTypeCustom] retain];
+    _webPageButton = [[VCDirectTouchHighlightButton alloc] initWithFrame:CGRectZero];
     _webPageButton.accessibilityLabel = @"Web Page";
     _webPageButton.accessibilityHint = @"Opens the subscription provider's web page";
     [self addSubview:_webPageButton];
 
-    _supportButton = [[UIButton buttonWithType:UIButtonTypeCustom] retain];
+    _supportButton = [[VCDirectTouchHighlightButton alloc] initWithFrame:CGRectZero];
     _supportButton.accessibilityLabel = @"Support";
     _supportButton.accessibilityHint = @"Opens the subscription provider's support page";
     [self addSubview:_supportButton];
@@ -12686,10 +12698,11 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
     [pingButton addTarget:self
                    action:@selector(subscriptionPingButtonPressed:)
          forControlEvents:UIControlEventTouchUpInside];
-    [self applyTouchFeedbackToButton:pingButton];
+    pingButton.showsTouchWhenHighlighted = NO;
+    pingButton.adjustsImageWhenHighlighted = NO;
     [v addSubview:pingButton];
 
-    UIButton *infoButton = [UIButton buttonWithType:UIButtonTypeCustom];
+    UIButton *infoButton = [[[VCDirectTouchHighlightButton alloc] initWithFrame:CGRectZero] autorelease];
     infoButton.frame = CGRectMake(32.0f, 0.0f, 24.0f, 24.0f);
     infoButton.tag = kVCSubscriptionInfoButtonTagBase + index;
     UIImage *infoIcon = LoadBundledIconTinted(@"info", 21.0f, VCSecondaryTextColor());
@@ -12776,7 +12789,8 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
             ? [NSString stringWithFormat:@"Double tap to run %@ again", pingTypeName]
             : [NSString stringWithFormat:@"Runs %@ latency test", pingTypeName]);
     [btn addTarget:self action:@selector(pingButtonPressed:) forControlEvents:UIControlEventTouchUpInside];
-    [self applyTouchFeedbackToButton:btn];
+    btn.showsTouchWhenHighlighted = NO;
+    btn.adjustsImageWhenHighlighted = NO;
     [v addSubview:btn];
 
     return v;
