@@ -583,6 +583,8 @@ typedef NS_ENUM(NSInteger, VCIconType) {
     VCIconTypeList = 9,
     VCIconTypeReorder = 10,
     VCIconTypeStop = 11,
+    VCIconTypeGlobe = 12,
+    VCIconTypeSupport = 13,
 };
 
 static NSInteger const kVCSettingsTitleMarqueeTag = 7400;
@@ -596,6 +598,8 @@ static NSInteger const kVCMainSectionHeaderChevronTagBase = 7440;
 static NSInteger const kVCMainSectionHeaderOrderButtonTagBase = 7450;
 static NSInteger const kVCSubscriptionInfoButtonTagBase = 30000;
 static NSInteger const kVCSubscriptionPingButtonTagBase = 40000;
+static NSInteger const kVCSubscriptionWebPageButtonTagBase = 50000;
+static NSInteger const kVCSubscriptionSupportButtonTagBase = 60000;
 static NSString *const kVCPingLoadingValue = @"__loading__";
 static NSString *const kVCPingFailureValue = @"Failed";
 static const char *kVCProxyPingHost = "www.gstatic.com";
@@ -1801,6 +1805,62 @@ static BOOL URLStringUsesPlainHTTP(NSString *urlString) {
     return [scheme isEqualToString:@"http"];
 }
 
+static NSString *VCValidatedProviderURLString(id rawValue) {
+    if (![rawValue isKindOfClass:[NSString class]]) return nil;
+
+    NSString *value = [(NSString *)rawValue
+        stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
+    if ([value length] == 0 ||
+        [value rangeOfCharacterFromSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]].location != NSNotFound ||
+        [value rangeOfCharacterFromSet:[NSCharacterSet controlCharacterSet]].location != NSNotFound) {
+        return nil;
+    }
+
+    NSURL *url = [NSURL URLWithString:value];
+    NSString *scheme = [[url scheme] lowercaseString];
+    if (![scheme isEqualToString:@"http"] && ![scheme isEqualToString:@"https"]) return nil;
+    if ([[url host] length] == 0) return nil;
+    return value;
+}
+
+static NSDictionary *VCSubscriptionMetadataDictionary(NSDictionary *subscription) {
+    id metadata = [subscription objectForKey:kSubscriptionMetadataKey];
+    return [metadata isKindOfClass:[NSDictionary class]] ? metadata : nil;
+}
+
+static NSString *VCSubscriptionDescription(NSDictionary *subscription) {
+    id rawDescription = [VCSubscriptionMetadataDictionary(subscription)
+        objectForKey:kSubscriptionDescriptionKey];
+    if (![rawDescription isKindOfClass:[NSString class]]) return nil;
+
+    NSString *description = [(NSString *)rawDescription
+        stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
+    return [description length] > 0 ? description : nil;
+}
+
+static NSString *VCSubscriptionProviderURL(NSDictionary *subscription, NSString *metadataKey) {
+    return VCValidatedProviderURLString(
+        [VCSubscriptionMetadataDictionary(subscription) objectForKey:metadataKey]);
+}
+
+static NSString *VCSubscriptionLastUpdatedText(NSDictionary *subscription) {
+    id rawTimestamp = [VCSubscriptionMetadataDictionary(subscription)
+        objectForKey:kSubscriptionLastUpdatedKey];
+    if (![rawTimestamp isKindOfClass:[NSNumber class]] || [rawTimestamp unsignedLongLongValue] == 0) {
+        return @"Updated: Never";
+    }
+
+    NSDate *date = [NSDate dateWithTimeIntervalSince1970:(NSTimeInterval)[rawTimestamp unsignedLongLongValue]];
+    if (!date) return @"Updated: Never";
+
+    NSDateFormatter *formatter = [[[NSDateFormatter alloc] init] autorelease];
+    [formatter setLocale:[[[NSLocale alloc] initWithLocaleIdentifier:@"en_US_POSIX"] autorelease]];
+    [formatter setDateFormat:@"dd.MM.yyyy HH:mm"];
+    NSString *formatted = [formatter stringFromDate:date];
+    return [formatted length] > 0 ? [NSString stringWithFormat:@"Updated: %@", formatted]
+                                  : @"Updated: Never";
+}
+
 static BOOL SubscriptionDictionaryAllowsPlainHTTP(NSDictionary *sub) {
     if (![sub isKindOfClass:[NSDictionary class]]) return NO;
     id value = [sub objectForKey:kSubscriptionAllowPlainHTTPKey];
@@ -2984,6 +3044,41 @@ static UIImage *MakeIconImage(VCIconType type, CGFloat size, BOOL active) {
                                           size * 0.28f,
                                           size * 0.44f,
                                           size * 0.44f));
+    } else if (type == VCIconTypeGlobe) {
+        CGRect globeRect = CGRectMake(size * 0.16f,
+                                      size * 0.16f,
+                                      size * 0.68f,
+                                      size * 0.68f);
+        CGContextStrokeEllipseInRect(ctx, globeRect);
+        CGContextStrokeEllipseInRect(ctx, CGRectInset(globeRect, size * 0.22f, 0.0f));
+        CGContextMoveToPoint(ctx, size * 0.19f, size * 0.39f);
+        CGContextAddLineToPoint(ctx, size * 0.81f, size * 0.39f);
+        CGContextMoveToPoint(ctx, size * 0.19f, size * 0.61f);
+        CGContextAddLineToPoint(ctx, size * 0.81f, size * 0.61f);
+        CGContextStrokePath(ctx);
+    } else if (type == VCIconTypeSupport) {
+        CGRect bubbleRect = CGRectMake(size * 0.14f,
+                                       size * 0.17f,
+                                       size * 0.72f,
+                                       size * 0.55f);
+        UIBezierPath *bubble = [UIBezierPath bezierPathWithRoundedRect:bubbleRect
+                                                          cornerRadius:size * 0.12f];
+        bubble.lineWidth = 2.0f;
+        [bubble stroke];
+        CGContextMoveToPoint(ctx, size * 0.35f, size * 0.70f);
+        CGContextAddLineToPoint(ctx, size * 0.27f, size * 0.84f);
+        CGContextAddLineToPoint(ctx, size * 0.49f, size * 0.72f);
+        CGContextStrokePath(ctx);
+        CGFloat dotRadius = MAX(1.0f, size * 0.035f);
+        CGFloat dotY = size * 0.45f;
+        for (int i = 0; i < 3; i++) {
+            CGFloat dotX = size * (0.36f + 0.14f * i);
+            CGContextFillEllipseInRect(ctx,
+                                       CGRectMake(dotX - dotRadius,
+                                                  dotY - dotRadius,
+                                                  dotRadius * 2.0f,
+                                                  dotRadius * 2.0f));
+        }
     }
 
     UIImage *img = UIGraphicsGetImageFromCurrentImageContext();
@@ -3507,6 +3602,192 @@ static UIView *VCMainListCellReorderControlInView(UIView *view) {
 
     _normalVisualBackground.frame = self.bounds;
     _selectedVisualBackground.frame = self.bounds;
+}
+
+@end
+
+static CGFloat VCSubscriptionDescriptionWidth(CGFloat cardWidth, BOOL reordering) {
+    CGFloat rightInset = reordering ? 50.0f : 14.0f;
+    return MAX(80.0f, cardWidth - 14.0f - rightInset);
+}
+
+static CGFloat VCSubscriptionDescriptionHeight(NSString *description, CGFloat width) {
+    if ([description length] == 0) return 0.0f;
+
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wdeprecated-declarations"
+    CGSize size = [description sizeWithFont:[UIFont systemFontOfSize:12.0f]
+                          constrainedToSize:CGSizeMake(MAX(1.0f, width), CGFLOAT_MAX)
+                              lineBreakMode:NSLineBreakByWordWrapping];
+#pragma clang diagnostic pop
+    return ceilf(size.height);
+}
+
+static CGFloat VCSubscriptionCardHeight(NSString *description,
+                                        CGFloat cardWidth,
+                                        BOOL reordering) {
+    CGFloat height = 52.0f;
+    CGFloat descriptionHeight = VCSubscriptionDescriptionHeight(
+        description,
+        VCSubscriptionDescriptionWidth(cardWidth, reordering));
+    if (descriptionHeight > 0.0f) height += descriptionHeight + 5.0f;
+    return ceilf(height + 32.0f);
+}
+
+@interface VCSubscriptionHeaderCell : VCMainListCell {
+    UILabel *_providerDescriptionLabel;
+    UILabel *_lastUpdatedLabel;
+    UIButton *_webPageButton;
+    UIButton *_supportButton;
+    BOOL _showsDescription;
+}
+- (void)configureDescription:(NSString *)description
+                 lastUpdated:(NSString *)lastUpdated
+             showDescription:(BOOL)showDescription
+                  hasWebPage:(BOOL)hasWebPage
+                  hasSupport:(BOOL)hasSupport
+                       index:(NSInteger)index
+                      target:(id)target;
+@end
+
+@implementation VCSubscriptionHeaderCell
+
+- (id)initWithStyle:(UITableViewCellStyle)style reuseIdentifier:(NSString *)reuseIdentifier {
+    self = [super initWithStyle:style reuseIdentifier:reuseIdentifier];
+    if (!self) return nil;
+
+    _providerDescriptionLabel = [[UILabel alloc] initWithFrame:CGRectZero];
+    _providerDescriptionLabel.backgroundColor = [UIColor clearColor];
+    _providerDescriptionLabel.font = [UIFont systemFontOfSize:12.0f];
+    _providerDescriptionLabel.numberOfLines = 0;
+    _providerDescriptionLabel.lineBreakMode = NSLineBreakByWordWrapping;
+    _providerDescriptionLabel.textAlignment = NSTextAlignmentCenter;
+    [self addSubview:_providerDescriptionLabel];
+
+    _lastUpdatedLabel = [[UILabel alloc] initWithFrame:CGRectZero];
+    _lastUpdatedLabel.backgroundColor = [UIColor clearColor];
+    _lastUpdatedLabel.font = [UIFont systemFontOfSize:10.0f];
+    _lastUpdatedLabel.numberOfLines = 1;
+    _lastUpdatedLabel.lineBreakMode = NSLineBreakByTruncatingTail;
+    [self addSubview:_lastUpdatedLabel];
+
+    _webPageButton = [[UIButton buttonWithType:UIButtonTypeCustom] retain];
+    _webPageButton.accessibilityLabel = @"Web Page";
+    _webPageButton.accessibilityHint = @"Opens the subscription provider's web page";
+    [self addSubview:_webPageButton];
+
+    _supportButton = [[UIButton buttonWithType:UIButtonTypeCustom] retain];
+    _supportButton.accessibilityLabel = @"Support";
+    _supportButton.accessibilityHint = @"Opens the subscription provider's support page";
+    [self addSubview:_supportButton];
+
+    return self;
+}
+
+- (void)dealloc {
+    [_providerDescriptionLabel release];
+    [_lastUpdatedLabel release];
+    [_webPageButton release];
+    [_supportButton release];
+    [super dealloc];
+}
+
+- (void)configureDescription:(NSString *)description
+                 lastUpdated:(NSString *)lastUpdated
+             showDescription:(BOOL)showDescription
+                  hasWebPage:(BOOL)hasWebPage
+                  hasSupport:(BOOL)hasSupport
+                       index:(NSInteger)index
+                      target:(id)target {
+    _showsDescription = showDescription && [description length] > 0;
+    _providerDescriptionLabel.hidden = !_showsDescription;
+    _providerDescriptionLabel.text = _showsDescription ? description : @"";
+    _lastUpdatedLabel.text = [lastUpdated length] > 0 ? lastUpdated : @"Updated: Never";
+
+    [_webPageButton removeTarget:nil action:NULL forControlEvents:UIControlEventTouchUpInside];
+    [_supportButton removeTarget:nil action:NULL forControlEvents:UIControlEventTouchUpInside];
+    _webPageButton.hidden = !hasWebPage;
+    _supportButton.hidden = !hasSupport;
+    if (hasWebPage) {
+        _webPageButton.tag = kVCSubscriptionWebPageButtonTagBase + index;
+        [_webPageButton addTarget:target
+                           action:@selector(subscriptionWebPageButtonPressed:)
+                 forControlEvents:UIControlEventTouchUpInside];
+    }
+    if (hasSupport) {
+        _supportButton.tag = kVCSubscriptionSupportButtonTagBase + index;
+        [_supportButton addTarget:target
+                           action:@selector(subscriptionSupportButtonPressed:)
+                 forControlEvents:UIControlEventTouchUpInside];
+    }
+
+    [self setNeedsLayout];
+}
+
+- (void)refreshVisualAppearance {
+    [super refreshVisualAppearance];
+    _providerDescriptionLabel.textColor = VCPrimaryTextColor();
+    _lastUpdatedLabel.textColor = VCSecondaryTextColor();
+
+    [_webPageButton setImage:MakeIconImage(VCIconTypeGlobe, 17.0f, YES)
+                    forState:UIControlStateNormal];
+    [_webPageButton setImage:MakeIconImage(VCIconTypeGlobe, 17.0f, NO)
+                    forState:UIControlStateHighlighted];
+    [_supportButton setImage:MakeIconImage(VCIconTypeSupport, 17.0f, YES)
+                    forState:UIControlStateNormal];
+    [_supportButton setImage:MakeIconImage(VCIconTypeSupport, 17.0f, NO)
+                    forState:UIControlStateHighlighted];
+}
+
+- (void)layoutSubviews {
+    [super layoutSubviews];
+
+    if (self.accessoryView && !self.accessoryView.hidden) {
+        CGRect accessoryFrame = self.accessoryView.frame;
+        accessoryFrame.origin.y = 19.0f;
+        self.accessoryView.frame = accessoryFrame;
+    }
+
+    CGFloat left = 14.0f;
+    BOOL reordering = self.showsReorderControl;
+    CGFloat contentWidth = VCSubscriptionDescriptionWidth(CGRectGetWidth(self.bounds), reordering);
+    CGFloat y = 52.0f;
+
+    if (_showsDescription) {
+        CGFloat descriptionHeight = VCSubscriptionDescriptionHeight(_providerDescriptionLabel.text,
+                                                                    contentWidth);
+        _providerDescriptionLabel.frame = CGRectMake(left, y, contentWidth, descriptionHeight);
+        y += descriptionHeight + 5.0f;
+    } else {
+        _providerDescriptionLabel.frame = CGRectZero;
+    }
+
+    BOOL hasWebPage = !_webPageButton.hidden;
+    BOOL hasSupport = !_supportButton.hidden;
+    CGFloat metadataRight = left + contentWidth;
+    CGFloat buttonsWidth = 0.0f;
+    if (hasWebPage) buttonsWidth += 26.0f;
+    if (hasSupport) buttonsWidth += 26.0f;
+    if (hasWebPage && hasSupport) buttonsWidth += 3.0f;
+    CGFloat buttonX = metadataRight - buttonsWidth;
+    if (hasWebPage) {
+        _webPageButton.frame = CGRectMake(buttonX, y, 26.0f, 24.0f);
+        buttonX += 29.0f;
+    } else {
+        _webPageButton.frame = CGRectZero;
+    }
+    if (hasSupport) {
+        _supportButton.frame = CGRectMake(buttonX, y, 26.0f, 24.0f);
+    } else {
+        _supportButton.frame = CGRectZero;
+    }
+
+    CGFloat lastUpdatedRight = metadataRight - buttonsWidth;
+    _lastUpdatedLabel.frame = CGRectMake(left,
+                                         y + 5.0f,
+                                         MAX(0.0f, lastUpdatedRight - left -
+                                             (buttonsWidth > 0.0f ? 4.0f : 0.0f)),
+                                         14.0f);
 }
 
 @end
@@ -9220,7 +9501,10 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
 - (void)refreshMainListCellAppearance:(UITableViewCell *)cell atIndexPath:(NSIndexPath *)indexPath;
 - (void)refreshVisiblePingAccessoriesForURI:(NSString *)uri;
 - (void)refreshVisibleSubscriptionPingAccessories;
+- (void)configureSubscriptionHeaderCell:(UITableViewCell *)cell atIndex:(NSInteger)index;
 - (void)refreshVisibleSubscriptionHeaderAccessories;
+- (void)subscriptionWebPageButtonPressed:(UIButton *)sender;
+- (void)subscriptionSupportButtonPressed:(UIButton *)sender;
 - (void)refreshPresentedSubscriptionInfoIfNeeded;
 - (void)refreshLogs;
 - (BOOL)selectedSubscriptionIsHappEncrypted;
@@ -10774,6 +11058,10 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
     }
     if (right < left + 12.0f) {
         right = left + 12.0f;
+    }
+
+    if ([cell isKindOfClass:[VCSubscriptionHeaderCell class]]) {
+        return CGRectMake(left, 32.0f, right - left, 15.0f);
     }
 
     CGFloat height = contentH - top - 2.0f;
@@ -14137,6 +14425,37 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
     [self presentViewController:nav animated:YES completion:nil];
 }
 
+- (void)openSubscriptionProviderURLAtIndex:(NSInteger)index
+                               metadataKey:(NSString *)metadataKey
+                                 eventName:(NSString *)eventName {
+    if (index < 0 || index >= (NSInteger)[_subscriptions count]) return;
+    NSDictionary *subscription = [_subscriptions objectAtIndex:index];
+    NSString *urlString = VCSubscriptionProviderURL(subscription, metadataKey);
+    if ([urlString length] == 0) return;
+
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wdeprecated-declarations"
+    BOOL opened = [[UIApplication sharedApplication] openURL:[NSURL URLWithString:urlString]];
+#pragma clang diagnostic pop
+    VCRecordAppEvent(@"ui", eventName, opened ? @"opened=1" : @"opened=0");
+    if (opened) return;
+    [self showStatus:@"Provider link could not be opened" ok:NO];
+}
+
+- (void)subscriptionWebPageButtonPressed:(UIButton *)sender {
+    NSInteger index = sender.tag - kVCSubscriptionWebPageButtonTagBase;
+    [self openSubscriptionProviderURLAtIndex:index
+                                 metadataKey:kSubscriptionWebPageURLKey
+                                   eventName:@"Subscription web page opened"];
+}
+
+- (void)subscriptionSupportButtonPressed:(UIButton *)sender {
+    NSInteger index = sender.tag - kVCSubscriptionSupportButtonTagBase;
+    [self openSubscriptionProviderURLAtIndex:index
+                                 metadataKey:kSubscriptionSupportURLKey
+                                   eventName:@"Subscription support opened"];
+}
+
 - (void)subscriptionInfoButtonPressed:(UIButton *)sender {
     NSInteger index = sender.tag - kVCSubscriptionInfoButtonTagBase;
     if (index < 0 || index >= (NSInteger)[_subscriptions count]) return;
@@ -15333,7 +15652,16 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
                          isHeader:&isHeader]) {
         return 44.0f;
     }
-    if (isHeader) return 62.0f;
+    if (isHeader) {
+        if (subIdx < 0 || subIdx >= (NSInteger)[_subscriptions count]) return 84.0f;
+        NSDictionary *subscription = [_subscriptions objectAtIndex:subIdx];
+        NSString *visibleDescription = (_expandedSubscription == subIdx)
+            ? VCSubscriptionDescription(subscription)
+            : nil;
+        return VCSubscriptionCardHeight(visibleDescription,
+                                        CGRectGetWidth(tableView.bounds),
+                                        _reorderingSection == 1);
+    }
 
     NSArray *items = [self subscriptionItemsAtIndex:subIdx];
     BOOL firstItem = (itemIdx == 0);
@@ -15661,6 +15989,28 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
     [self refreshStickyMainSectionHeader];
 }
 
+- (void)configureSubscriptionHeaderCell:(UITableViewCell *)cell atIndex:(NSInteger)index {
+    if (![cell isKindOfClass:[VCSubscriptionHeaderCell class]] ||
+        index < 0 || index >= (NSInteger)[_subscriptions count]) {
+        return;
+    }
+
+    NSDictionary *subscription = [_subscriptions objectAtIndex:index];
+    BOOL providerButtonsEnabled = (_reorderingSection != 1);
+    BOOL hasWebPage = providerButtonsEnabled &&
+        [VCSubscriptionProviderURL(subscription, kSubscriptionWebPageURLKey) length] > 0;
+    BOOL hasSupport = providerButtonsEnabled &&
+        [VCSubscriptionProviderURL(subscription, kSubscriptionSupportURLKey) length] > 0;
+    [(VCSubscriptionHeaderCell *)cell
+        configureDescription:VCSubscriptionDescription(subscription)
+                 lastUpdated:VCSubscriptionLastUpdatedText(subscription)
+             showDescription:(_expandedSubscription == index)
+                  hasWebPage:hasWebPage
+                   hasSupport:hasSupport
+                       index:index
+                      target:self];
+}
+
 - (void)refreshVisibleSubscriptionHeaderAccessories {
     if (!_tableView || !_subscriptionsSectionExpanded || _reorderingSection == 1) return;
 
@@ -15674,6 +16024,7 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
         cell.accessoryView = [self accessorySubscriptionHeaderAtIndex:subIdx
                                                              expanded:(_expandedSubscription == subIdx)
                                                               loading:(_updatingSubscriptionIndex == subIdx)];
+        [self configureSubscriptionHeaderCell:cell atIndex:subIdx];
     }
 }
 
@@ -16143,7 +16494,13 @@ moveRowAtIndexPath:(NSIndexPath *)sourceIndexPath
 
     UITableViewCell *cell = [tableView dequeueReusableCellWithIdentifier:cellID];
     if (!cell) {
-        cell = [[[VCMainListCell alloc] initWithStyle:UITableViewCellStyleSubtitle reuseIdentifier:cellID] autorelease];
+        if (visualKind == VCMainListCellKindSubscriptionHeader) {
+            cell = [[[VCSubscriptionHeaderCell alloc] initWithStyle:UITableViewCellStyleSubtitle
+                                                    reuseIdentifier:cellID] autorelease];
+        } else {
+            cell = [[[VCMainListCell alloc] initWithStyle:UITableViewCellStyleSubtitle
+                                          reuseIdentifier:cellID] autorelease];
+        }
         cell.accessoryType = UITableViewCellAccessoryNone;
         cell.detailTextLabel.font = [UIFont systemFontOfSize:11.0f];
     }
@@ -16200,6 +16557,7 @@ moveRowAtIndexPath:(NSIndexPath *)sourceIndexPath
                                                                        expanded:(_expandedSubscription == subIdx)
                                                                         loading:loading];
                 }
+                [self configureSubscriptionHeaderCell:cell atIndex:subIdx];
             } else {
                 NSString *uri = [items objectAtIndex:itemIdx];
                 cell.indentationLevel = 0;
@@ -16371,6 +16729,15 @@ moveRowAtIndexPath:(NSIndexPath *)sourceIndexPath
                     if ([[self subscriptionItemsAtIndex:subIdx] count] == 0) {
                         [self refreshSubscriptionAtIndex:subIdx showStatus:NO];
                     }
+                }
+                UITableViewCell *selectedHeaderCell = [_tableView cellForRowAtIndexPath:indexPath];
+                [self configureSubscriptionHeaderCell:selectedHeaderCell atIndex:subIdx];
+                if (oldExpandedSubscription >= 0 && oldExpandedSubscription != subIdx) {
+                    NSIndexPath *oldHeaderPath = [NSIndexPath indexPathForRow:oldExpandedHeaderRow
+                                                                    inSection:1];
+                    UITableViewCell *oldHeaderCell = [_tableView cellForRowAtIndexPath:oldHeaderPath];
+                    [self configureSubscriptionHeaderCell:oldHeaderCell
+                                                   atIndex:oldExpandedSubscription];
                 }
                 NSDictionary *sub = [_subscriptions objectAtIndex:subIdx];
                 NSString *name = [sub objectForKey:@"name"];
