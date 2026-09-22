@@ -47,6 +47,7 @@ static NSString *const kDefaultsAutoUpdateSubsKey = @"vlesscore.auto_update_subs
 static NSString *const kDefaultsPreserveCustomSubscriptionNamesKey = @"vlesscore.preserve_custom_subscription_names";
 static NSString *const kDefaultsStealthModeKey = @"vlesscore.stealth_mode";
 static NSString *const kDefaultsDarkThemeKey = @"vlesscore.dark_theme";
+static NSString *const kDefaultsAccentColorKey = @"vlesscore.accent_color";
 static NSString *const kDefaultsAutomaticUpdateChecksKey = @"vlesscore.update.automatic";
 static NSString *const kDefaultsPingTypeKey = @"vlesscore.ping.type";
 static NSString *const kDefaultsXrayVersionSpoofEnabledKey = @"vlesscore.xray.version.spoof.enabled";
@@ -395,6 +396,55 @@ static void VCAppearanceSetDark(BOOL dark) {
     [ud synchronize];
 }
 
+static NSArray *VCAppearanceAccentIdentifiers(void) {
+    return [NSArray arrayWithObjects:@"blue", @"teal", @"green", @"orange", @"red", @"purple", nil];
+}
+
+static NSArray *VCAppearanceAccentNames(void) {
+    return [NSArray arrayWithObjects:@"Blue", @"Teal", @"Green", @"Orange", @"Red", @"Purple", nil];
+}
+
+static NSInteger VCAppearanceAccentIndex(void) {
+    NSString *identifier = [[NSUserDefaults standardUserDefaults] stringForKey:kDefaultsAccentColorKey];
+    NSUInteger index = [VCAppearanceAccentIdentifiers() indexOfObject:identifier];
+    return index == NSNotFound ? 0 : (NSInteger)index;
+}
+
+static void VCAppearanceSetAccentIndex(NSInteger index) {
+    NSArray *identifiers = VCAppearanceAccentIdentifiers();
+    if (index < 0 || index >= (NSInteger)[identifiers count]) index = 0;
+    NSUserDefaults *defaults = [NSUserDefaults standardUserDefaults];
+    [defaults setObject:[identifiers objectAtIndex:index] forKey:kDefaultsAccentColorKey];
+    [defaults synchronize];
+}
+
+static NSString *VCAppearanceAccentName(void) {
+    return [VCAppearanceAccentNames() objectAtIndex:VCAppearanceAccentIndex()];
+}
+
+static UIColor *VCAppearanceAccentColorAtIndex(NSInteger index, BOOL dark) {
+    switch (index) {
+        case 1:
+            return dark ? [UIColor colorWithRed:0.22f green:0.84f blue:0.74f alpha:1.0f]
+                        : [UIColor colorWithRed:0.025f green:0.47f blue:0.42f alpha:1.0f];
+        case 2:
+            return dark ? [UIColor colorWithRed:0.36f green:0.84f blue:0.45f alpha:1.0f]
+                        : [UIColor colorWithRed:0.08f green:0.50f blue:0.18f alpha:1.0f];
+        case 3:
+            return dark ? [UIColor colorWithRed:1.0f green:0.64f blue:0.24f alpha:1.0f]
+                        : [UIColor colorWithRed:0.82f green:0.39f blue:0.03f alpha:1.0f];
+        case 4:
+            return dark ? [UIColor colorWithRed:1.0f green:0.38f blue:0.38f alpha:1.0f]
+                        : [UIColor colorWithRed:0.78f green:0.12f blue:0.12f alpha:1.0f];
+        case 5:
+            return dark ? [UIColor colorWithRed:0.72f green:0.50f blue:1.0f alpha:1.0f]
+                        : [UIColor colorWithRed:0.48f green:0.25f blue:0.74f alpha:1.0f];
+        default:
+            return dark ? [UIColor colorWithRed:0.28f green:0.62f blue:1.0f alpha:1.0f]
+                        : [UIColor colorWithRed:0.10f green:0.44f blue:0.86f alpha:1.0f];
+    }
+}
+
 static UIColor *VCBackgroundColor(void) {
     return VCAppearanceIsDark() ? [UIColor colorWithWhite:0.065f alpha:1.0f]
                                 : [UIColor colorWithWhite:0.97f alpha:1.0f];
@@ -421,11 +471,28 @@ static UIColor *VCSeparatorColor(void) {
 }
 
 static UIColor *VCSelectedCellColor(void) {
-    return VCAppearanceIsDark() ? [UIColor colorWithRed:0.12f green:0.24f blue:0.38f alpha:1.0f]
-                                : [UIColor colorWithRed:0.82f green:0.89f blue:0.98f alpha:1.0f];
+    UIColor *accent = VCAppearanceAccentColorAtIndex(VCAppearanceAccentIndex(), VCAppearanceIsDark());
+    const CGFloat *components = CGColorGetComponents(accent.CGColor);
+    CGFloat red = components[0];
+    CGFloat green = components[1];
+    CGFloat blue = components[2];
+    if (VCAppearanceIsDark()) {
+        return [UIColor colorWithRed:(0.06f + red * 0.24f)
+                               green:(0.06f + green * 0.24f)
+                                blue:(0.06f + blue * 0.24f)
+                               alpha:1.0f];
+    }
+    return [UIColor colorWithRed:(0.80f + red * 0.20f)
+                           green:(0.80f + green * 0.20f)
+                            blue:(0.80f + blue * 0.20f)
+                           alpha:1.0f];
 }
 
 static UIColor *VCAccentColor(void) {
+    return VCAppearanceAccentColorAtIndex(VCAppearanceAccentIndex(), VCAppearanceIsDark());
+}
+
+static UIColor *VCDefaultAccentColor(void) {
     return VCAppearanceIsDark() ? [UIColor colorWithRed:0.28f green:0.62f blue:1.0f alpha:1.0f]
                                 : [UIColor colorWithRed:0.10f green:0.44f blue:0.86f alpha:1.0f];
 }
@@ -2552,7 +2619,7 @@ static UIColor *VCLogLevelColor(unichar level) {
             ? [UIColor colorWithRed:1.0f green:0.70f blue:0.22f alpha:1.0f]
             : [UIColor colorWithRed:0.72f green:0.40f blue:0.02f alpha:1.0f];
     }
-    if (level == 'I') return VCAccentColor();
+    if (level == 'I') return VCDefaultAccentColor();
     return VCSecondaryTextColor();
 }
 
@@ -3096,6 +3163,21 @@ static UIView *VCCreateDisclosureAccessoryView(void) {
     return view;
 }
 
+static UIImage *VCAppearanceAccentSwatchImage(UIColor *color) {
+    CGSize size = CGSizeMake(24.0f, 24.0f);
+    UIGraphicsBeginImageContextWithOptions(size, NO, 0.0f);
+    CGRect swatchRect = CGRectMake(3.0f, 3.0f, 18.0f, 18.0f);
+    UIBezierPath *swatch = [UIBezierPath bezierPathWithRoundedRect:swatchRect cornerRadius:5.0f];
+    [color setFill];
+    [swatch fill];
+    [[VCSeparatorColor() colorWithAlphaComponent:0.85f] setStroke];
+    swatch.lineWidth = 1.0f;
+    [swatch stroke];
+    UIImage *image = UIGraphicsGetImageFromCurrentImageContext();
+    UIGraphicsEndImageContext();
+    return image;
+}
+
 @interface VCMarqueeLabel : UIView {
     UILabel *_label;
     NSString *_text;
@@ -3543,7 +3625,7 @@ static UIView *VCMainListCellReorderControlInView(UIView *view) {
     if (_visualKind == VCMainListCellKindSubscriptionHeader) {
         self.textLabel.font = [UIFont boldSystemFontOfSize:15.5f];
     } else {
-        self.textLabel.font = [UIFont boldSystemFontOfSize:18.0f];
+        self.textLabel.font = [UIFont boldSystemFontOfSize:15.5f];
     }
 }
 
@@ -3812,9 +3894,21 @@ static CGFloat VCSubscriptionCardHeight(NSString *description,
 - (void)settingsVC:(SettingsVC *)vc didChangePreserveCustomSubscriptionNames:(BOOL)enabled;
 - (void)settingsVC:(SettingsVC *)vc didChangeStealthMode:(BOOL)enabled;
 - (void)settingsVC:(SettingsVC *)vc didChangeDarkTheme:(BOOL)enabled;
+- (void)settingsVCDidChangeAccentColor:(SettingsVC *)vc;
 @end
 
-@interface SettingsVC : UIViewController <UITableViewDataSource, UITableViewDelegate, UIActionSheetDelegate, UIAlertViewDelegate, VCUpdateCheckerDelegate> {
+@protocol VCAccentColorVCDelegate <NSObject>
+- (void)accentColorVCDidChange;
+@end
+
+@interface VCAccentColorVC : UIViewController <UITableViewDataSource, UITableViewDelegate> {
+    UITableView *_tableView;
+    id<VCAccentColorVCDelegate> _delegate;
+}
+- (id)initWithDelegate:(id<VCAccentColorVCDelegate>)delegate;
+@end
+
+@interface SettingsVC : UIViewController <UITableViewDataSource, UITableViewDelegate, UIActionSheetDelegate, UIAlertViewDelegate, VCUpdateCheckerDelegate, VCAccentColorVCDelegate> {
     UITableView *_tableView;
     UISwitch *_autoUpdateSwitch;
     UISwitch *_preserveCustomNamesSwitch;
@@ -4690,7 +4784,7 @@ static NSInteger const kRoutingRuleActionSheetTagBase = 6200;
 - (UIColor *)colorForAction:(NSString *)action {
     if ([action isEqualToString:@"direct"]) return VCSuccessColor();
     if ([action isEqualToString:@"block"]) return VCErrorColor();
-    return VCAccentColor();
+    return VCDefaultAccentColor();
 }
 
 - (void)viewDidLoad {
@@ -4854,7 +4948,7 @@ static NSInteger const kRoutingRuleActionSheetTagBase = 6200;
     } else {
         cell.textLabel.text = @"Add Rule";
         cell.detailTextLabel.text = @"Domain, IP/CIDR or port";
-        cell.textLabel.textColor = VCAccentColor();
+        cell.textLabel.textColor = VCDefaultAccentColor();
     }
     return cell;
 }
@@ -7171,6 +7265,107 @@ static NSString *VCDiagnosticValue(NSDictionary *dictionary,
 
 @end
 
+@implementation VCAccentColorVC
+
+- (id)initWithDelegate:(id<VCAccentColorVCDelegate>)delegate {
+    self = [super init];
+    if (!self) return nil;
+    _delegate = delegate;
+    return self;
+}
+
+- (void)applyTheme {
+    self.view.backgroundColor = VCBackgroundColor();
+    VCAppearanceApplyNavigationBar(self.navigationController.navigationBar);
+    VCAppearanceApplyStatusBar();
+    VCAppearanceApplyTable(_tableView);
+    [_tableView reloadData];
+    VCAppearanceRefreshVisibleTableHeaders(_tableView);
+}
+
+- (void)viewDidLoad {
+    [super viewDidLoad];
+    self.title = @"Accent Color";
+    _tableView = [[UITableView alloc] initWithFrame:self.view.bounds style:UITableViewStyleGrouped];
+    _tableView.dataSource = self;
+    _tableView.delegate = self;
+    _tableView.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
+    [self.view addSubview:_tableView];
+    [self applyTheme];
+}
+
+- (NSInteger)tableView:(UITableView *)tableView numberOfRowsInSection:(NSInteger)section {
+    (void)tableView;
+    (void)section;
+    return [VCAppearanceAccentNames() count];
+}
+
+- (UITableViewCell *)tableView:(UITableView *)tableView cellForRowAtIndexPath:(NSIndexPath *)indexPath {
+    static NSString *cellIdentifier = @"AccentColorCell";
+    UITableViewCell *cell = [tableView dequeueReusableCellWithIdentifier:cellIdentifier];
+    if (!cell) {
+        cell = [[[UITableViewCell alloc] initWithStyle:UITableViewCellStyleDefault
+                                       reuseIdentifier:cellIdentifier] autorelease];
+    }
+
+    NSInteger index = indexPath.row;
+    BOOL selected = index == VCAppearanceAccentIndex();
+    VCAppearanceApplyCell(cell);
+    cell.selectionStyle = UITableViewCellSelectionStyleBlue;
+    cell.textLabel.text = [VCAppearanceAccentNames() objectAtIndex:index];
+    cell.imageView.image = VCAppearanceAccentSwatchImage(
+        VCAppearanceAccentColorAtIndex(index, VCAppearanceIsDark()));
+    cell.accessoryType = selected ? UITableViewCellAccessoryCheckmark
+                                  : UITableViewCellAccessoryNone;
+    cell.accessibilityValue = selected ? @"Selected" : nil;
+    return cell;
+}
+
+- (void)tableView:(UITableView *)tableView willDisplayCell:(UITableViewCell *)cell forRowAtIndexPath:(NSIndexPath *)indexPath {
+    (void)tableView;
+    (void)indexPath;
+    VCAppearanceApplyCell(cell);
+}
+
+- (void)tableView:(UITableView *)tableView didSelectRowAtIndexPath:(NSIndexPath *)indexPath {
+    NSInteger previousIndex = VCAppearanceAccentIndex();
+    NSInteger selectedIndex = indexPath.row;
+    if (selectedIndex != previousIndex) {
+        VCAppearanceSetAccentIndex(selectedIndex);
+        VCRecordAppEvent(@"settings", @"Accent color changed",
+                         [NSString stringWithFormat:@"color=%@",
+                          [VCAppearanceAccentIdentifiers() objectAtIndex:selectedIndex]]);
+        [self applyTheme];
+        if ([_delegate respondsToSelector:@selector(accentColorVCDidChange)]) {
+            [_delegate accentColorVCDidChange];
+        }
+    }
+    [tableView deselectRowAtIndexPath:indexPath animated:YES];
+}
+
+- (BOOL)shouldAutorotateToInterfaceOrientation:(UIInterfaceOrientation)interfaceOrientation {
+    return IsPadDevice() ? (UIInterfaceOrientationIsPortrait(interfaceOrientation) ||
+                            UIInterfaceOrientationIsLandscape(interfaceOrientation))
+                         : interfaceOrientation == UIInterfaceOrientationPortrait;
+}
+
+- (BOOL)shouldAutorotate {
+    return IsPadDevice();
+}
+
+- (UIInterfaceOrientationMask)supportedInterfaceOrientations {
+    return IsPadDevice() ? UIInterfaceOrientationMaskAllButUpsideDown
+                         : UIInterfaceOrientationMaskPortrait;
+}
+
+- (void)dealloc {
+    _delegate = nil;
+    [_tableView release];
+    [super dealloc];
+}
+
+@end
+
 @implementation SettingsVC
 @synthesize autoUpdate = _autoUpdate;
 @synthesize preserveCustomNames = _preserveCustomNames;
@@ -7347,6 +7542,13 @@ static NSString *VCDiagnosticValue(NSDictionary *dictionary,
     VCAppearanceRefreshVisibleTableHeaders(_tableView);
 }
 
+- (void)accentColorVCDidChange {
+    [self applyTheme];
+    if ([_delegate respondsToSelector:@selector(settingsVCDidChangeAccentColor:)]) {
+        [_delegate settingsVCDidChangeAccentColor:self];
+    }
+}
+
 - (void)viewDidLoad {
     [super viewDidLoad];
     self.view.backgroundColor = VCBackgroundColor();
@@ -7426,7 +7628,8 @@ static NSString *VCDiagnosticValue(NSDictionary *dictionary,
     (void)tableView;
     if (section == 0) return 3;
     if (section == 1) return 3;
-    if (section == 2 || section == 3) return 2;
+    if (section == 2) return 3;
+    if (section == 3) return 2;
     if (section == 4 || section == 5) return 1;
     return 4;
 }
@@ -7528,6 +7731,9 @@ static NSString *VCDiagnosticValue(NSDictionary *dictionary,
     if (indexPath.section == 2 && indexPath.row == 1) {
         return @"Dark";
     }
+    if (indexPath.section == 2 && indexPath.row == 2) {
+        return @"Accent Color";
+    }
     if (indexPath.section == 3 && indexPath.row == 0) {
         return @"Automatic checks";
     }
@@ -7579,6 +7785,9 @@ static NSString *VCDiagnosticValue(NSDictionary *dictionary,
     }
     if (indexPath.section == 2 && indexPath.row == 1) {
         return @"Use the dark color scheme";
+    }
+    if (indexPath.section == 2 && indexPath.row == 2) {
+        return VCAppearanceAccentName();
     }
     if (indexPath.section == 3 && indexPath.row == 0) {
         return @"Check for new releases once a day";
@@ -7685,14 +7894,24 @@ static NSString *VCDiagnosticValue(NSDictionary *dictionary,
         if (!cell) {
             cell = [[[UITableViewCell alloc] initWithStyle:UITableViewCellStyleSubtitle reuseIdentifier:kThemeCellId] autorelease];
         }
-        BOOL darkRow = (indexPath.row == 1);
         cell.selectionStyle = UITableViewCellSelectionStyleBlue;
-        cell.accessoryView = nil;
-        cell.accessoryType = (_darkTheme == darkRow) ? UITableViewCellAccessoryCheckmark
-                                                     : UITableViewCellAccessoryNone;
-        [self applySettingsMarqueesToCell:cell
-                                    title:(darkRow ? @"Dark" : @"Light")
-                                   detail:(darkRow ? @"Use the dark color scheme" : @"Use the light color scheme")];
+        cell.imageView.image = nil;
+        if (indexPath.row == 2) {
+            cell.accessoryType = UITableViewCellAccessoryNone;
+            cell.accessoryView = VCCreateDisclosureAccessoryView();
+            cell.imageView.image = VCAppearanceAccentSwatchImage(VCAccentColor());
+            [self applySettingsMarqueesToCell:cell
+                                        title:@"Accent Color"
+                                       detail:VCAppearanceAccentName()];
+        } else {
+            BOOL darkRow = (indexPath.row == 1);
+            cell.accessoryView = nil;
+            cell.accessoryType = (_darkTheme == darkRow) ? UITableViewCellAccessoryCheckmark
+                                                         : UITableViewCellAccessoryNone;
+            [self applySettingsMarqueesToCell:cell
+                                        title:(darkRow ? @"Dark" : @"Light")
+                                       detail:(darkRow ? @"Use the dark color scheme" : @"Use the light color scheme")];
+        }
         return cell;
     }
 
@@ -7861,6 +8080,10 @@ static NSString *VCDiagnosticValue(NSDictionary *dictionary,
         VCRecordAppEvent(@"ui", @"Xray version settings opened", nil);
         XrayVersionSpoofVC *spoof = [[[XrayVersionSpoofVC alloc] init] autorelease];
         [self.navigationController pushViewController:spoof animated:YES];
+    } else if (indexPath.section == 2 && indexPath.row == 2) {
+        VCRecordAppEvent(@"ui", @"Accent color settings opened", nil);
+        VCAccentColorVC *accent = [[[VCAccentColorVC alloc] initWithDelegate:self] autorelease];
+        [self.navigationController pushViewController:accent animated:YES];
     } else if (indexPath.section == 2) {
         BOOL dark = (indexPath.row == 1);
         if (_darkTheme != dark) {
@@ -9070,7 +9293,7 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
 
     if (action) {
         cell.textLabel.font = [UIFont boldSystemFontOfSize:15.0f];
-        cell.textLabel.textColor = [action isEqualToString:@"delete"] ? VCErrorColor() : VCAccentColor();
+        cell.textLabel.textColor = [action isEqualToString:@"delete"] ? VCErrorColor() : VCDefaultAccentColor();
         cell.selectionStyle = _refreshing ? UITableViewCellSelectionStyleNone : UITableViewCellSelectionStyleBlue;
         if ([action isEqualToString:@"refresh"] && _refreshing) {
             UIActivityIndicatorView *spinner = [[[UIActivityIndicatorView alloc]
@@ -9096,7 +9319,7 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
     NSDictionary *row = [self rowForIndexPath:indexPath];
     NSString *action = [row objectForKey:@"action"];
     if ([action isEqualToString:@"delete"]) cell.textLabel.textColor = VCErrorColor();
-    else if ([action length] > 0) cell.textLabel.textColor = VCAccentColor();
+    else if ([action length] > 0) cell.textLabel.textColor = VCDefaultAccentColor();
 }
 
 - (void)tableView:(UITableView *)tableView willDisplayHeaderView:(UIView *)view forSection:(NSInteger)section {
@@ -11697,7 +11920,7 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
 
     UIColor *fill = _connected
         ? [UIColor colorWithRed:0.12f green:0.58f blue:0.20f alpha:1.0f]
-        : [UIColor colorWithRed:0.10f green:0.40f blue:0.82f alpha:1.0f];
+        : VCAccentColor();
     _connectBtn.backgroundColor = fill;
 }
 
@@ -12698,6 +12921,11 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
     _darkThemeEnabled = enabled;
     VCRecordAppEvent(@"settings", @"Appearance changed", enabled ? @"theme=dark" : @"theme=light");
     [self saveData];
+    [self applyTheme];
+}
+
+- (void)settingsVCDidChangeAccentColor:(SettingsVC *)vc {
+    (void)vc;
     [self applyTheme];
 }
 
@@ -15529,6 +15757,7 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
     _titleLabel.textColor = VCPrimaryTextColor();
     _uptimeLabel.textColor = VCPrimaryTextColor();
     _statusLabel.textColor = _statusOK ? VCSuccessColor() : VCErrorColor();
+    [self updateConnectButton];
     [self updateLogSelectorAnimated:NO];
     _logView.backgroundColor = background;
     _logView.textColor = VCPrimaryTextColor();
