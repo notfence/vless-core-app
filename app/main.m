@@ -596,6 +596,7 @@ static NSInteger const kVCMainSectionHeaderButtonTagBase = 7420;
 static NSInteger const kVCMainSectionHeaderCountTagBase = 7430;
 static NSInteger const kVCMainSectionHeaderChevronTagBase = 7440;
 static NSInteger const kVCMainSectionHeaderOrderButtonTagBase = 7450;
+static NSInteger const kVCSubscriptionHeaderChevronTag = 7460;
 static NSInteger const kVCSubscriptionInfoButtonTagBase = 30000;
 static NSInteger const kVCSubscriptionPingButtonTagBase = 40000;
 static NSInteger const kVCSubscriptionWebPageButtonTagBase = 50000;
@@ -9441,6 +9442,12 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
     NSInteger _selectedSubIndex;
     NSInteger _selectedSubItemIndex;
     NSInteger _expandedSubscription;
+    NSInteger _subscriptionRowsExpandedOverride;
+    NSInteger _subscriptionHeaderExpandedOverride;
+    NSInteger _compactSubscriptionTransitionTarget;
+    NSInteger _compactSubscriptionTransitionAnchorIndex;
+    CGFloat _compactSubscriptionTransitionAnchorViewportY;
+    CGFloat _compactSubscriptionTransitionFinalContentHeight;
     NSInteger _updatingSubscriptionIndex;
     NSInteger _stickySectionHeaderSection;
     NSInteger _reorderingSection;
@@ -9457,6 +9464,8 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
     BOOL _mainTableTransitionSnapshotValid;
     BOOL _phoneConnectionCompact;
     BOOL _phoneConnectionCompactBeforeTransition;
+    BOOL _subscriptionExpansionOverridesActive;
+    BOOL _compactSubscriptionOffsetAnimationInProgress;
 
     BOOL _connected;
     BOOL _connectedWithProtectedLogs;
@@ -9515,6 +9524,7 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
 - (void)refreshVisibleSubscriptionPingAccessories;
 - (void)configureSubscriptionHeaderCell:(UITableViewCell *)cell atIndex:(NSInteger)index;
 - (void)refreshVisibleSubscriptionHeaderAccessories;
+- (void)refreshVisibleSubscriptionHeaderExpansionAppearanceAnimated:(BOOL)animated;
 - (void)subscriptionWebPageButtonPressed:(UIButton *)sender;
 - (void)subscriptionSupportButtonPressed:(UIButton *)sender;
 - (void)refreshPresentedSubscriptionInfoIfNeeded;
@@ -9534,6 +9544,18 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
 - (void)stabilizeMainTableOffsetDuringStructuralTransition;
 - (void)restoreMainTableAfterStructuralTransitionCompact:(BOOL)compact
                                           preservedOffset:(CGFloat)preservedOffset;
+- (NSInteger)subscriptionRowsExpandedIndex;
+- (NSInteger)subscriptionHeaderExpandedIndex;
+- (void)startCompactSubscriptionTransitionFromHeaderRow:(NSInteger)oldHeaderRow
+                                            oldItemCount:(NSInteger)oldItemCount
+                                            newItemCount:(NSInteger)newItemCount
+                                              anchorIndex:(NSInteger)anchorIndex
+                                          anchorViewportY:(CGFloat)anchorViewportY;
+- (void)animateCompactSubscriptionHeaderForTransition:(NSNumber *)transitionNumber;
+- (void)finishCompactSubscriptionTransition:(NSNumber *)transitionNumber;
+- (void)recoverCompactSubscriptionTransition:(NSNumber *)transitionNumber;
+- (void)retargetCompactSubscriptionTransitionAnchor;
+- (void)animateCompactSubscriptionOffsetToFinalPosition;
 - (void)importFileAtURL:(NSURL *)url;
 - (void)refreshUpdateIndicatorFromCache;
 - (void)startAutomaticUpdateCheckIfNeeded;
@@ -10518,6 +10540,18 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
     return items;
 }
 
+- (NSInteger)subscriptionRowsExpandedIndex {
+    return _subscriptionExpansionOverridesActive
+        ? _subscriptionRowsExpandedOverride
+        : _expandedSubscription;
+}
+
+- (NSInteger)subscriptionHeaderExpandedIndex {
+    return _subscriptionExpansionOverridesActive
+        ? _subscriptionHeaderExpandedOverride
+        : _expandedSubscription;
+}
+
 - (NSString *)subscriptionPingIdentifierAtIndex:(NSInteger)subIdx {
     if (subIdx < 0 || subIdx >= (NSInteger)[_subscriptions count]) return nil;
     NSDictionary *sub = [_subscriptions objectAtIndex:subIdx];
@@ -10536,10 +10570,11 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
 }
 
 - (NSInteger)subscriptionSectionRowCount {
+    NSInteger expandedIndex = [self subscriptionRowsExpandedIndex];
     NSInteger rows = 0;
     for (NSInteger i = 0; i < (NSInteger)[_subscriptions count]; i++) {
         rows += 1;
-        if (i == _expandedSubscription) {
+        if (i == expandedIndex) {
             rows += (NSInteger)[[self subscriptionItemsAtIndex:i] count];
         }
     }
@@ -10547,6 +10582,7 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
 }
 
 - (BOOL)mapSubscriptionRow:(NSInteger)row toSubIndex:(NSInteger *)subIndex itemIndex:(NSInteger *)itemIndex isHeader:(BOOL *)isHeader {
+    NSInteger expandedIndex = [self subscriptionRowsExpandedIndex];
     NSInteger cursor = 0;
     for (NSInteger i = 0; i < (NSInteger)[_subscriptions count]; i++) {
         if (row == cursor) {
@@ -10557,7 +10593,7 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
         }
         cursor += 1;
 
-        if (i == _expandedSubscription) {
+        if (i == expandedIndex) {
             NSArray *items = [self subscriptionItemsAtIndex:i];
             NSInteger cnt = (NSInteger)[items count];
             if (row < cursor + cnt) {
@@ -10575,13 +10611,14 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
 - (NSInteger)rowForSubscriptionHeaderAtIndex:(NSInteger)subIdx {
     if (subIdx < 0 || subIdx >= (NSInteger)[_subscriptions count]) return -1;
 
+    NSInteger expandedIndex = [self subscriptionRowsExpandedIndex];
     NSInteger row = 0;
     for (NSInteger i = 0; i < (NSInteger)[_subscriptions count]; i++) {
         if (i == subIdx) {
             return row;
         }
         row += 1;
-        if (i == _expandedSubscription) {
+        if (i == expandedIndex) {
             row += (NSInteger)[[self subscriptionItemsAtIndex:i] count];
         }
     }
@@ -10603,7 +10640,7 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
         UITableViewCell *cell = [_tableView cellForRowAtIndexPath:ip];
         if (cell) {
             cell.accessoryView = [self accessorySubscriptionHeaderAtIndex:oldIdx
-                                                                   expanded:(_expandedSubscription == oldIdx)
+                                                                   expanded:([self subscriptionHeaderExpandedIndex] == oldIdx)
                                                                     loading:NO];
         }
     }
@@ -10614,7 +10651,7 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
         UITableViewCell *cell = [_tableView cellForRowAtIndexPath:ip];
         if (cell) {
             cell.accessoryView = [self accessorySubscriptionHeaderAtIndex:subIdx
-                                                                   expanded:(_expandedSubscription == subIdx)
+                                                                   expanded:([self subscriptionHeaderExpandedIndex] == subIdx)
                                                                     loading:YES];
         }
     }
@@ -12726,6 +12763,7 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
 
     CGFloat chevronX = loading ? 84.0f : 64.0f;
     UIImageView *iv = [[[UIImageView alloc] initWithFrame:CGRectMake(chevronX, 4, 16, 16)] autorelease];
+    iv.tag = kVCSubscriptionHeaderChevronTag;
     iv.image = MakeIconImage(expanded ? VCIconTypeChevronDown : VCIconTypeChevronRight, 16.0f, NO);
     [v addSubview:iv];
     return v;
@@ -15037,7 +15075,8 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
 
 - (void)stabilizeMainTableOffsetDuringStructuralTransition {
     if (IsPadDevice() || !_tableView || !_mainSectionTransitionInProgress ||
-        !_mainTableTransitionSnapshotValid || !_phoneConnectionCompactBeforeTransition) {
+        !_mainTableTransitionSnapshotValid || !_phoneConnectionCompactBeforeTransition ||
+        _compactSubscriptionOffsetAnimationInProgress) {
         return;
     }
 
@@ -15106,6 +15145,229 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
     }
 
     _mainTableTransitionSnapshotValid = NO;
+}
+
+- (void)retargetCompactSubscriptionTransitionAnchor {
+    if (_compactSubscriptionTransitionAnchorIndex < 0 || !_tableView) return;
+
+    NSInteger anchorRow = [self rowForSubscriptionHeaderAtIndex:
+        _compactSubscriptionTransitionAnchorIndex];
+    if (anchorRow < 0) return;
+
+    NSIndexPath *anchorPath = [NSIndexPath indexPathForRow:anchorRow inSection:1];
+    CGRect anchorFrame = [_tableView rectForRowAtIndexPath:anchorPath];
+    CGFloat anchoredOffset = anchorFrame.origin.y -
+        _compactSubscriptionTransitionAnchorViewportY;
+    _mainTableOffsetBeforeTransition = MAX(0.0f, anchoredOffset);
+    [_tableView setContentOffset:CGPointMake(_tableView.contentOffset.x,
+                                              _mainTableOffsetBeforeTransition)
+                        animated:NO];
+}
+
+- (void)animateCompactSubscriptionOffsetToFinalPosition {
+    if (_compactSubscriptionTransitionAnchorIndex < 0 || !_tableView) return;
+
+    [_tableView layoutIfNeeded];
+    NSInteger anchorRow = [self rowForSubscriptionHeaderAtIndex:
+        _compactSubscriptionTransitionAnchorIndex];
+    if (anchorRow < 0) return;
+
+    NSIndexPath *anchorPath = [NSIndexPath indexPathForRow:anchorRow inSection:1];
+    CGRect anchorFrame = [_tableView rectForRowAtIndexPath:anchorPath];
+    CGFloat targetOffset = anchorFrame.origin.y -
+        _compactSubscriptionTransitionAnchorViewportY;
+    CGFloat maximumOffset = _compactSubscriptionTransitionFinalContentHeight -
+        _tableView.bounds.size.height;
+    if (maximumOffset < 0.0f) maximumOffset = 0.0f;
+    if (targetOffset < 0.0f) targetOffset = 0.0f;
+    if (targetOffset > maximumOffset) targetOffset = maximumOffset;
+    _mainTableOffsetBeforeTransition = targetOffset;
+
+    if (fabs(_tableView.contentOffset.y - targetOffset) <= 0.5f) return;
+    _compactSubscriptionOffsetAnimationInProgress = YES;
+    [_tableView setContentOffset:CGPointMake(_tableView.contentOffset.x, targetOffset)
+                        animated:YES];
+}
+
+- (void)recoverCompactSubscriptionTransition:(NSNumber *)transitionNumber {
+    if ([transitionNumber unsignedIntegerValue] != _mainSectionTransitionToken) return;
+
+    VCRecordAppEvent(@"layout", @"Compact subscription animation recovered",
+                     @"reason=table_update_exception");
+    BOOL animationsWereEnabled = [UIView areAnimationsEnabled];
+    [UIView setAnimationsEnabled:NO];
+    [CATransaction begin];
+    [CATransaction setDisableActions:YES];
+    _subscriptionExpansionOverridesActive = NO;
+    [_tableView reloadData];
+    [_tableView layoutIfNeeded];
+    [self retargetCompactSubscriptionTransitionAnchor];
+    [self completeMainTableStructuralTransition];
+    [self refreshVisibleSubscriptionHeaderExpansionAppearanceAnimated:NO];
+    [self refreshStickyMainSectionHeader];
+    [CATransaction commit];
+    [UIView setAnimationsEnabled:animationsWereEnabled];
+    _compactSubscriptionOffsetAnimationInProgress = NO;
+    _tableView.userInteractionEnabled = YES;
+    [self scheduleMainMarqueeRelayout];
+}
+
+- (void)finishCompactSubscriptionTransition:(NSNumber *)transitionNumber {
+    if ([transitionNumber unsignedIntegerValue] != _mainSectionTransitionToken ||
+        !_mainSectionTransitionInProgress) {
+        return;
+    }
+
+    BOOL animatedOffset = _compactSubscriptionOffsetAnimationInProgress;
+    _subscriptionExpansionOverridesActive = NO;
+    [_tableView layoutIfNeeded];
+    if (!animatedOffset) {
+        [self retargetCompactSubscriptionTransitionAnchor];
+    }
+    _compactSubscriptionOffsetAnimationInProgress = NO;
+    [self completeMainTableStructuralTransition];
+    [self refreshVisibleSubscriptionHeaderExpansionAppearanceAnimated:NO];
+    [self refreshStickyMainSectionHeader];
+    _tableView.userInteractionEnabled = YES;
+    [self scheduleMainMarqueeRelayout];
+}
+
+- (void)animateCompactSubscriptionHeaderForTransition:(NSNumber *)transitionNumber {
+    if ([transitionNumber unsignedIntegerValue] != _mainSectionTransitionToken ||
+        !_mainSectionTransitionInProgress) {
+        return;
+    }
+
+    [_tableView layoutIfNeeded];
+    _subscriptionHeaderExpandedOverride = _compactSubscriptionTransitionTarget;
+    NSInteger itemCount = (_compactSubscriptionTransitionTarget >= 0)
+        ? (NSInteger)[[self subscriptionItemsAtIndex:_compactSubscriptionTransitionTarget] count]
+        : 0;
+    NSInteger headerRow = (_compactSubscriptionTransitionTarget >= 0)
+        ? [self rowForSubscriptionHeaderAtIndex:_compactSubscriptionTransitionTarget]
+        : -1;
+    NSMutableArray *insertedRows = [NSMutableArray arrayWithCapacity:(NSUInteger)itemCount];
+    for (NSInteger item = 0; item < itemCount; item++) {
+        [insertedRows addObject:[NSIndexPath indexPathForRow:(headerRow + 1 + item)
+                                                    inSection:1]];
+    }
+    _subscriptionRowsExpandedOverride = _compactSubscriptionTransitionTarget;
+    [self refreshVisibleSubscriptionHeaderExpansionAppearanceAnimated:YES];
+
+    [CATransaction begin];
+    [CATransaction setAnimationDuration:0.12];
+    [CATransaction setAnimationTimingFunction:
+        [CAMediaTimingFunction functionWithName:kCAMediaTimingFunctionEaseInEaseOut]];
+    [CATransaction setCompletionBlock:^{
+        dispatch_async(dispatch_get_main_queue(), ^{
+            [self finishCompactSubscriptionTransition:transitionNumber];
+        });
+    }];
+    @try {
+        [_tableView beginUpdates];
+        if ([insertedRows count] > 0) {
+            [_tableView insertRowsAtIndexPaths:insertedRows
+                             withRowAnimation:UITableViewRowAnimationFade];
+        }
+        [_tableView endUpdates];
+        [self retargetCompactSubscriptionTransitionAnchor];
+        [self animateCompactSubscriptionOffsetToFinalPosition];
+    } @catch (NSException *exception) {
+        (void)exception;
+        [CATransaction setCompletionBlock:nil];
+        [CATransaction commit];
+        [self recoverCompactSubscriptionTransition:transitionNumber];
+        return;
+    }
+    [CATransaction commit];
+}
+
+- (void)startCompactSubscriptionTransitionFromHeaderRow:(NSInteger)oldHeaderRow
+                                            oldItemCount:(NSInteger)oldItemCount
+                                            newItemCount:(NSInteger)newItemCount
+                                              anchorIndex:(NSInteger)anchorIndex
+                                          anchorViewportY:(CGFloat)anchorViewportY {
+    NSUInteger transitionToken = ++_mainSectionTransitionToken;
+    NSNumber *transitionNumber = [NSNumber numberWithUnsignedInteger:transitionToken];
+    _compactSubscriptionTransitionTarget = _expandedSubscription;
+    _compactSubscriptionTransitionAnchorIndex = anchorIndex;
+    _compactSubscriptionTransitionAnchorViewportY = anchorViewportY;
+    CGFloat oldItemsHeight = oldItemCount > 0 ? (44.0f * oldItemCount + 12.0f) : 0.0f;
+    CGFloat newItemsHeight = newItemCount > 0 ? (44.0f * newItemCount + 12.0f) : 0.0f;
+    CGFloat collapsedHeaderHeight = VCSubscriptionCardHeight(nil,
+                                                             CGRectGetWidth(_tableView.bounds),
+                                                             _reorderingSection == 1);
+    CGFloat oldHeaderExtra = 0.0f;
+    if (_subscriptionHeaderExpandedOverride >= 0 &&
+        _subscriptionHeaderExpandedOverride < (NSInteger)[_subscriptions count]) {
+        NSDictionary *oldSubscription = [_subscriptions objectAtIndex:
+            _subscriptionHeaderExpandedOverride];
+        oldHeaderExtra = VCSubscriptionCardHeight(VCSubscriptionDescription(oldSubscription),
+                                                   CGRectGetWidth(_tableView.bounds),
+                                                   _reorderingSection == 1) -
+                         collapsedHeaderHeight;
+    }
+    CGFloat newHeaderExtra = 0.0f;
+    if (_compactSubscriptionTransitionTarget >= 0 &&
+        _compactSubscriptionTransitionTarget < (NSInteger)[_subscriptions count]) {
+        NSDictionary *newSubscription = [_subscriptions objectAtIndex:
+            _compactSubscriptionTransitionTarget];
+        newHeaderExtra = VCSubscriptionCardHeight(VCSubscriptionDescription(newSubscription),
+                                                   CGRectGetWidth(_tableView.bounds),
+                                                   _reorderingSection == 1) -
+                         collapsedHeaderHeight;
+    }
+    _compactSubscriptionTransitionFinalContentHeight = _tableView.contentSize.height -
+        oldItemsHeight + newItemsHeight - oldHeaderExtra + newHeaderExtra;
+    [self prepareMainTableStructuralTransition];
+    _compactSubscriptionOffsetAnimationInProgress = NO;
+    _tableView.userInteractionEnabled = NO;
+
+    BOOL hadExpandedHeader = (_subscriptionHeaderExpandedOverride >= 0);
+    _subscriptionRowsExpandedOverride = -1;
+    _subscriptionHeaderExpandedOverride = -1;
+    [self refreshVisibleSubscriptionHeaderExpansionAppearanceAnimated:YES];
+    if (oldItemCount <= 0 && !hadExpandedHeader) {
+        [self animateCompactSubscriptionHeaderForTransition:transitionNumber];
+        return;
+    }
+
+    NSMutableArray *deletedRows = [NSMutableArray arrayWithCapacity:(NSUInteger)oldItemCount];
+    for (NSInteger item = 0; item < oldItemCount; item++) {
+        [deletedRows addObject:[NSIndexPath indexPathForRow:(oldHeaderRow + 1 + item)
+                                                   inSection:1]];
+    }
+
+    [CATransaction begin];
+    [CATransaction setAnimationDuration:0.10];
+    [CATransaction setAnimationTimingFunction:
+        [CAMediaTimingFunction functionWithName:kCAMediaTimingFunctionEaseInEaseOut]];
+    [CATransaction setCompletionBlock:^{
+        dispatch_async(dispatch_get_main_queue(), ^{
+            if (_compactSubscriptionTransitionTarget >= 0) {
+                [self animateCompactSubscriptionHeaderForTransition:transitionNumber];
+            } else {
+                [self finishCompactSubscriptionTransition:transitionNumber];
+            }
+        });
+    }];
+    @try {
+        [_tableView beginUpdates];
+        if ([deletedRows count] > 0) {
+            [_tableView deleteRowsAtIndexPaths:deletedRows
+                             withRowAnimation:UITableViewRowAnimationFade];
+        }
+        [_tableView endUpdates];
+        [self retargetCompactSubscriptionTransitionAnchor];
+        [self animateCompactSubscriptionOffsetToFinalPosition];
+    } @catch (NSException *exception) {
+        (void)exception;
+        [CATransaction setCompletionBlock:nil];
+        [CATransaction commit];
+        [self recoverCompactSubscriptionTransition:transitionNumber];
+        return;
+    }
+    [CATransaction commit];
 }
 
 - (void)refreshUpdateIndicatorFromCache {
@@ -15669,7 +15931,7 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
     if (isHeader) {
         if (subIdx < 0 || subIdx >= (NSInteger)[_subscriptions count]) return 84.0f;
         NSDictionary *subscription = [_subscriptions objectAtIndex:subIdx];
-        NSString *visibleDescription = (_expandedSubscription == subIdx)
+        NSString *visibleDescription = ([self subscriptionHeaderExpandedIndex] == subIdx)
             ? VCSubscriptionDescription(subscription)
             : nil;
         return VCSubscriptionCardHeight(visibleDescription,
@@ -15995,10 +16257,13 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
 
 - (void)reloadMainTableDataAfterExternalChange {
     _mainSectionTransitionToken++;
+    _subscriptionExpansionOverridesActive = NO;
+    _compactSubscriptionOffsetAnimationInProgress = NO;
     [self prepareMainTableStructuralTransition];
     [_tableView reloadData];
     [self updateMainEmptyState];
     [self completeMainTableStructuralTransition];
+    _tableView.userInteractionEnabled = YES;
     VCAppearanceRefreshVisibleTableHeaders(_tableView);
     [self refreshStickyMainSectionHeader];
 }
@@ -16018,7 +16283,7 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
     [(VCSubscriptionHeaderCell *)cell
         configureDescription:VCSubscriptionDescription(subscription)
                  lastUpdated:VCSubscriptionLastUpdatedText(subscription)
-             showDescription:(_expandedSubscription == index)
+             showDescription:([self subscriptionHeaderExpandedIndex] == index)
                   hasWebPage:hasWebPage
                    hasSupport:hasSupport
                        index:index
@@ -16036,9 +16301,51 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
         if (!cell) continue;
 
         cell.accessoryView = [self accessorySubscriptionHeaderAtIndex:subIdx
-                                                             expanded:(_expandedSubscription == subIdx)
+                                                             expanded:([self subscriptionHeaderExpandedIndex] == subIdx)
                                                               loading:(_updatingSubscriptionIndex == subIdx)];
         [self configureSubscriptionHeaderCell:cell atIndex:subIdx];
+    }
+}
+
+- (void)refreshVisibleSubscriptionHeaderExpansionAppearanceAnimated:(BOOL)animated {
+    if (!_tableView || !_subscriptionsSectionExpanded) return;
+
+    NSInteger expandedIndex = [self subscriptionHeaderExpandedIndex];
+    for (NSInteger subIdx = 0; subIdx < (NSInteger)[_subscriptions count]; subIdx++) {
+        NSInteger row = [self rowForSubscriptionHeaderAtIndex:subIdx];
+        if (row < 0) continue;
+        NSIndexPath *indexPath = [NSIndexPath indexPathForRow:row inSection:1];
+        UITableViewCell *cell = [_tableView cellForRowAtIndexPath:indexPath];
+        if (![cell isKindOfClass:[VCSubscriptionHeaderCell class]]) continue;
+
+        BOOL expanded = (expandedIndex == subIdx);
+        BOOL active = (_selectedSubIndex == subIdx && _selectedSubItemIndex >= 0);
+        [(VCMainListCell *)cell configureVisualKind:VCMainListCellKindSubscriptionHeader
+                                             expanded:expanded
+                                            firstItem:NO
+                                             lastItem:NO
+                                                active:active];
+        [self configureSubscriptionHeaderCell:cell atIndex:subIdx];
+
+        UIImageView *chevron = (UIImageView *)[cell.accessoryView
+            viewWithTag:kVCSubscriptionHeaderChevronTag];
+        if (![chevron isKindOfClass:[UIImageView class]]) continue;
+        UIImage *image = MakeIconImage(expanded ? VCIconTypeChevronDown
+                                                : VCIconTypeChevronRight,
+                                       16.0f,
+                                       NO);
+        if (animated) {
+            [UIView transitionWithView:chevron
+                              duration:0.15
+                               options:(UIViewAnimationOptionTransitionCrossDissolve |
+                                        UIViewAnimationOptionBeginFromCurrentState)
+                            animations:^{
+                                chevron.image = image;
+                            }
+                            completion:nil];
+        } else {
+            chevron.image = image;
+        }
     }
 }
 
@@ -16493,7 +16800,7 @@ moveRowAtIndexPath:(NSIndexPath *)sourceIndexPath
                         isHeader:&mappedIsHeader]) {
         if (mappedIsHeader) {
             visualKind = VCMainListCellKindSubscriptionHeader;
-            expanded = (_expandedSubscription == mappedSubIdx);
+            expanded = ([self subscriptionHeaderExpandedIndex] == mappedSubIdx);
             active = (_selectedSubIndex == mappedSubIdx && _selectedSubItemIndex >= 0);
             cellID = @"VCSubscriptionHeaderCell";
         } else {
@@ -16568,7 +16875,7 @@ moveRowAtIndexPath:(NSIndexPath *)sourceIndexPath
                 if (_reorderingSection != 1) {
                     BOOL loading = (_updatingSubscriptionIndex == subIdx);
                     cell.accessoryView = [self accessorySubscriptionHeaderAtIndex:subIdx
-                                                                       expanded:(_expandedSubscription == subIdx)
+                                                                       expanded:([self subscriptionHeaderExpandedIndex] == subIdx)
                                                                         loading:loading];
                 }
                 [self configureSubscriptionHeaderCell:cell atIndex:subIdx];
@@ -16700,6 +17007,9 @@ moveRowAtIndexPath:(NSIndexPath *)sourceIndexPath
     NSInteger oldExpandedSubscription = -1;
     NSInteger oldExpandedHeaderRow = -1;
     NSInteger oldExpandedItemCount = 0;
+    NSInteger subscriptionHeaderAnchorIndex = -1;
+    CGFloat subscriptionHeaderAnchorViewportY = 0.0f;
+    BOOL compactSubscriptionTransition = NO;
     NSString *oldURI = nil;
     if (_connected) {
         NSString *u = [self uriForCurrentSelection];
@@ -16725,6 +17035,12 @@ moveRowAtIndexPath:(NSIndexPath *)sourceIndexPath
         BOOL isHeader = YES;
         if ([self mapSubscriptionRow:indexPath.row toSubIndex:&subIdx itemIndex:&itemIdx isHeader:&isHeader]) {
             if (isHeader) {
+                compactSubscriptionTransition = !IsPadDevice() &&
+                    (_phoneConnectionCompact || _tableView.contentOffset.y >= -0.5f);
+                CGRect selectedHeaderFrame = [_tableView rectForRowAtIndexPath:indexPath];
+                subscriptionHeaderAnchorIndex = subIdx;
+                subscriptionHeaderAnchorViewportY = selectedHeaderFrame.origin.y -
+                    _tableView.contentOffset.y;
                 VCRecordAppEvent(@"ui", @"Subscription expanded state changed",
                                  [NSString stringWithFormat:@"index=%ld expanded=%d configs=%lu",
                                   (long)subIdx,
@@ -16736,6 +17052,11 @@ moveRowAtIndexPath:(NSIndexPath *)sourceIndexPath
                     oldExpandedHeaderRow = [self rowForSubscriptionHeaderAtIndex:oldExpandedSubscription];
                     oldExpandedItemCount = (NSInteger)[[self subscriptionItemsAtIndex:oldExpandedSubscription] count];
                 }
+                if (compactSubscriptionTransition) {
+                    _subscriptionExpansionOverridesActive = YES;
+                    _subscriptionRowsExpandedOverride = oldExpandedSubscription;
+                    _subscriptionHeaderExpandedOverride = oldExpandedSubscription;
+                }
                 if (_expandedSubscription == subIdx) {
                     _expandedSubscription = -1;
                 } else {
@@ -16744,14 +17065,16 @@ moveRowAtIndexPath:(NSIndexPath *)sourceIndexPath
                         [self refreshSubscriptionAtIndex:subIdx showStatus:NO];
                     }
                 }
-                UITableViewCell *selectedHeaderCell = [_tableView cellForRowAtIndexPath:indexPath];
-                [self configureSubscriptionHeaderCell:selectedHeaderCell atIndex:subIdx];
-                if (oldExpandedSubscription >= 0 && oldExpandedSubscription != subIdx) {
-                    NSIndexPath *oldHeaderPath = [NSIndexPath indexPathForRow:oldExpandedHeaderRow
-                                                                    inSection:1];
-                    UITableViewCell *oldHeaderCell = [_tableView cellForRowAtIndexPath:oldHeaderPath];
-                    [self configureSubscriptionHeaderCell:oldHeaderCell
-                                                   atIndex:oldExpandedSubscription];
+                if (!compactSubscriptionTransition) {
+                    UITableViewCell *selectedHeaderCell = [_tableView cellForRowAtIndexPath:indexPath];
+                    [self configureSubscriptionHeaderCell:selectedHeaderCell atIndex:subIdx];
+                    if (oldExpandedSubscription >= 0 && oldExpandedSubscription != subIdx) {
+                        NSIndexPath *oldHeaderPath = [NSIndexPath indexPathForRow:oldExpandedHeaderRow
+                                                                        inSection:1];
+                        UITableViewCell *oldHeaderCell = [_tableView cellForRowAtIndexPath:oldHeaderPath];
+                        [self configureSubscriptionHeaderCell:oldHeaderCell
+                                                       atIndex:oldExpandedSubscription];
+                    }
                 }
                 NSDictionary *sub = [_subscriptions objectAtIndex:subIdx];
                 NSString *name = [sub objectForKey:@"name"];
@@ -16791,6 +17114,44 @@ moveRowAtIndexPath:(NSIndexPath *)sourceIndexPath
         NSInteger newExpandedItemCount = (newExpandedSubscription >= 0)
             ? (NSInteger)[[self subscriptionItemsAtIndex:newExpandedSubscription] count]
             : 0;
+
+        if (compactSubscriptionTransition) {
+            BOOL animationsWereEnabled = [UIView areAnimationsEnabled];
+            if (animationsWereEnabled) {
+                [self startCompactSubscriptionTransitionFromHeaderRow:oldExpandedHeaderRow
+                                                          oldItemCount:oldExpandedItemCount
+                                                          newItemCount:newExpandedItemCount
+                                                            anchorIndex:subscriptionHeaderAnchorIndex
+                                                        anchorViewportY:subscriptionHeaderAnchorViewportY];
+                [oldURI release];
+                return;
+            }
+
+            ++_mainSectionTransitionToken;
+            [self prepareMainTableStructuralTransition];
+            [UIView setAnimationsEnabled:NO];
+            [CATransaction begin];
+            [CATransaction setDisableActions:YES];
+            _subscriptionExpansionOverridesActive = NO;
+            [_tableView reloadData];
+            [_tableView layoutIfNeeded];
+            if (subscriptionHeaderAnchorIndex >= 0) {
+                NSInteger anchorRow = [self rowForSubscriptionHeaderAtIndex:subscriptionHeaderAnchorIndex];
+                if (anchorRow >= 0) {
+                    NSIndexPath *anchorPath = [NSIndexPath indexPathForRow:anchorRow inSection:1];
+                    CGRect anchorFrame = [_tableView rectForRowAtIndexPath:anchorPath];
+                    CGFloat anchoredOffset = anchorFrame.origin.y - subscriptionHeaderAnchorViewportY;
+                    _mainTableOffsetBeforeTransition = MAX(0.0f, anchoredOffset);
+                }
+            }
+            [self completeMainTableStructuralTransition];
+            [self refreshVisibleSubscriptionHeaderAccessories];
+            [self refreshStickyMainSectionHeader];
+            [CATransaction commit];
+            [UIView setAnimationsEnabled:animationsWereEnabled];
+            [oldURI release];
+            return;
+        }
 
         NSMutableArray *deletedRows = [NSMutableArray array];
         for (NSInteger item = 0; item < oldExpandedItemCount; item++) {
