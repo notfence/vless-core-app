@@ -9774,7 +9774,6 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
                                             newItemCount:(NSInteger)newItemCount
                                               anchorIndex:(NSInteger)anchorIndex
                                           anchorViewportY:(CGFloat)anchorViewportY;
-- (void)animateCompactSubscriptionHeaderForTransition:(NSNumber *)transitionNumber;
 - (void)finishCompactSubscriptionTransition:(NSNumber *)transitionNumber;
 - (void)recoverCompactSubscriptionTransition:(NSNumber *)transitionNumber;
 - (void)retargetCompactSubscriptionTransitionAnchor;
@@ -15460,56 +15459,6 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
     [self scheduleMainMarqueeRelayout];
 }
 
-- (void)animateCompactSubscriptionHeaderForTransition:(NSNumber *)transitionNumber {
-    if ([transitionNumber unsignedIntegerValue] != _mainSectionTransitionToken ||
-        !_mainSectionTransitionInProgress) {
-        return;
-    }
-
-    [_tableView layoutIfNeeded];
-    _subscriptionHeaderExpandedOverride = _compactSubscriptionTransitionTarget;
-    NSInteger itemCount = (_compactSubscriptionTransitionTarget >= 0)
-        ? (NSInteger)[[self subscriptionItemsAtIndex:_compactSubscriptionTransitionTarget] count]
-        : 0;
-    NSInteger headerRow = (_compactSubscriptionTransitionTarget >= 0)
-        ? [self rowForSubscriptionHeaderAtIndex:_compactSubscriptionTransitionTarget]
-        : -1;
-    NSMutableArray *insertedRows = [NSMutableArray arrayWithCapacity:(NSUInteger)itemCount];
-    for (NSInteger item = 0; item < itemCount; item++) {
-        [insertedRows addObject:[NSIndexPath indexPathForRow:(headerRow + 1 + item)
-                                                    inSection:1]];
-    }
-    _subscriptionRowsExpandedOverride = _compactSubscriptionTransitionTarget;
-    [self refreshVisibleSubscriptionHeaderExpansionAppearanceAnimated:YES];
-
-    [CATransaction begin];
-    [CATransaction setAnimationDuration:0.12];
-    [CATransaction setAnimationTimingFunction:
-        [CAMediaTimingFunction functionWithName:kCAMediaTimingFunctionEaseInEaseOut]];
-    [CATransaction setCompletionBlock:^{
-        dispatch_async(dispatch_get_main_queue(), ^{
-            [self finishCompactSubscriptionTransition:transitionNumber];
-        });
-    }];
-    @try {
-        [_tableView beginUpdates];
-        if ([insertedRows count] > 0) {
-            [_tableView insertRowsAtIndexPaths:insertedRows
-                             withRowAnimation:UITableViewRowAnimationFade];
-        }
-        [_tableView endUpdates];
-        [self retargetCompactSubscriptionTransitionAnchor];
-        [self animateCompactSubscriptionOffsetToFinalPosition];
-    } @catch (NSException *exception) {
-        (void)exception;
-        [CATransaction setCompletionBlock:nil];
-        [CATransaction commit];
-        [self recoverCompactSubscriptionTransition:transitionNumber];
-        return;
-    }
-    [CATransaction commit];
-}
-
 - (void)startCompactSubscriptionTransitionFromHeaderRow:(NSInteger)oldHeaderRow
                                             oldItemCount:(NSInteger)oldItemCount
                                             newItemCount:(NSInteger)newItemCount
@@ -15551,32 +15500,30 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
     _compactSubscriptionOffsetAnimationInProgress = NO;
     _tableView.userInteractionEnabled = NO;
 
-    BOOL hadExpandedHeader = (_subscriptionHeaderExpandedOverride >= 0);
-    _subscriptionRowsExpandedOverride = -1;
-    _subscriptionHeaderExpandedOverride = -1;
-    [self refreshVisibleSubscriptionHeaderExpansionAppearanceAnimated:YES];
-    if (oldItemCount <= 0 && !hadExpandedHeader) {
-        [self animateCompactSubscriptionHeaderForTransition:transitionNumber];
-        return;
-    }
-
     NSMutableArray *deletedRows = [NSMutableArray arrayWithCapacity:(NSUInteger)oldItemCount];
     for (NSInteger item = 0; item < oldItemCount; item++) {
         [deletedRows addObject:[NSIndexPath indexPathForRow:(oldHeaderRow + 1 + item)
                                                    inSection:1]];
     }
 
+    _subscriptionRowsExpandedOverride = _compactSubscriptionTransitionTarget;
+    _subscriptionHeaderExpandedOverride = _compactSubscriptionTransitionTarget;
+    NSInteger newHeaderRow = (_compactSubscriptionTransitionTarget >= 0)
+        ? [self rowForSubscriptionHeaderAtIndex:_compactSubscriptionTransitionTarget]
+        : -1;
+    NSMutableArray *insertedRows = [NSMutableArray arrayWithCapacity:(NSUInteger)newItemCount];
+    for (NSInteger item = 0; item < newItemCount; item++) {
+        [insertedRows addObject:[NSIndexPath indexPathForRow:(newHeaderRow + 1 + item)
+                                                    inSection:1]];
+    }
+
     [CATransaction begin];
-    [CATransaction setAnimationDuration:0.10];
+    [CATransaction setAnimationDuration:0.22];
     [CATransaction setAnimationTimingFunction:
         [CAMediaTimingFunction functionWithName:kCAMediaTimingFunctionEaseInEaseOut]];
     [CATransaction setCompletionBlock:^{
         dispatch_async(dispatch_get_main_queue(), ^{
-            if (_compactSubscriptionTransitionTarget >= 0) {
-                [self animateCompactSubscriptionHeaderForTransition:transitionNumber];
-            } else {
-                [self finishCompactSubscriptionTransition:transitionNumber];
-            }
+            [self finishCompactSubscriptionTransition:transitionNumber];
         });
     }];
     @try {
@@ -15585,8 +15532,12 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
             [_tableView deleteRowsAtIndexPaths:deletedRows
                              withRowAnimation:UITableViewRowAnimationFade];
         }
+        if ([insertedRows count] > 0) {
+            [_tableView insertRowsAtIndexPaths:insertedRows
+                             withRowAnimation:UITableViewRowAnimationFade];
+        }
         [_tableView endUpdates];
-        [self retargetCompactSubscriptionTransitionAnchor];
+        [self refreshVisibleSubscriptionHeaderExpansionAppearanceAnimated:YES];
         [self animateCompactSubscriptionOffsetToFinalPosition];
     } @catch (NSException *exception) {
         (void)exception;
