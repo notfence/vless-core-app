@@ -266,6 +266,10 @@ package-root: check-package-inputs $(APP_ARMV7_BIN) $(APP_ARM64_BIN) $(DAEMON_AR
 	cp app/icons/Default~iphone.png $(PKG_ROOT)/Applications/vless-core.app/Default~iphone.png
 	cp app/icons/Default@2x~iphone.png $(PKG_ROOT)/Applications/vless-core.app/Default@2x~iphone.png
 	cp app/icons/Default-568h@2x.png $(PKG_ROOT)/Applications/vless-core.app/Default-568h@2x.png
+	cp app/icons/Default.png $(PKG_ROOT)/Applications/vless-core.app/Default.png
+	cp app/icons/Default@2x.png $(PKG_ROOT)/Applications/vless-core.app/Default@2x.png
+	cp app/icons/Default-667h@2x.png $(PKG_ROOT)/Applications/vless-core.app/Default-667h@2x.png
+	cp app/icons/Default-736h@3x.png $(PKG_ROOT)/Applications/vless-core.app/Default-736h@3x.png
 	cp app/icons/Default-Landscape@2x~ipad.png $(PKG_ROOT)/Applications/vless-core.app/Default-Landscape@2x~ipad.png
 	cp app/icons/Default-Landscape~ipad.png $(PKG_ROOT)/Applications/vless-core.app/Default-Landscape~ipad.png
 	cp app/icons/Default-Portrait@2x~ipad.png $(PKG_ROOT)/Applications/vless-core.app/Default-Portrait@2x~ipad.png

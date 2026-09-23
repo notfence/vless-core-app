@@ -2,6 +2,9 @@
 set -e
 
 refresh_uicache() {
+  if [ "$ios_major" -ge 11 ]; then
+    uicache -p /Applications/vless-core.app >/dev/null 2>&1 && return 0
+  fi
   if id mobile >/dev/null 2>&1; then
     su mobile -c "uicache" >/dev/null 2>&1 && return 0
   fi
@@ -47,6 +50,29 @@ activate_runtime_binary() {
 
 runtime_file_exists() {
   [ -f "$1" ] && [ ! -L "$1" ]
+}
+
+refresh_app_bundle_directory() {
+  app_dir=/Applications/vless-core.app
+  [ -d "$app_dir" ] && [ ! -L "$app_dir" ] || return 1
+  fresh_dir="$(mktemp -d /Applications/.vless-core-new.XXXXXX)" || return 1
+  previous_dir="${fresh_dir}.previous"
+
+  if ! cp -Rp "$app_dir/." "$fresh_dir/"; then
+    rm -r -- "$fresh_dir" || true
+    return 1
+  fi
+  if ! mv "$app_dir" "$previous_dir"; then
+    rm -r -- "$fresh_dir" || true
+    return 1
+  fi
+  if ! mv "$fresh_dir" "$app_dir"; then
+    mv "$previous_dir" "$app_dir" || return 2
+    rm -r -- "$fresh_dir" || true
+    return 1
+  fi
+  rm -r -- "$previous_dir" || true
+  return 0
 }
 
 arm64_runtime_is_active() {
@@ -97,6 +123,16 @@ else
 fi
 
 chown -R root:wheel /Applications/vless-core.app || true
+if [ "$1" = configure ] && [ "$ios_major" -ge 11 ]; then
+  if refresh_app_bundle_directory; then
+    echo "Refreshed app bundle for launch screen."
+  elif [ ! -d /Applications/vless-core.app ]; then
+    echo "Cannot configure vless-core: app bundle could not be restored." >&2
+    exit 1
+  else
+    echo "Warning: app bundle refresh failed; launch screen may remain stale." >&2
+  fi
+fi
 chown root:wheel /Library/LaunchDaemons/com.vlesscore.vpnctld.plist || true
 chown root:wheel /usr/bin/vpnctld-bootstrap || true
 mkdir -p /var/mobile/vless-core-import
