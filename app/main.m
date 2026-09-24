@@ -104,8 +104,8 @@ static const NSUInteger kVCMaximumConfigQueryParameters = 128;
 static const NSUInteger kVCMaximumConfigQueryKeyBytes = 127;
 static const NSUInteger kVCMaximumSubscriptionURLBytes = 8192;
 static const NSUInteger kVCMaximumSubscriptionBytes = 32U * 1024U * 1024U;
-static const CGFloat kVCMainContentStartY = 246.0f;
-static const CGFloat kVCMainCompactContentStartY = 112.0f;
+static const CGFloat kVCMainContentStartY = 266.0f;
+static const CGFloat kVCMainCompactContentStartY = 138.0f;
 static BOOL gVCSecureStoreWritable = YES;
 static NSString *SendCommand(NSString *cmdLine);
 static void VCRecordAppEvent(NSString *category, NSString *action, NSString *detail);
@@ -661,8 +661,6 @@ static NSInteger const kVCMainDetailPrefixTag = 7411;
 static NSInteger const kVCMainDetailTailTag = 7412;
 static NSInteger const kVCMainSectionHeaderButtonTagBase = 7420;
 static NSInteger const kVCMainSectionHeaderCountTagBase = 7430;
-static NSInteger const kVCMainSectionHeaderChevronTagBase = 7440;
-static NSInteger const kVCMainSectionHeaderOrderButtonTagBase = 7450;
 static NSInteger const kVCSubscriptionHeaderChevronTag = 7460;
 static NSInteger const kVCSubscriptionInfoButtonTagBase = 30000;
 static NSInteger const kVCSubscriptionPingButtonTagBase = 40000;
@@ -677,7 +675,7 @@ static const char *kVCProxyPingRequest =
     "Host: www.gstatic.com\r\n"
     "User-Agent: vless-core-app-ping\r\n"
     "Connection: close\r\n\r\n";
-static CGFloat const kVCMainSectionHeaderHeight = 46.0f;
+static CGFloat const kVCMainSectionHeaderHeight = 48.0f;
 static CGFloat const kVCDetailMarqueeGap = 4.0f;
 static NSTimeInterval const kVCMarqueePauseSeconds = 1.0;
 static CGFloat const kVCMarqueePixelsPerSecond = 28.0f;
@@ -3152,6 +3150,49 @@ static UIImage *MakeIconImage(VCIconType type, CGFloat size, BOOL active) {
     UIImage *img = UIGraphicsGetImageFromCurrentImageContext();
     UIGraphicsEndImageContext();
     return img;
+}
+
+static UIImage *VCMakePowerIcon(CGFloat size) {
+    UIGraphicsBeginImageContextWithOptions(CGSizeMake(size, size), NO, 0.0f);
+    [[UIColor whiteColor] setStroke];
+    UIBezierPath *ring = [UIBezierPath bezierPathWithArcCenter:CGPointMake(size * 0.5f, size * 0.55f)
+                                                      radius:size * 0.34f
+                                                  startAngle:(CGFloat)(-M_PI * 0.25)
+                                                    endAngle:(CGFloat)(M_PI * 1.25)
+                                                   clockwise:YES];
+    ring.lineWidth = MAX(2.0f, size * 0.09f);
+    ring.lineCapStyle = kCGLineCapRound;
+    [ring stroke];
+    UIBezierPath *stem = [UIBezierPath bezierPath];
+    [stem moveToPoint:CGPointMake(size * 0.5f, size * 0.19f)];
+    [stem addLineToPoint:CGPointMake(size * 0.5f, size * 0.48f)];
+    stem.lineWidth = ring.lineWidth;
+    stem.lineCapStyle = kCGLineCapRound;
+    [stem stroke];
+    UIImage *image = UIGraphicsGetImageFromCurrentImageContext();
+    UIGraphicsEndImageContext();
+    return image;
+}
+
+static UIImage *VCMakeConnectionGlow(UIColor *color) {
+    const CGFloat *rgb = CGColorGetComponents(color.CGColor);
+    CGFloat components[] = {
+        rgb[0], rgb[1], rgb[2], 0.82f,
+        rgb[0], rgb[1], rgb[2], 0.50f,
+        rgb[0], rgb[1], rgb[2], 0.0f
+    };
+    CGFloat locations[] = { 0.0f, 0.58f, 1.0f };
+    CGColorSpaceRef space = CGColorSpaceCreateDeviceRGB();
+    CGGradientRef gradient = CGGradientCreateWithColorComponents(space, components, locations, 3);
+    UIGraphicsBeginImageContextWithOptions(CGSizeMake(180.0f, 180.0f), NO, 0.0f);
+    CGContextDrawRadialGradient(UIGraphicsGetCurrentContext(), gradient,
+                                CGPointMake(90.0f, 90.0f), 0.0f,
+                                CGPointMake(90.0f, 90.0f), 90.0f, 0);
+    UIImage *image = UIGraphicsGetImageFromCurrentImageContext();
+    UIGraphicsEndImageContext();
+    CGGradientRelease(gradient);
+    CGColorSpaceRelease(space);
+    return image;
 }
 
 static UIView *VCCreateDisclosureAccessoryView(void) {
@@ -9620,6 +9661,13 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
 
 @interface MainVC : UIViewController <UITableViewDataSource, UITableViewDelegate, UIActionSheetDelegate, UIAlertViewDelegate, UITextViewDelegate, SettingsVCDelegate, QRScanVCDelegate, SubscriptionInfoVCDelegate, VCUpdateCheckerDelegate, VCImportBrowserDelegate> {
     UIButton *_connectBtn;
+    UIImageView *_connectGlowView;
+    UIView *_compactConnectGlowView;
+    UIView *_mainSwitchView;
+    UIImageView *_connectPowerIcon;
+    UILabel *_connectButtonTitle;
+    UILabel *_connectionStateLabel;
+    UILabel *_selectionLabel;
     UIButton *_plusBtn;
     UIButton *_terminalBtn;
     UIButton *_clearLogsBtn;
@@ -9635,7 +9683,6 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
     UIButton *_logSelectorButtons[2];
     UIView *_logSelectionIndicator;
     UITextView *_logView;
-    UIView *_stickySectionHeaderView;
     NSTimer *_logTimer;
     NSTimer *_uptimeTimer;
     NSTimeInterval _connectedSince;
@@ -9672,7 +9719,6 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
     CGFloat _compactSubscriptionTransitionAnchorViewportY;
     CGFloat _compactSubscriptionTransitionFinalContentHeight;
     NSInteger _updatingSubscriptionIndex;
-    NSInteger _stickySectionHeaderSection;
     NSInteger _reorderingSection;
     NSInteger _activeLogIndex;
     NSUInteger _mainSectionTransitionToken;
@@ -9705,6 +9751,7 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
     BOOL _configurationsSectionExpanded;
     BOOL _subscriptionsSectionExpanded;
     BOOL _mainSectionTransitionInProgress;
+    BOOL _mainTabTransitionInProgress;
     BOOL _didRunLaunchAutoUpdate;
     BOOL _didScheduleAutomaticUpdateCheck;
     BOOL _launchAutoUpdateInProgress;
@@ -9736,10 +9783,8 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
 - (void)applyTheme;
 - (UIView *)accessorySubscriptionHeaderAtIndex:(NSInteger)index expanded:(BOOL)expanded loading:(BOOL)loading;
 - (void)setMainReorderingSection:(NSInteger)section showStatus:(BOOL)showStatus;
-- (BOOL)mainSectionHasItems:(NSInteger)section;
-- (BOOL)isMainSectionExpanded:(NSInteger)section;
+- (BOOL)isMainTabSelected:(NSInteger)section;
 - (void)updateMainEmptyState;
-- (void)finishMainSectionTransition:(NSNumber *)transitionNumber;
 - (void)rememberActiveLogPosition;
 - (void)reloadMainTableDataAfterExternalChange;
 - (void)refreshMainListCellAppearance:(UITableViewCell *)cell atIndexPath:(NSIndexPath *)indexPath;
@@ -9756,6 +9801,8 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
 - (void)updateLogSelectorAnimated:(BOOL)animated;
 - (void)updatePhoneConnectionScrollInsets;
 - (void)updatePhoneConnectionLayout;
+- (void)updatePadConnectionLayout;
+- (void)updateConnectionSummary;
 - (CGFloat)maximumMainTableContentOffsetY;
 - (CGFloat)phoneConnectionSnapOffsetForProposedOffset:(CGFloat)proposedOffset
                                          currentOffset:(CGFloat)currentOffset
@@ -9781,41 +9828,30 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
 - (void)importFileAtURL:(NSURL *)url;
 - (void)refreshUpdateIndicatorFromCache;
 - (void)startAutomaticUpdateCheckIfNeeded;
-- (void)updateMainSectionHeaderButton:(UIButton *)button section:(NSInteger)section animated:(BOOL)animated;
-- (void)updateMainSectionHeaderView:(UIView *)header section:(NSInteger)section animated:(BOOL)animated;
-- (void)updateStickyMainSectionHeader;
-- (void)refreshStickyMainSectionHeader;
-- (void)recordMainLayoutEvent:(NSString *)action section:(NSInteger)section;
+- (UIView *)createMainSwitcherWithWidth:(CGFloat)width;
+- (void)updateMainTabButton:(UIButton *)button section:(NSInteger)section;
+- (void)updateMainSwitcherView:(UIView *)switcher;
+- (void)refreshMainSwitcher;
+- (void)recordMainLayoutEvent:(NSString *)action;
 @end
 
 @implementation MainVC
 
-- (void)recordMainLayoutEvent:(NSString *)action section:(NSInteger)section {
+- (void)recordMainLayoutEvent:(NSString *)action {
     if (!_tableView) return;
-    NSString *sectionName = section == 0 ? @"configurations" : (section == 1 ? @"subscriptions" : @"none");
-    CGFloat configurationsY = [self mainSectionHasItems:0]
-        ? [_tableView rectForHeaderInSection:0].origin.y
-        : -1.0f;
-    CGFloat subscriptionsY = [self mainSectionHasItems:1]
-        ? [_tableView rectForHeaderInSection:1].origin.y
-        : -1.0f;
+    NSInteger section = _subscriptionsSectionExpanded ? 1 : 0;
     NSString *detail = [NSString stringWithFormat:
-                        @"section=%@ expanded=%d compact=%d offset=%.1f content=%.1f viewport=%.1f rows=%ld headers=%.1f/%.1f button=%.1fx%.1f font=%.1f",
-                        sectionName,
-                        section == 0 ? (_configurationsSectionExpanded ? 1 : 0) :
-                                       (section == 1 ? (_subscriptionsSectionExpanded ? 1 : 0) : 0),
+                        @"tab=%@ compact=%d offset=%.1f content=%.1f viewport=%.1f rows=%ld switch_y=%.1f button=%.1fx%.1f font=%.1f",
+                        section == 0 ? @"configurations" : @"subscriptions",
                         _phoneConnectionCompact ? 1 : 0,
                         _tableView.contentOffset.y,
                         _tableView.contentSize.height,
                         _tableView.bounds.size.height,
-                        (long)(section >= 0 && section < [_tableView numberOfSections]
-                                   ? [_tableView numberOfRowsInSection:section]
-                                   : 0),
-                        configurationsY,
-                        subscriptionsY,
+                        (long)[_tableView numberOfRowsInSection:section],
+                        _mainSwitchView.frame.origin.y,
                         _connectBtn.bounds.size.width,
                         _connectBtn.bounds.size.height,
-                        [_connectBtn.titleLabel.font pointSize]];
+                        [_connectButtonTitle.font pointSize]];
     VCRecordAppEvent(@"layout", action, detail);
 }
 
@@ -10618,6 +10654,7 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
                                              selector:@selector(flushMainStateDefaults)
                                                object:nil];
     [self performSelector:@selector(flushMainStateDefaults) withObject:nil afterDelay:0.5];
+    [self updateConnectionSummary];
 }
 
 - (void)flushMainStateDefaults {
@@ -10645,7 +10682,7 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
     [ud setBool:_automaticUpdateChecksEnabled forKey:kDefaultsAutomaticUpdateChecksKey];
     [self saveMainState];
     [self updateMainEmptyState];
-    [self updateStickyMainSectionHeader];
+    [self refreshMainSwitcher];
 }
 
 - (void)loadData {
@@ -10719,10 +10756,9 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
                              savedExpandedSubscription < (NSInteger)[_subscriptions count])
         ? savedExpandedSubscription : -1;
     _updatingSubscriptionIndex = -1;
-    _stickySectionHeaderSection = -1;
     _reorderingSection = -1;
-    _configurationsSectionExpanded = [ud boolForKey:kDefaultsConfigurationsExpandedKey];
-    _subscriptionsSectionExpanded = [ud boolForKey:kDefaultsSubscriptionsExpandedKey];
+    BOOL savedConfigurations = [ud boolForKey:kDefaultsConfigurationsExpandedKey];
+    BOOL savedSubscriptions = [ud boolForKey:kDefaultsSubscriptionsExpandedKey];
 
     NSDictionary *lastSelection = [ud objectForKey:kDefaultsLastSelectionKey];
     NSString *selectionKind = [lastSelection isKindOfClass:[NSDictionary class]]
@@ -10745,6 +10781,9 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
     if (_selectedConfigIndex < 0 && _selectedSubIndex < 0 && [_configs count] > 0) {
         _selectedConfigIndex = 0;
     }
+    _subscriptionsSectionExpanded = (savedConfigurations == savedSubscriptions)
+        ? (_selectedSubIndex >= 0) : savedSubscriptions;
+    _configurationsSectionExpanded = !_subscriptionsSectionExpanded;
     VCRecordAppEvent(@"storage",
                      @"Configuration store loaded",
                      [NSString stringWithFormat:@"configs=%lu subscriptions=%lu secure=%d writable=%d",
@@ -11913,14 +11952,36 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
     [self startSubscriptionPingAtIndex:subIdx];
 }
 
+- (void)updateConnectionSummary {
+    _connectionStateLabel.text = _connected ? @"Connected" : @"Not connected";
+    _connectionStateLabel.textColor = _connected ? VCSuccessColor() : VCPrimaryTextColor();
+
+    NSString *name = nil;
+    if (_selectedSubIndex >= 0 && _selectedSubIndex < (NSInteger)[_subscriptions count]) {
+        NSDictionary *subscription = [_subscriptions objectAtIndex:_selectedSubIndex];
+        name = [subscription objectForKey:@"name"];
+        if (![name isKindOfClass:[NSString class]] || [name length] == 0) {
+            name = [self subscriptionNameFromURLString:[subscription objectForKey:@"url"]];
+        }
+    } else if (_selectedConfigIndex >= 0 && _selectedConfigIndex < (NSInteger)[_configs count]) {
+        name = [[_configs objectAtIndex:_selectedConfigIndex] objectForKey:@"name"];
+    }
+    _selectionLabel.text = ([name isKindOfClass:[NSString class]] && [name length] > 0)
+        ? [self maskedLinkText:name] : @"No configuration selected";
+}
+
 - (void)updateConnectButton {
     NSString *title = _connected ? @"Disconnect" : @"Connect";
-    [_connectBtn setTitle:title forState:UIControlStateNormal];
-
+    _connectButtonTitle.text = title;
+    _connectBtn.accessibilityLabel = title;
     UIColor *fill = _connected
         ? [UIColor colorWithRed:0.12f green:0.58f blue:0.20f alpha:1.0f]
         : VCAccentColor();
     _connectBtn.backgroundColor = fill;
+    _connectGlowView.image = VCMakeConnectionGlow(fill);
+    _compactConnectGlowView.backgroundColor = [fill colorWithAlphaComponent:0.45f];
+    _compactConnectGlowView.layer.shadowColor = fill.CGColor;
+    [self updateConnectionSummary];
 }
 
 - (void)applyTouchFeedbackToButton:(UIButton *)btn {
@@ -13124,6 +13185,7 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
 
 - (void)selectSubscriptionAtIndex:(NSInteger)subIndex {
     _subscriptionsSectionExpanded = YES;
+    _configurationsSectionExpanded = NO;
     _expandedSubscription = subIndex;
     _selectedConfigIndex = -1;
     _selectedSubIndex = subIndex;
@@ -13590,6 +13652,7 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
     if (existing >= 0) {
         VCRecordAppEvent(@"import", @"Configuration import skipped", @"reason=duplicate");
         _configurationsSectionExpanded = YES;
+        _subscriptionsSectionExpanded = NO;
         _selectedConfigIndex = existing;
         _selectedSubIndex = -1;
         _selectedSubItemIndex = -1;
@@ -13610,6 +13673,7 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
                      [NSString stringWithFormat:@"configs=%lu", (unsigned long)[_configs count]]);
 
     _configurationsSectionExpanded = YES;
+    _subscriptionsSectionExpanded = NO;
     _selectedConfigIndex = [_configs count] - 1;
     _selectedSubIndex = -1;
     _selectedSubItemIndex = -1;
@@ -14000,6 +14064,7 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
         if (importedConfigs > 0 || pendingSubs > 0) {
             if (importedConfigs > 0) {
                 _configurationsSectionExpanded = YES;
+                _subscriptionsSectionExpanded = NO;
                 _selectedConfigIndex = [_configs count] - 1;
                 _selectedSubIndex = -1;
                 _selectedSubItemIndex = -1;
@@ -14896,9 +14961,9 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
     _showingTerminal = !_showingTerminal;
 
     _tableView.hidden = _showingTerminal;
+    _mainSwitchView.hidden = _showingTerminal || ([_configs count] == 0 && [_subscriptions count] == 0);
     _logSelector.hidden = !_showingTerminal;
     _logView.hidden = !_showingTerminal;
-    [self updateStickyMainSectionHeader];
     [UIView animateWithDuration:0.18
                      animations:^{
                          [self updatePhoneConnectionLayout];
@@ -15128,28 +15193,51 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
 
     CGFloat width = self.view.bounds.size.width;
     CGFloat topInset = VCMainStatusBarInset();
-    CGRect expandedButtonFrame = CGRectMake((width - 122.0f) * 0.5f, topInset + 60.0f, 122.0f, 122.0f);
-    CGRect compactButtonFrame = CGRectMake(12.0f, topInset + 52.0f, 104.0f, 48.0f);
-    CGRect expandedUptimeFrame = CGRectMake(16.0f, topInset + 190.0f, width - 32.0f, 20.0f);
-    CGRect compactUptimeFrame = CGRectMake(128.0f, topInset + 50.0f, width - 140.0f, 18.0f);
-    CGRect expandedStatusFrame = CGRectMake(16.0f, topInset + 216.0f, width - 32.0f, 30.0f);
-    CGRect compactStatusFrame = CGRectMake(128.0f, topInset + 71.0f, width - 140.0f, 37.0f);
+    CGRect expandedButtonFrame = CGRectMake((width - 112.0f) * 0.5f, topInset + 54.0f, 112.0f, 112.0f);
+    CGRect compactButtonFrame = CGRectMake(12.0f, topInset + 56.0f, 126.0f, 48.0f);
+    CGRect expandedStateFrame = CGRectMake(16.0f, topInset + 174.0f, width - 32.0f, 19.0f);
+    CGRect compactStateFrame = CGRectMake(150.0f, topInset + 50.0f, width - 162.0f, 17.0f);
+    CGRect expandedSelectionFrame = CGRectMake(16.0f, topInset + 194.0f, width - 32.0f, 18.0f);
+    CGRect compactSelectionFrame = CGRectMake(150.0f, topInset + 67.0f, width - 162.0f, 17.0f);
+    CGRect expandedUptimeFrame = CGRectMake(16.0f, topInset + 214.0f, width - 32.0f, 18.0f);
+    CGRect compactUptimeFrame = CGRectMake(150.0f, topInset + 84.0f, width - 162.0f, 17.0f);
+    CGRect expandedStatusFrame = CGRectMake(16.0f, topInset + 237.0f, width - 32.0f, 30.0f);
+    CGRect compactStatusFrame = CGRectMake(16.0f, topInset + 113.0f, width - 32.0f, 28.0f);
 
     [CATransaction begin];
     [CATransaction setDisableActions:YES];
+    _mainSwitchView.frame = VCInterpolateRect(
+        CGRectMake(10.0f, topInset + kVCMainContentStartY, width - 20.0f, kVCMainSectionHeaderHeight),
+        CGRectMake(10.0f, topInset + kVCMainCompactContentStartY, width - 20.0f, kVCMainSectionHeaderHeight),
+        progress);
     _connectBtn.frame = VCInterpolateRect(expandedButtonFrame, compactButtonFrame, progress);
     _connectBtn.layer.cornerRadius = _connectBtn.bounds.size.height * 0.5f;
-    CGFloat buttonFontSize = 20.0f - 5.0f * progress;
-    if (fabs([_connectBtn.titleLabel.font pointSize] - buttonFontSize) > 0.35f) {
-        _connectBtn.titleLabel.font = [UIFont boldSystemFontOfSize:buttonFontSize];
+    _connectGlowView.frame = CGRectInset(_connectBtn.frame, -18.0f, -18.0f);
+    _connectGlowView.alpha = 1.0f - progress;
+    _compactConnectGlowView.frame = _connectBtn.frame;
+    _compactConnectGlowView.layer.cornerRadius = _connectBtn.layer.cornerRadius;
+    _compactConnectGlowView.layer.shadowPath = [UIBezierPath bezierPathWithRoundedRect:_compactConnectGlowView.bounds
+                                                                          cornerRadius:_compactConnectGlowView.layer.cornerRadius].CGPath;
+    _compactConnectGlowView.alpha = progress;
+    _connectPowerIcon.frame = VCInterpolateRect(CGRectMake(40.5f, 26.0f, 31.0f, 31.0f),
+                                                CGRectMake(11.0f, 14.0f, 20.0f, 20.0f), progress);
+    _connectButtonTitle.frame = VCInterpolateRect(CGRectMake(10.0f, 61.0f, 92.0f, 24.0f),
+                                                  CGRectMake(35.0f, 0.0f, 86.0f, 48.0f), progress);
+    CGFloat buttonFontSize = 16.0f - 3.5f * progress;
+    if (fabs([_connectButtonTitle.font pointSize] - buttonFontSize) > 0.35f) {
+        _connectButtonTitle.font = [UIFont boldSystemFontOfSize:buttonFontSize];
     }
 
+    _connectionStateLabel.frame = VCInterpolateRect(expandedStateFrame, compactStateFrame, progress);
+    _connectionStateLabel.textAlignment = progress < 0.5f ? NSTextAlignmentCenter : NSTextAlignmentLeft;
+    _selectionLabel.frame = VCInterpolateRect(expandedSelectionFrame, compactSelectionFrame, progress);
+    _selectionLabel.textAlignment = _connectionStateLabel.textAlignment;
     _uptimeLabel.frame = VCInterpolateRect(expandedUptimeFrame, compactUptimeFrame, progress);
     CGFloat uptimeFontSize = 13.0f - progress;
     if (fabs([_uptimeLabel.font pointSize] - uptimeFontSize) > 0.35f) {
         _uptimeLabel.font = [UIFont boldSystemFontOfSize:uptimeFontSize];
     }
-    _uptimeLabel.textAlignment = (progress < 0.5f) ? NSTextAlignmentCenter : NSTextAlignmentLeft;
+    _uptimeLabel.textAlignment = _connectionStateLabel.textAlignment;
 
     _statusLabel.frame = VCInterpolateRect(expandedStatusFrame, compactStatusFrame, progress);
     CGFloat statusFontSize = 12.5f - progress;
@@ -15171,6 +15259,8 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
     }
 
     CGFloat labelAlpha = fabs(progress * 2.0f - 1.0f);
+    _connectionStateLabel.alpha = labelAlpha;
+    _selectionLabel.alpha = labelAlpha;
     _uptimeLabel.alpha = labelAlpha;
     _statusLabel.alpha = labelAlpha;
 
@@ -15184,6 +15274,48 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
     } else if (progress >= 0.999f) {
         _phoneConnectionCompact = YES;
     }
+}
+
+- (void)updatePadConnectionLayout {
+    if (!IsPadDevice() || !_connectBtn || !_tableView) return;
+
+    CGFloat width = self.view.bounds.size.width;
+    CGFloat height = self.view.bounds.size.height;
+    CGFloat topInset = VCMainStatusBarInset();
+    CGFloat buttonSize = 112.0f;
+    CGRect buttonFrame = CGRectMake(floorf((width - buttonSize) * 0.5f),
+                                    topInset + 54.0f, buttonSize, buttonSize);
+    CGFloat summaryWidth = MIN(width - 32.0f, 360.0f);
+    CGFloat summaryX = floorf((width - summaryWidth) * 0.5f);
+    CGFloat listY = topInset + kVCMainContentStartY + kVCMainSectionHeaderHeight;
+
+    [CATransaction begin];
+    [CATransaction setDisableActions:YES];
+    _connectBtn.frame = buttonFrame;
+    _connectBtn.layer.cornerRadius = buttonSize * 0.5f;
+    _connectGlowView.frame = CGRectInset(buttonFrame, -18.0f, -18.0f);
+    _connectGlowView.alpha = 1.0f;
+    _compactConnectGlowView.frame = buttonFrame;
+    _compactConnectGlowView.alpha = 0.0f;
+    _connectPowerIcon.frame = CGRectMake(40.5f, 26.0f, 31.0f, 31.0f);
+    _connectButtonTitle.frame = CGRectMake(10.0f, 61.0f, 92.0f, 24.0f);
+    _connectButtonTitle.font = [UIFont boldSystemFontOfSize:16.0f];
+    _connectionStateLabel.frame = CGRectMake(summaryX, topInset + 174.0f, summaryWidth, 19.0f);
+    _selectionLabel.frame = CGRectMake(summaryX, topInset + 194.0f, summaryWidth, 18.0f);
+    _uptimeLabel.frame = CGRectMake(summaryX, topInset + 214.0f, summaryWidth, 18.0f);
+    _connectionStateLabel.textAlignment = NSTextAlignmentCenter;
+    _selectionLabel.textAlignment = NSTextAlignmentCenter;
+    _uptimeLabel.textAlignment = NSTextAlignmentCenter;
+    _connectionStateLabel.alpha = 1.0f;
+    _selectionLabel.alpha = 1.0f;
+    _uptimeLabel.alpha = 1.0f;
+    _statusLabel.frame = CGRectMake(16.0f, topInset + 237.0f, width - 32.0f, 30.0f);
+    _statusLabel.alpha = 1.0f;
+    _mainSwitchView.frame = CGRectMake(10.0f, topInset + kVCMainContentStartY,
+                                       width - 20.0f, kVCMainSectionHeaderHeight);
+    _tableView.frame = CGRectMake(0.0f, listY, width, MAX(120.0f, height - listY));
+    [CATransaction commit];
+    [self updateMainSwitcherView:_mainSwitchView];
 }
 
 - (CGFloat)maximumMainTableContentOffsetY {
@@ -15365,7 +15497,6 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
             [_tableView layoutIfNeeded];
             [self restoreMainTableAfterStructuralTransitionCompact:restoreCompact
                                                     preservedOffset:restoreOffset];
-            [self updateStickyMainSectionHeader];
         });
     } else {
         [self snapPhoneConnectionLayoutIfNeededAnimated:NO];
@@ -15431,7 +15562,7 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
     [self retargetCompactSubscriptionTransitionAnchor];
     [self completeMainTableStructuralTransition];
     [self refreshVisibleSubscriptionHeaderExpansionAppearanceAnimated:NO];
-    [self refreshStickyMainSectionHeader];
+    [self refreshMainSwitcher];
     [CATransaction commit];
     [UIView setAnimationsEnabled:animationsWereEnabled];
     _compactSubscriptionOffsetAnimationInProgress = NO;
@@ -15454,7 +15585,7 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
     _compactSubscriptionOffsetAnimationInProgress = NO;
     [self completeMainTableStructuralTransition];
     [self refreshVisibleSubscriptionHeaderExpansionAppearanceAnimated:NO];
-    [self refreshStickyMainSectionHeader];
+    [self refreshMainSwitcher];
     _tableView.userInteractionEnabled = YES;
     [self scheduleMainMarqueeRelayout];
 }
@@ -15609,10 +15740,13 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
     if (!_tableView) return;
 
     if ([_configs count] > 0 || [_subscriptions count] > 0) {
+        _mainSwitchView.hidden = _showingTerminal;
         _tableView.scrollEnabled = YES;
         _tableView.backgroundView = nil;
         return;
     }
+
+    _mainSwitchView.hidden = YES;
 
     if (!IsPadDevice()) {
         CGFloat collapseDistance = kVCMainContentStartY - kVCMainCompactContentStartY;
@@ -15706,6 +15840,8 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
     UIColor *background = VCBackgroundColor();
     self.view.backgroundColor = background;
     _titleLabel.textColor = VCPrimaryTextColor();
+    _connectionStateLabel.textColor = VCPrimaryTextColor();
+    _selectionLabel.textColor = VCAccentColor();
     _uptimeLabel.textColor = VCPrimaryTextColor();
     _statusLabel.textColor = _statusOK ? VCSuccessColor() : VCErrorColor();
     [self updateConnectButton];
@@ -15734,8 +15870,7 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
     [self updateTopButtonsIcons];
     [_tableView reloadData];
     [self updateMainEmptyState];
-    VCAppearanceRefreshVisibleTableHeaders(_tableView);
-    [self refreshStickyMainSectionHeader];
+    [self refreshMainSwitcher];
 }
 
 - (void)viewDidLoad {
@@ -15759,7 +15894,8 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
     CGRect b = self.view.bounds;
     BOOL collapsiblePhoneLayout = !IsPadDevice();
     CGFloat topInset = VCMainStatusBarInset();
-    CGFloat listY = topInset + (collapsiblePhoneLayout ? kVCMainCompactContentStartY : kVCMainContentStartY);
+    CGFloat listY = topInset + (collapsiblePhoneLayout ? kVCMainCompactContentStartY : kVCMainContentStartY) +
+                    kVCMainSectionHeaderHeight;
     UIColor *bg = VCBackgroundColor();
     self.view.backgroundColor = bg;
 
@@ -15827,20 +15963,58 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
     [self applyTopButtonFeedbackToButton:_settingsBtn];
     [self.view addSubview:_settingsBtn];
 
-    CGFloat btnSize = 122.0f;
+    CGFloat btnSize = 112.0f;
+    _connectGlowView = [[UIImageView alloc] initWithFrame:CGRectMake((b.size.width - btnSize) * 0.5f - 18.0f,
+                                                                     topInset + 36.0f,
+                                                                     btnSize + 36.0f, btnSize + 36.0f)];
+    _connectGlowView.userInteractionEnabled = NO;
+    [self.view addSubview:_connectGlowView];
+
+    _compactConnectGlowView = [[UIView alloc] initWithFrame:CGRectMake((b.size.width - btnSize) * 0.5f,
+                                                                         topInset + 54.0f, btnSize, btnSize)];
+    _compactConnectGlowView.userInteractionEnabled = NO;
+    _compactConnectGlowView.layer.shadowOffset = CGSizeZero;
+    _compactConnectGlowView.layer.shadowRadius = 11.0f;
+    _compactConnectGlowView.layer.shadowOpacity = 0.72f;
+    _compactConnectGlowView.alpha = 0.0f;
+    [self.view addSubview:_compactConnectGlowView];
+
     _connectBtn = [[UIButton buttonWithType:UIButtonTypeCustom] retain];
-    _connectBtn.frame = CGRectMake((b.size.width - btnSize) * 0.5f, topInset + 60.0f, btnSize, btnSize);
-    _connectBtn.titleLabel.font = [UIFont boldSystemFontOfSize:20.0f];
+    _connectBtn.frame = CGRectMake((b.size.width - btnSize) * 0.5f, topInset + 54.0f, btnSize, btnSize);
     _connectBtn.layer.cornerRadius = btnSize * 0.5f;
     _connectBtn.layer.borderWidth = 2.0f;
     _connectBtn.layer.borderColor = [UIColor colorWithWhite:1.0f alpha:0.95f].CGColor;
     _connectBtn.autoresizingMask = UIViewAutoresizingFlexibleLeftMargin | UIViewAutoresizingFlexibleRightMargin;
-    [_connectBtn setTitleColor:[UIColor whiteColor] forState:UIControlStateNormal];
     [_connectBtn addTarget:self action:@selector(togglePressed) forControlEvents:UIControlEventTouchUpInside];
     [self applyTouchFeedbackToButton:_connectBtn];
+    _connectPowerIcon = [[UIImageView alloc] initWithImage:VCMakePowerIcon(36.0f)];
+    _connectPowerIcon.contentMode = UIViewContentModeScaleAspectFit;
+    _connectPowerIcon.userInteractionEnabled = NO;
+    [_connectBtn addSubview:_connectPowerIcon];
+    _connectButtonTitle = [[UILabel alloc] initWithFrame:CGRectZero];
+    _connectButtonTitle.backgroundColor = [UIColor clearColor];
+    _connectButtonTitle.textColor = [UIColor whiteColor];
+    _connectButtonTitle.textAlignment = NSTextAlignmentCenter;
+    _connectButtonTitle.adjustsFontSizeToFitWidth = YES;
+    _connectButtonTitle.minimumScaleFactor = 0.75f;
+    [_connectBtn addSubview:_connectButtonTitle];
     [self.view addSubview:_connectBtn];
 
-    _uptimeLabel = [[UILabel alloc] initWithFrame:CGRectMake(16.0f, topInset + 190.0f,
+    _connectionStateLabel = [[UILabel alloc] initWithFrame:CGRectZero];
+    _connectionStateLabel.font = [UIFont boldSystemFontOfSize:15.0f];
+    _connectionStateLabel.backgroundColor = [UIColor clearColor];
+    _connectionStateLabel.autoresizingMask = UIViewAutoresizingFlexibleWidth;
+    [self.view addSubview:_connectionStateLabel];
+
+    _selectionLabel = [[UILabel alloc] initWithFrame:CGRectZero];
+    _selectionLabel.font = [UIFont systemFontOfSize:13.0f];
+    _selectionLabel.backgroundColor = [UIColor clearColor];
+    _selectionLabel.adjustsFontSizeToFitWidth = YES;
+    _selectionLabel.minimumScaleFactor = 0.75f;
+    _selectionLabel.autoresizingMask = UIViewAutoresizingFlexibleWidth;
+    [self.view addSubview:_selectionLabel];
+
+    _uptimeLabel = [[UILabel alloc] initWithFrame:CGRectMake(16.0f, topInset + 221.0f,
                                                             b.size.width - 32.0f, 20.0f)];
     _uptimeLabel.font = [UIFont boldSystemFontOfSize:13.0f];
     _uptimeLabel.text = @"00:00:00";
@@ -15850,7 +16024,7 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
     _uptimeLabel.autoresizingMask = UIViewAutoresizingFlexibleWidth;
     [self.view addSubview:_uptimeLabel];
 
-    _statusLabel = [[UILabel alloc] initWithFrame:CGRectMake(16.0f, topInset + 216.0f,
+    _statusLabel = [[UILabel alloc] initWithFrame:CGRectMake(16.0f, topInset + 237.0f,
                                                             b.size.width - 32.0f, 30.0f)];
     _statusLabel.font = [UIFont systemFontOfSize:12.5f];
     _statusLabel.numberOfLines = 2;
@@ -15863,7 +16037,9 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
     CGFloat listH = b.size.height - listY;
     if (listH < 120.0f) listH = 120.0f;
 
-    _tableView = [[UITableView alloc] initWithFrame:CGRectMake(0, listY, b.size.width, listH) style:UITableViewStyleGrouped];
+    UITableViewStyle listStyle = ([[UIDevice currentDevice].systemVersion integerValue] < 7)
+        ? UITableViewStyleGrouped : UITableViewStylePlain;
+    _tableView = [[UITableView alloc] initWithFrame:CGRectMake(0, listY, b.size.width, listH) style:listStyle];
     _tableView.dataSource = self;
     _tableView.delegate = self;
     _tableView.opaque = YES;
@@ -15880,6 +16056,15 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
         _tableView.contentOffset = CGPointMake(0.0f, -collapseDistance);
     }
     [self.view addSubview:_tableView];
+
+    _mainSwitchView = [[self createMainSwitcherWithWidth:b.size.width - 20.0f] retain];
+    _mainSwitchView.frame = CGRectMake(10.0f,
+                                       topInset + (collapsiblePhoneLayout ? kVCMainCompactContentStartY
+                                                                         : kVCMainContentStartY),
+                                       b.size.width - 20.0f, kVCMainSectionHeaderHeight);
+    [self updateMainSwitcherView:_mainSwitchView];
+    [self.view addSubview:_mainSwitchView];
+
 
     CGFloat logY = topInset + kVCMainContentStartY;
     CGFloat logH = b.size.height - logY;
@@ -15935,9 +16120,13 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
     [self.view addSubview:_logView];
 
     [self.view bringSubviewToFront:_connectBtn];
+    [self.view bringSubviewToFront:_connectionStateLabel];
+    [self.view bringSubviewToFront:_selectionLabel];
     [self.view bringSubviewToFront:_uptimeLabel];
     [self.view bringSubviewToFront:_statusLabel];
-    [self updatePhoneConnectionLayout];
+    [self.view bringSubviewToFront:_mainSwitchView];
+    if (IsPadDevice()) [self updatePadConnectionLayout];
+    else [self updatePhoneConnectionLayout];
 
     [self updateConnectButton];
     [self applyTheme];
@@ -15968,9 +16157,12 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
 
 - (void)viewDidLayoutSubviews {
     [super viewDidLayoutSubviews];
-    [self updatePhoneConnectionScrollInsets];
-    [self updatePhoneConnectionLayout];
-    [self updateStickyMainSectionHeader];
+    if (IsPadDevice()) {
+        [self updatePadConnectionLayout];
+    } else {
+        [self updatePhoneConnectionScrollInsets];
+        [self updatePhoneConnectionLayout];
+    }
 }
 
 - (BOOL)shouldAutorotateToInterfaceOrientation:(UIInterfaceOrientation)interfaceOrientation {
@@ -16026,6 +16218,12 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
     [_statusBaseText release];
 
     [_connectBtn release];
+    [_connectGlowView release];
+    [_compactConnectGlowView release];
+    [_connectPowerIcon release];
+    [_connectButtonTitle release];
+    [_connectionStateLabel release];
+    [_selectionLabel release];
     [_plusBtn release];
     [_terminalBtn release];
     [_clearLogsBtn release];
@@ -16042,7 +16240,7 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
     [_logView release];
     [_logTexts[0] release];
     [_logTexts[1] release];
-    [_stickySectionHeaderView release];
+    [_mainSwitchView release];
     [_pendingImportDoneStatus release];
     [_pendingImportRefreshIndices release];
     [_pendingInsecureImportURLs release];
@@ -16079,21 +16277,10 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
     return _subscriptionsSectionExpanded ? [self subscriptionSectionRowCount] : 0;
 }
 
-- (BOOL)mainSectionHasItems:(NSInteger)section {
-    if (section == 0) return [_configs count] > 0;
-    if (section == 1) return [_subscriptions count] > 0;
-    return NO;
-}
-
-- (NSString *)tableView:(UITableView *)tableView titleForHeaderInSection:(NSInteger)section {
-    (void)tableView;
-    if (![self mainSectionHasItems:section]) return nil;
-    return (section == 0) ? @"Configurations" : @"Subscriptions";
-}
-
 - (CGFloat)tableView:(UITableView *)tableView heightForRowAtIndexPath:(NSIndexPath *)indexPath {
     (void)tableView;
     if (indexPath.section == 0) {
+        if (_reorderingSection == 0) return 56.0f;
         BOOL firstItem = (indexPath.row == 0);
         BOOL lastItem = (indexPath.row == (NSInteger)[_configs count] - 1);
         return 44.0f + (firstItem ? 4.0f : 0.0f) + (lastItem ? 8.0f : 0.0f);
@@ -16144,8 +16331,10 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
     _reorderingSection = section;
     if (section == 0) {
         _configurationsSectionExpanded = YES;
+        _subscriptionsSectionExpanded = NO;
     } else if (section == 1) {
         _subscriptionsSectionExpanded = YES;
+        _configurationsSectionExpanded = NO;
         [_subscriptionToReexpandAfterReorder release];
         _subscriptionToReexpandAfterReorder = nil;
         if (_expandedSubscription >= 0 && _expandedSubscription < (NSInteger)[_subscriptions count]) {
@@ -16159,10 +16348,7 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
     if (_reorderingSection >= 0) {
         [_tableView setEditing:YES animated:YES];
         if (showStatus) {
-            [self showStatus:(_reorderingSection == 0
-                                  ? @"Drag configurations to change their order"
-                                  : @"Drag subscriptions to change their order")
-                         ok:YES];
+            [self showStatus:@"Drag rows. Hold the tab again to save" ok:YES];
         }
     } else if (showStatus && previousSection >= 0) {
         [self showStatus:(previousSection == 0
@@ -16172,15 +16358,24 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
     }
 }
 
-- (void)mainSectionOrderPressed:(UIButton *)sender {
-    NSInteger section = sender.tag - kVCMainSectionHeaderOrderButtonTagBase;
+- (void)mainTabLongPressed:(UILongPressGestureRecognizer *)gesture {
+    if (gesture.state != UIGestureRecognizerStateBegan ||
+        _mainTabTransitionInProgress || _mainSectionTransitionInProgress) return;
+    NSInteger section = gesture.view.tag - kVCMainSectionHeaderButtonTagBase;
     if (section < 0 || section > 1) return;
+    if (![self isMainTabSelected:section]) {
+        [self showStatus:@"Select the list before reordering" ok:YES];
+        return;
+    }
 
     NSArray *items = (section == 0) ? (NSArray *)_configs : (NSArray *)_subscriptions;
-    if ([items count] < 2) return;
     if (_reorderingSection == section) {
         VCRecordAppEvent(@"ui", @"List reordering finished", section == 0 ? @"section=configurations" : @"section=subscriptions");
         [self setMainReorderingSection:-1 showStatus:YES];
+        return;
+    }
+    if ([items count] < 2) {
+        [self showStatus:@"At least two items are needed to reorder" ok:YES];
         return;
     }
     if (section == 1 && _launchAutoUpdateInProgress) {
@@ -16192,247 +16387,154 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
     VCRecordAppEvent(@"ui", @"List reordering started", section == 0 ? @"section=configurations" : @"section=subscriptions");
 }
 
-- (void)mainSectionHeaderPressed:(UIButton *)sender {
+- (void)mainTabPressed:(UIButton *)sender {
     NSInteger section = sender.tag - kVCMainSectionHeaderButtonTagBase;
-    if (section < 0 || section > 1) return;
-    if (_mainSectionTransitionInProgress) {
-        VCRecordAppEvent(@"layout", @"Section toggle ignored", @"reason=transition_in_progress");
-        return;
-    }
+    if (section < 0 || section > 1 ||
+        _mainTabTransitionInProgress || _mainSectionTransitionInProgress) return;
+    if ([self isMainTabSelected:section]) return;
     if (_reorderingSection >= 0) {
         [self showStatus:@"Finish reordering first" ok:YES];
         return;
     }
-    NSInteger oldRowCount = [_tableView numberOfRowsInSection:section];
-
-    if (section == 0) {
-        _configurationsSectionExpanded = !_configurationsSectionExpanded;
-    } else {
-        _subscriptionsSectionExpanded = !_subscriptionsSectionExpanded;
-    }
+    _configurationsSectionExpanded = (section == 0);
+    _subscriptionsSectionExpanded = (section == 1);
     [self saveMainState];
-    NSInteger newRowCount = [self tableView:_tableView numberOfRowsInSection:section];
-    [self recordMainLayoutEvent:@"Section toggle started" section:section];
-
-    NSUInteger transitionToken = ++_mainSectionTransitionToken;
-    NSNumber *transitionNumber = [NSNumber numberWithUnsignedInteger:transitionToken];
-    [self prepareMainTableStructuralTransition];
-    [CATransaction begin];
-
-    [self updateMainSectionHeaderButton:sender section:section animated:YES];
-
-    UIButton *normalButton = (UIButton *)[_tableView viewWithTag:(kVCMainSectionHeaderButtonTagBase + section)];
-    if (normalButton != sender) {
-        [self updateMainSectionHeaderButton:normalButton section:section animated:YES];
-    }
-    if (_stickySectionHeaderSection == section) {
-        UIButton *stickyButton = (UIButton *)[_stickySectionHeaderView viewWithTag:(kVCMainSectionHeaderButtonTagBase + section)];
-        if (stickyButton != sender && stickyButton != normalButton) {
-            [self updateMainSectionHeaderButton:stickyButton section:section animated:YES];
-        }
-    }
-
-    [CATransaction setCompletionBlock:^{
-        [self finishMainSectionTransition:transitionNumber];
-        [self recordMainLayoutEvent:@"Section toggle finished" section:section];
+    [self updateMainSwitcherView:_mainSwitchView];
+    BOOL compact = !IsPadDevice() && (_phoneConnectionCompact || _tableView.contentOffset.y >= -0.5f);
+    CGFloat topOffset = compact ? 0.0f : -(kVCMainContentStartY - kVCMainCompactContentStartY);
+    _mainTabTransitionInProgress = YES;
+    _tableView.userInteractionEnabled = NO;
+    [UIView animateWithDuration:0.10 animations:^{
+        _tableView.alpha = 0.0f;
+    } completion:^(BOOL finished) {
+        (void)finished;
+        [_tableView reloadData];
+        [_tableView layoutIfNeeded];
+        [_tableView setContentOffset:CGPointMake(0.0f, IsPadDevice() ? 0.0f : topOffset)
+                                    animated:NO];
+        [self updatePhoneConnectionScrollInsets];
+        [self updatePhoneConnectionLayout];
+        [UIView animateWithDuration:0.16 animations:^{
+            _tableView.alpha = 1.0f;
+        } completion:^(BOOL shown) {
+            (void)shown;
+            _mainTabTransitionInProgress = NO;
+            _tableView.userInteractionEnabled = YES;
+        }];
     }];
-
-    NSMutableArray *changedRows = [NSMutableArray array];
-    NSInteger changedRowCount = (newRowCount > oldRowCount) ? newRowCount : oldRowCount;
-    for (NSInteger row = 0; row < changedRowCount; row++) {
-        [changedRows addObject:[NSIndexPath indexPathForRow:row inSection:section]];
-    }
-
-    @try {
-        if (newRowCount > oldRowCount) {
-            [_tableView insertRowsAtIndexPaths:changedRows withRowAnimation:UITableViewRowAnimationFade];
-        } else if (oldRowCount > newRowCount) {
-            [_tableView deleteRowsAtIndexPaths:changedRows withRowAnimation:UITableViewRowAnimationFade];
-        }
-    } @catch (NSException *exception) {
-        (void)exception;
-        VCRecordAppEvent(@"layout", @"Section animation recovered", @"reason=table_update_exception");
-        [self reloadMainTableDataAfterExternalChange];
-    }
-    [CATransaction commit];
-    [self performSelector:@selector(finishMainSectionTransition:)
-               withObject:transitionNumber
-               afterDelay:0.35];
+    VCRecordAppEvent(@"ui", @"Main list switched", section == 0 ? @"section=configurations" : @"section=subscriptions");
 }
 
 - (CGFloat)tableView:(UITableView *)tableView heightForHeaderInSection:(NSInteger)section {
     (void)tableView;
-    return [self mainSectionHasItems:section] ? kVCMainSectionHeaderHeight : 0.01f;
+    (void)section;
+    return 0.01f;
 }
 
 - (CGFloat)tableView:(UITableView *)tableView heightForFooterInSection:(NSInteger)section {
-    if (![self mainSectionHasItems:section]) return 0.01f;
-    return tableView.sectionFooterHeight;
+    (void)tableView;
+    (void)section;
+    return 0.01f;
 }
 
-- (UIView *)mainSectionHeaderViewForTable:(UITableView *)tableView section:(NSInteger)section {
-    if (![self mainSectionHasItems:section]) return nil;
-
-    CGFloat width = tableView.bounds.size.width;
+- (UIView *)createMainSwitcherWithWidth:(CGFloat)width {
     UIView *header = [[[UIView alloc] initWithFrame:CGRectMake(0.0f,
                                                                0.0f,
                                                                width,
                                                                kVCMainSectionHeaderHeight)] autorelease];
     header.backgroundColor = [UIColor clearColor];
+    CGFloat switchWidth = width;
+    UIView *track = [[[UIView alloc] initWithFrame:CGRectMake(0.0f, 6.0f, switchWidth, 36.0f)] autorelease];
+    track.backgroundColor = VCCellBackgroundColor();
+    track.layer.cornerRadius = 10.0f;
+    track.layer.borderWidth = 1.0f;
+    track.layer.borderColor = VCSeparatorColor().CGColor;
+    track.autoresizingMask = UIViewAutoresizingFlexibleWidth;
+    [header addSubview:track];
 
-    BOOL expanded = (section == 0) ? _configurationsSectionExpanded : _subscriptionsSectionExpanded;
-    UIButton *button = [UIButton buttonWithType:UIButtonTypeCustom];
-    button.frame = CGRectMake(10.0f, 5.0f, width - 20.0f, 36.0f);
-    button.tag = kVCMainSectionHeaderButtonTagBase + section;
-    button.autoresizingMask = UIViewAutoresizingFlexibleWidth;
-    button.contentHorizontalAlignment = UIControlContentHorizontalAlignmentLeft;
-    button.contentEdgeInsets = UIEdgeInsetsMake(0.0f, 14.0f, 0.0f, 132.0f);
-    button.titleLabel.font = [UIFont boldSystemFontOfSize:15.0f];
-    [button setTitle:[self tableView:tableView titleForHeaderInSection:section] forState:UIControlStateNormal];
-    [button setTitleColor:VCSecondaryTextColor() forState:UIControlStateNormal];
-    [button setTitleColor:VCPrimaryTextColor() forState:UIControlStateHighlighted];
-    [button setTitleShadowColor:(VCAppearanceIsDark() ? [UIColor clearColor]
-                                                       : [UIColor colorWithWhite:1.0f alpha:0.85f])
-                       forState:UIControlStateNormal];
-    button.titleLabel.shadowOffset = VCAppearanceIsDark() ? CGSizeZero : CGSizeMake(0.0f, 1.0f);
-    [button setBackgroundImage:SolidImageWithColor(VCCellBackgroundColor()) forState:UIControlStateNormal];
-    [button setBackgroundImage:SolidImageWithColor(VCSelectedCellColor()) forState:UIControlStateHighlighted];
-    button.layer.cornerRadius = 7.0f;
-    button.layer.borderWidth = 1.0f;
-    button.layer.borderColor = VCSeparatorColor().CGColor;
-    button.layer.masksToBounds = YES;
-    button.accessibilityLabel = (section == 0) ? @"Configurations" : @"Subscriptions";
-    button.accessibilityValue = expanded ? @"Expanded" : @"Collapsed";
-    button.accessibilityHint = expanded ? @"Double tap to collapse" : @"Double tap to expand";
-    [button addTarget:self action:@selector(mainSectionHeaderPressed:) forControlEvents:UIControlEventTouchUpInside];
+    for (NSInteger tab = 0; tab < 2; tab++) {
+        CGFloat tabWidth = switchWidth * 0.5f;
+        UIButton *button = [UIButton buttonWithType:UIButtonTypeCustom];
+        button.frame = CGRectMake(1.0f + tab * (tabWidth - 1.0f), 1.0f,
+                                  tabWidth - 1.0f, 34.0f);
+        button.tag = kVCMainSectionHeaderButtonTagBase + tab;
+        button.autoresizingMask = tab == 0 ? UIViewAutoresizingFlexibleRightMargin
+                                           : UIViewAutoresizingFlexibleLeftMargin;
+        button.titleLabel.font = [UIFont boldSystemFontOfSize:11.5f];
+        button.titleLabel.adjustsFontSizeToFitWidth = YES;
+        button.titleLabel.minimumScaleFactor = 0.85f;
+        button.titleEdgeInsets = UIEdgeInsetsMake(0.0f, 2.0f, 0.0f, 26.0f);
+        [button setTitle:tab == 0 ? @"Configurations" : @"Subscriptions"
+                forState:UIControlStateNormal];
+        button.layer.cornerRadius = 9.0f;
+        button.layer.borderWidth = 1.0f;
+        button.layer.masksToBounds = YES;
+        button.accessibilityLabel = tab == 0 ? @"Configurations" : @"Subscriptions";
+        [button addTarget:self action:@selector(mainTabPressed:)
+         forControlEvents:UIControlEventTouchUpInside];
+        UILongPressGestureRecognizer *longPress = [[[UILongPressGestureRecognizer alloc]
+            initWithTarget:self action:@selector(mainTabLongPressed:)] autorelease];
+        longPress.minimumPressDuration = 0.5;
+        [button addGestureRecognizer:longPress];
 
-    UILabel *countLabel = [[[UILabel alloc] initWithFrame:CGRectMake(button.bounds.size.width - 116.0f,
-                                                                      7.0f,
-                                                                      42.0f,
-                                                                      22.0f)] autorelease];
-    countLabel.tag = kVCMainSectionHeaderCountTagBase + section;
-    countLabel.autoresizingMask = UIViewAutoresizingFlexibleLeftMargin;
-    countLabel.backgroundColor = VCAppearanceIsDark()
-        ? [UIColor colorWithWhite:0.24f alpha:1.0f]
-        : [UIColor colorWithWhite:0.90f alpha:1.0f];
-    countLabel.textColor = VCSecondaryTextColor();
-    countLabel.font = [UIFont boldSystemFontOfSize:12.0f];
-    countLabel.textAlignment = NSTextAlignmentCenter;
-    countLabel.adjustsFontSizeToFitWidth = YES;
-    countLabel.minimumScaleFactor = 0.67f;
-    countLabel.layer.cornerRadius = 11.0f;
-    countLabel.layer.masksToBounds = YES;
-    NSUInteger count = (section == 0) ? [_configs count] : [_subscriptions count];
-    countLabel.text = [NSString stringWithFormat:@"%lu", (unsigned long)count];
-    [button addSubview:countLabel];
-
-    UIImageView *chevron = [[[UIImageView alloc] initWithFrame:CGRectMake(button.bounds.size.width - 30.0f,
-                                                                          10.0f,
-                                                                          16.0f,
-                                                                          16.0f)] autorelease];
-    chevron.tag = kVCMainSectionHeaderChevronTagBase + section;
-    chevron.image = TintImageWithColor(MakeIconImage(expanded ? VCIconTypeChevronDown
-                                                              : VCIconTypeChevronRight,
-                                                     16.0f,
-                                                     NO),
-                                        VCSecondaryTextColor());
-    chevron.autoresizingMask = UIViewAutoresizingFlexibleLeftMargin |
-                               UIViewAutoresizingFlexibleTopMargin |
-                               UIViewAutoresizingFlexibleBottomMargin;
-    [button addSubview:chevron];
-    [header addSubview:button];
-
-    UIButton *orderButton = [UIButton buttonWithType:UIButtonTypeCustom];
-    orderButton.frame = CGRectMake(width - 74.0f, 11.0f, 24.0f, 24.0f);
-    orderButton.tag = kVCMainSectionHeaderOrderButtonTagBase + section;
-    orderButton.autoresizingMask = UIViewAutoresizingFlexibleLeftMargin;
-    BOOL reordering = (_reorderingSection == section);
-    VCIconType orderIconType = reordering ? VCIconTypeCheck : VCIconTypeReorder;
-    [orderButton setImage:TintImageWithColor(MakeIconImage(orderIconType, 17.0f, reordering),
-                                             reordering ? VCAccentColor() : VCSecondaryTextColor())
-                  forState:UIControlStateNormal];
-    [orderButton setImage:TintImageWithColor(MakeIconImage(orderIconType, 17.0f, reordering),
-                                             VCPrimaryTextColor())
-                  forState:UIControlStateHighlighted];
-    orderButton.hidden = count < 2;
-    if (reordering) {
-        orderButton.accessibilityLabel = (section == 0) ? @"Finish reordering configurations" : @"Finish reordering subscriptions";
-        orderButton.accessibilityHint = @"Saves the current order";
-    } else {
-        orderButton.accessibilityLabel = (section == 0) ? @"Reorder configurations" : @"Reorder subscriptions";
-        orderButton.accessibilityHint = @"Shows drag handles in this list";
+        UIButton *countBadge = [UIButton buttonWithType:UIButtonTypeCustom];
+        countBadge.frame = CGRectMake(button.bounds.size.width - 28.0f, 8.0f, 23.0f, 18.0f);
+        countBadge.tag = kVCMainSectionHeaderCountTagBase + tab;
+        countBadge.userInteractionEnabled = NO;
+        countBadge.titleLabel.font = [UIFont boldSystemFontOfSize:11.0f];
+        countBadge.titleLabel.adjustsFontSizeToFitWidth = YES;
+        countBadge.titleLabel.minimumScaleFactor = 0.65f;
+        countBadge.layer.cornerRadius = 9.0f;
+        [button addSubview:countBadge];
+        [self updateMainTabButton:button section:tab];
+        [track addSubview:button];
     }
-    [orderButton addTarget:self action:@selector(mainSectionOrderPressed:) forControlEvents:UIControlEventTouchUpInside];
-    [header addSubview:orderButton];
 
-    VCAppearanceApplyHeaderView(header);
     return header;
 }
 
-- (void)updateMainSectionHeaderButton:(UIButton *)button section:(NSInteger)section animated:(BOOL)animated {
+- (void)updateMainTabButton:(UIButton *)button section:(NSInteger)section {
     if (!button || section < 0 || section > 1) return;
 
-    BOOL expanded = [self isMainSectionExpanded:section];
-    button.accessibilityValue = expanded ? @"Expanded" : @"Collapsed";
-    button.accessibilityHint = expanded ? @"Double tap to collapse" : @"Double tap to expand";
+    BOOL selected = [self isMainTabSelected:section];
+    button.accessibilityValue = selected ? @"Selected" : @"Not selected";
+    button.accessibilityHint = selected
+        ? (_reorderingSection == section ? @"Long press again to save the order"
+                                          : @"Long press to reorder this list")
+        : @"Shows this list";
+    button.backgroundColor = selected ? [VCAccentColor() colorWithAlphaComponent:0.28f] : [UIColor clearColor];
+    button.layer.borderColor = selected ? VCAccentColor().CGColor : [UIColor clearColor].CGColor;
+    [button setTitleColor:selected ? VCPrimaryTextColor() : VCSecondaryTextColor()
+                forState:UIControlStateNormal];
 
-    UILabel *countLabel = (UILabel *)[button viewWithTag:(kVCMainSectionHeaderCountTagBase + section)];
+    UIButton *countLabel = (UIButton *)[button viewWithTag:(kVCMainSectionHeaderCountTagBase + section)];
     NSUInteger count = (section == 0) ? [_configs count] : [_subscriptions count];
-    countLabel.text = [NSString stringWithFormat:@"%lu", (unsigned long)count];
-
-    UIImageView *chevron = (UIImageView *)[button viewWithTag:(kVCMainSectionHeaderChevronTagBase + section)];
-    UIImage *image = TintImageWithColor(MakeIconImage(expanded ? VCIconTypeChevronDown
-                                                               : VCIconTypeChevronRight,
-                                                      16.0f,
-                                                      NO),
-                                         VCSecondaryTextColor());
-    if (animated) {
-        [UIView transitionWithView:chevron
-                          duration:0.16
-                           options:(UIViewAnimationOptionTransitionCrossDissolve |
-                                    UIViewAnimationOptionBeginFromCurrentState)
-                        animations:^{
-                            chevron.image = image;
-                        }
-                        completion:nil];
-    } else {
-        chevron.image = image;
-    }
+    [countLabel setTitle:[NSString stringWithFormat:@"%lu", (unsigned long)count]
+                forState:UIControlStateNormal];
+    countLabel.backgroundColor = selected ? VCAccentColor()
+                                          : [VCSecondaryTextColor() colorWithAlphaComponent:0.18f];
+    [countLabel setTitleColor:selected ? [UIColor whiteColor] : VCSecondaryTextColor()
+                    forState:UIControlStateNormal];
 }
 
-- (void)updateMainSectionHeaderView:(UIView *)header section:(NSInteger)section animated:(BOOL)animated {
-    if (!header || section < 0 || section > 1) return;
+- (void)updateMainSwitcherView:(UIView *)header {
+    if (!header) return;
 
-    UIButton *button = (UIButton *)[header viewWithTag:(kVCMainSectionHeaderButtonTagBase + section)];
-    [self updateMainSectionHeaderButton:button section:section animated:animated];
-
-    UIButton *orderButton = (UIButton *)[header viewWithTag:(kVCMainSectionHeaderOrderButtonTagBase + section)];
-    NSUInteger count = (section == 0) ? [_configs count] : [_subscriptions count];
-    BOOL reordering = (_reorderingSection == section);
-    VCIconType orderIconType = reordering ? VCIconTypeCheck : VCIconTypeReorder;
-    orderButton.hidden = count < 2;
-    [orderButton setImage:TintImageWithColor(MakeIconImage(orderIconType, 17.0f, reordering),
-                                             reordering ? VCAccentColor() : VCSecondaryTextColor())
-                  forState:UIControlStateNormal];
-    [orderButton setImage:TintImageWithColor(MakeIconImage(orderIconType, 17.0f, reordering),
-                                             VCPrimaryTextColor())
-                  forState:UIControlStateHighlighted];
-    if (reordering) {
-        orderButton.accessibilityLabel = (section == 0) ? @"Finish reordering configurations" : @"Finish reordering subscriptions";
-        orderButton.accessibilityHint = @"Saves the current order";
-    } else {
-        orderButton.accessibilityLabel = (section == 0) ? @"Reorder configurations" : @"Reorder subscriptions";
-        orderButton.accessibilityHint = @"Shows drag handles in this list";
+    UIButton *firstButton = (UIButton *)[header viewWithTag:kVCMainSectionHeaderButtonTagBase];
+    UIView *track = firstButton.superview;
+    CGFloat switchWidth = header.bounds.size.width;
+    track.frame = CGRectMake(0.0f, 6.0f, switchWidth, 36.0f);
+    track.backgroundColor = VCCellBackgroundColor();
+    track.layer.borderColor = VCSeparatorColor().CGColor;
+    for (NSInteger tab = 0; tab < 2; tab++) {
+        UIButton *button = (UIButton *)[header viewWithTag:(kVCMainSectionHeaderButtonTagBase + tab)];
+        CGFloat tabWidth = switchWidth * 0.5f;
+        button.frame = CGRectMake(1.0f + tab * (tabWidth - 1.0f), 1.0f,
+                                  tabWidth - 1.0f, 34.0f);
+        UIButton *badge = (UIButton *)[button viewWithTag:(kVCMainSectionHeaderCountTagBase + tab)];
+        badge.frame = CGRectMake(button.bounds.size.width - 28.0f, 8.0f, 23.0f, 18.0f);
+        [self updateMainTabButton:button section:tab];
     }
-}
-
-- (void)finishMainSectionTransition:(NSNumber *)transitionNumber {
-    if ([transitionNumber unsignedIntegerValue] != _mainSectionTransitionToken) return;
-    if (!_mainSectionTransitionInProgress) return;
-
-    [self completeMainTableStructuralTransition];
-    VCAppearanceRefreshVisibleTableHeaders(_tableView);
-    [self refreshStickyMainSectionHeader];
 }
 
 - (void)reloadMainTableDataAfterExternalChange {
@@ -16444,8 +16546,7 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
     [self updateMainEmptyState];
     [self completeMainTableStructuralTransition];
     _tableView.userInteractionEnabled = YES;
-    VCAppearanceRefreshVisibleTableHeaders(_tableView);
-    [self refreshStickyMainSectionHeader];
+    [self refreshMainSwitcher];
 }
 
 - (void)configureSubscriptionHeaderCell:(UITableViewCell *)cell atIndex:(NSInteger)index {
@@ -16529,80 +16630,14 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
     }
 }
 
-- (UIView *)tableView:(UITableView *)tableView viewForHeaderInSection:(NSInteger)section {
-    if (![self mainSectionHasItems:section]) return nil;
-    return [self mainSectionHeaderViewForTable:tableView section:section];
-}
-
-- (BOOL)isMainSectionExpanded:(NSInteger)section {
-    if (![self mainSectionHasItems:section]) return NO;
+- (BOOL)isMainTabSelected:(NSInteger)section {
     if (section == 0) return _configurationsSectionExpanded;
     if (section == 1) return _subscriptionsSectionExpanded;
     return NO;
 }
 
-- (void)removeStickyMainSectionHeader {
-    [_stickySectionHeaderView removeFromSuperview];
-    [_stickySectionHeaderView release];
-    _stickySectionHeaderView = nil;
-    _stickySectionHeaderSection = -1;
-}
-
-- (void)layoutStickyMainSectionHeader {
-    if (!_stickySectionHeaderView || !_tableView) return;
-
-    _stickySectionHeaderView.frame = CGRectMake(_tableView.frame.origin.x,
-                                                 _tableView.frame.origin.y,
-                                                 _tableView.frame.size.width,
-                                                 kVCMainSectionHeaderHeight);
-    [self.view bringSubviewToFront:_stickySectionHeaderView];
-}
-
-- (NSInteger)stickyMainSectionForCurrentOffset {
-    if (!_tableView || _showingTerminal || _tableView.hidden) return -1;
-
-    CGFloat top = _tableView.contentOffset.y;
-    NSInteger stickySection = -1;
-    for (NSInteger section = 0; section < 2; section++) {
-        if (![self isMainSectionExpanded:section]) continue;
-        CGRect headerRect = [_tableView rectForHeaderInSection:section];
-        if (top > CGRectGetMinY(headerRect)) {
-            stickySection = section;
-        }
-    }
-    return stickySection;
-}
-
-- (void)updateStickyMainSectionHeader {
-    if (_mainSectionTransitionInProgress) {
-        [self layoutStickyMainSectionHeader];
-        return;
-    }
-
-    NSInteger section = [self stickyMainSectionForCurrentOffset];
-    if (section < 0) {
-        [self removeStickyMainSectionHeader];
-        return;
-    }
-
-    if (_stickySectionHeaderView && _stickySectionHeaderSection == section) {
-        [self updateMainSectionHeaderView:_stickySectionHeaderView section:section animated:NO];
-        [self layoutStickyMainSectionHeader];
-        return;
-    }
-
-    [self removeStickyMainSectionHeader];
-    _stickySectionHeaderView = [[self mainSectionHeaderViewForTable:_tableView section:section] retain];
-    _stickySectionHeaderView.backgroundColor = VCBackgroundColor();
-    _stickySectionHeaderView.autoresizingMask = UIViewAutoresizingFlexibleWidth;
-    _stickySectionHeaderSection = section;
-    [self.view addSubview:_stickySectionHeaderView];
-    [self layoutStickyMainSectionHeader];
-}
-
-- (void)refreshStickyMainSectionHeader {
-    [self removeStickyMainSectionHeader];
-    [self updateStickyMainSectionHeader];
+- (void)refreshMainSwitcher {
+    [self updateMainSwitcherView:_mainSwitchView];
 }
 
 - (BOOL)tableView:(UITableView *)tableView canEditRowAtIndexPath:(NSIndexPath *)indexPath {
@@ -16969,8 +17004,8 @@ moveRowAtIndexPath:(NSIndexPath *)sourceIndexPath
     NSString *cellID = @"VCItemCell";
 
     if (indexPath.section == 0) {
-        firstItem = (indexPath.row == 0);
-        lastItem = (indexPath.row == (NSInteger)[_configs count] - 1);
+        firstItem = (_reorderingSection == 0 || indexPath.row == 0);
+        lastItem = (_reorderingSection == 0 || indexPath.row == (NSInteger)[_configs count] - 1);
         active = (_selectedConfigIndex == indexPath.row);
         cellID = @"VCConfigurationItemCell";
     } else if (indexPath.section == 1 &&
@@ -17087,20 +17122,10 @@ moveRowAtIndexPath:(NSIndexPath *)sourceIndexPath
     [self scheduleMainMarqueeRelayout];
 }
 
-- (void)tableView:(UITableView *)tableView willDisplayHeaderView:(UIView *)view forSection:(NSInteger)section {
-    (void)tableView;
-    if (![self mainSectionHasItems:section]) return;
-    [self updateMainSectionHeaderView:view section:section animated:NO];
-    VCAppearanceApplyHeaderView(view);
-    VCAppearanceScheduleVisibleTableHeadersRefresh(tableView);
-    [self updateStickyMainSectionHeader];
-}
-
 - (void)scrollViewDidScroll:(UIScrollView *)scrollView {
     if (scrollView == _tableView) {
         [self stabilizeMainTableOffsetDuringStructuralTransition];
         [self updatePhoneConnectionLayout];
-        [self updateStickyMainSectionHeader];
     }
 }
 
@@ -17137,7 +17162,7 @@ moveRowAtIndexPath:(NSIndexPath *)sourceIndexPath
     if (scrollView == _tableView) {
         [self snapPhoneConnectionLayoutIfNeededAnimated:YES];
         [self scheduleMainMarqueeRelayout];
-        [self recordMainLayoutEvent:@"Main list scroll ended" section:-1];
+        [self recordMainLayoutEvent:@"Main list scroll ended"];
     } else if (scrollView == _logView) {
         [self rememberActiveLogPosition];
         [self refreshLogs];
@@ -17156,7 +17181,7 @@ moveRowAtIndexPath:(NSIndexPath *)sourceIndexPath
                 [self snapPhoneConnectionLayoutIfNeededAnimated:YES];
             }
             [self scheduleMainMarqueeRelayout];
-            [self recordMainLayoutEvent:@"Main list drag ended" section:-1];
+            [self recordMainLayoutEvent:@"Main list drag ended"];
         }
         _mainTableDragStartOffsetValid = NO;
     } else if (scrollView == _logView && !decelerate) {
@@ -17168,7 +17193,6 @@ moveRowAtIndexPath:(NSIndexPath *)sourceIndexPath
 - (void)scrollViewDidEndScrollingAnimation:(UIScrollView *)scrollView {
     if (scrollView != _tableView) return;
     [self updatePhoneConnectionLayout];
-    [self updateStickyMainSectionHeader];
     [self scheduleMainMarqueeRelayout];
 }
 
@@ -17326,7 +17350,7 @@ moveRowAtIndexPath:(NSIndexPath *)sourceIndexPath
             }
             [self completeMainTableStructuralTransition];
             [self refreshVisibleSubscriptionHeaderAccessories];
-            [self refreshStickyMainSectionHeader];
+            [self refreshMainSwitcher];
             [CATransaction commit];
             [UIView setAnimationsEnabled:animationsWereEnabled];
             [oldURI release];
@@ -17352,7 +17376,7 @@ moveRowAtIndexPath:(NSIndexPath *)sourceIndexPath
             if (transitionToken != _mainSectionTransitionToken) return;
             [self completeMainTableStructuralTransition];
             [self refreshVisibleSubscriptionHeaderAccessories];
-            [self refreshStickyMainSectionHeader];
+            [self refreshMainSwitcher];
         }];
 
         [_tableView beginUpdates];
