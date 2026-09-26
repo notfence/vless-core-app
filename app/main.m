@@ -954,7 +954,135 @@ static NSString *SyncRoutingPolicyToDaemon(void) {
     return SendCommand([NSString stringWithFormat:@"ROUTING\t%@\n", RoutingPolicyText()]);
 }
 
-static int ConnectLatencyMs(const char *host, uint16_t port, int timeout_ms, int *latency_ms) {
+@interface VCPingCancellation : NSObject {
+    NSLock *_lock;
+    BOOL _cancelled;
+    int _socket;
+    pid_t _child;
+    NSString *_previousDisplay;
+}
+@property(nonatomic, copy) NSString *previousDisplay;
+- (BOOL)isCancelled;
+- (void)cancel;
+- (BOOL)registerSocket:(int)fd;
+- (void)closeSocket:(int)fd;
+- (void)registerChild:(pid_t)pid;
+- (pid_t)pollChild:(pid_t)pid;
+- (void)forgetChild:(pid_t)pid;
+@end
+
+@implementation VCPingCancellation
+@synthesize previousDisplay = _previousDisplay;
+- (id)init {
+    self = [super init];
+    if (self) {
+        _lock = [[NSLock alloc] init];
+        _socket = -1;
+    }
+    return self;
+}
+- (void)dealloc {
+    [_previousDisplay release];
+    [_lock release];
+    [super dealloc];
+}
+- (BOOL)isCancelled {
+    [_lock lock];
+    BOOL cancelled = _cancelled;
+    [_lock unlock];
+    return cancelled;
+}
+- (void)cancel {
+    [_lock lock];
+    _cancelled = YES;
+    if (_socket >= 0) shutdown(_socket, SHUT_RDWR);
+    if (_child > 0) kill(_child, SIGTERM);
+    [_lock unlock];
+}
+- (BOOL)registerSocket:(int)fd {
+    [_lock lock];
+    BOOL accepted = !_cancelled;
+    if (accepted) _socket = fd;
+    [_lock unlock];
+    if (!accepted) close(fd);
+    return accepted;
+}
+- (void)closeSocket:(int)fd {
+    [_lock lock];
+    if (_socket == fd) _socket = -1;
+    close(fd);
+    [_lock unlock];
+}
+- (void)registerChild:(pid_t)pid {
+    [_lock lock];
+    _child = pid;
+    if (_cancelled) kill(pid, SIGTERM);
+    [_lock unlock];
+}
+- (pid_t)pollChild:(pid_t)pid {
+    [_lock lock];
+    pid_t result = waitpid(pid, NULL, WNOHANG);
+    if (result == pid || (result < 0 && errno == ECHILD)) _child = 0;
+    [_lock unlock];
+    return result;
+}
+- (void)forgetChild:(pid_t)pid {
+    [_lock lock];
+    if (_child == pid) _child = 0;
+    [_lock unlock];
+}
+@end
+
+@interface VCPingOperation : NSInvocationOperation {
+    VCPingCancellation *_cancellation;
+}
+- (id)initWithTarget:(id)target payload:(NSDictionary *)payload cancellation:(VCPingCancellation *)cancellation;
+@end
+
+@implementation VCPingOperation
+- (id)initWithTarget:(id)target payload:(NSDictionary *)payload cancellation:(VCPingCancellation *)cancellation {
+    self = [super initWithTarget:target selector:@selector(pingWorker:) object:payload];
+    if (self) _cancellation = [cancellation retain];
+    return self;
+}
+- (void)cancel {
+    [_cancellation cancel];
+    [super cancel];
+}
+- (void)dealloc {
+    [_cancellation release];
+    [super dealloc];
+}
+@end
+
+static void VCClosePingSocket(int fd, VCPingCancellation *cancellation) {
+    if (cancellation) [cancellation closeSocket:fd];
+    else close(fd);
+}
+
+static int VCWaitForPingSocket(int fd, BOOL writable, int timeout_ms, VCPingCancellation *cancellation) {
+    struct timeval start, now;
+    gettimeofday(&start, NULL);
+    int remaining = timeout_ms;
+    while (remaining > 0 && ![cancellation isCancelled]) {
+        fd_set fds;
+        FD_ZERO(&fds);
+        FD_SET(fd, &fds);
+        int slice = cancellation ? MIN(remaining, 100) : remaining;
+        struct timeval timeout = {slice / 1000, (slice % 1000) * 1000};
+        int result = select(fd + 1, writable ? NULL : &fds, writable ? &fds : NULL, NULL, &timeout);
+        if ([cancellation isCancelled]) return -1;
+        if (result > 0) return result;
+        if (result < 0 && errno != EINTR) return -1;
+        gettimeofday(&now, NULL);
+        remaining = timeout_ms - (int)((now.tv_sec - start.tv_sec) * 1000L +
+                                     (now.tv_usec - start.tv_usec) / 1000L);
+    }
+    return 0;
+}
+
+static int ConnectLatencyMs(const char *host, uint16_t port, int timeout_ms, int *latency_ms,
+                            VCPingCancellation *cancellation) {
     if (!host || !*host) return -1;
 
     char port_str[16];
@@ -971,9 +1099,10 @@ static int ConnectLatencyMs(const char *host, uint16_t port, int timeout_ms, int
     }
 
     int rc_out = -3;
-    for (struct addrinfo *ai = res; ai; ai = ai->ai_next) {
+    for (struct addrinfo *ai = res; ai && ![cancellation isCancelled]; ai = ai->ai_next) {
         int fd = socket(ai->ai_family, ai->ai_socktype, ai->ai_protocol);
         if (fd < 0) continue;
+        if (cancellation && ![cancellation registerSocket:fd]) break;
 
         int flags = fcntl(fd, F_GETFL, 0);
         if (flags >= 0) {
@@ -984,18 +1113,12 @@ static int ConnectLatencyMs(const char *host, uint16_t port, int timeout_ms, int
         gettimeofday(&t0, NULL);
         int cr = connect(fd, ai->ai_addr, ai->ai_addrlen);
         if (cr != 0 && errno != EINPROGRESS) {
-            close(fd);
+            VCClosePingSocket(fd, cancellation);
             continue;
         }
 
-        fd_set wfds;
-        FD_ZERO(&wfds);
-        FD_SET(fd, &wfds);
-        struct timeval tv;
-        tv.tv_sec = timeout_ms / 1000;
-        tv.tv_usec = (timeout_ms % 1000) * 1000;
-        int sr = select(fd + 1, NULL, &wfds, NULL, &tv);
-        if (sr > 0 && FD_ISSET(fd, &wfds)) {
+        int sr = VCWaitForPingSocket(fd, YES, timeout_ms, cancellation);
+        if (sr > 0) {
             int soerr = 0;
             socklen_t sl = (socklen_t)sizeof(soerr);
             if (getsockopt(fd, SOL_SOCKET, SO_ERROR, &soerr, &sl) == 0 && soerr == 0) {
@@ -1004,25 +1127,26 @@ static int ConnectLatencyMs(const char *host, uint16_t port, int timeout_ms, int
                 if (ms < 0) ms = 0;
                 if (latency_ms) *latency_ms = (int)ms;
                 rc_out = 0;
-                close(fd);
+                VCClosePingSocket(fd, cancellation);
                 break;
             }
         }
 
-        close(fd);
+        VCClosePingSocket(fd, cancellation);
     }
 
     freeaddrinfo(res);
     return rc_out;
 }
 
-static int ConnectLatencyBestOfNMs(const char *host, uint16_t port, int timeout_ms, int attempts, int *latency_ms) {
+static int ConnectLatencyBestOfNMs(const char *host, uint16_t port, int timeout_ms, int attempts, int *latency_ms,
+                                   VCPingCancellation *cancellation) {
     if (attempts <= 0) attempts = 1;
 
     int best = -1;
-    for (int i = 0; i < attempts; i++) {
+    for (int i = 0; i < attempts && ![cancellation isCancelled]; i++) {
         int ms = 0;
-        if (ConnectLatencyMs(host, port, timeout_ms, &ms) == 0) {
+        if (ConnectLatencyMs(host, port, timeout_ms, &ms, cancellation) == 0) {
             if (best < 0 || ms < best) best = ms;
         }
     }
@@ -1088,9 +1212,12 @@ static int pick_free_loopback_port(void) {
     return (int)ntohs(sa.sin_port);
 }
 
-static int connect_loopback_port(uint16_t port, int timeout_ms) {
+static int connect_loopback_port(uint16_t port, int timeout_ms, VCPingCancellation *cancellation) {
     int fd = socket(AF_INET, SOCK_STREAM, 0);
     if (fd < 0) return -1;
+    if (cancellation && ![cancellation registerSocket:fd]) return -1;
+    int no_sigpipe = 1;
+    setsockopt(fd, SOL_SOCKET, SO_NOSIGPIPE, &no_sigpipe, sizeof(no_sigpipe));
 
     struct timeval tv;
     tv.tv_sec = timeout_ms / 1000;
@@ -1105,22 +1232,21 @@ static int connect_loopback_port(uint16_t port, int timeout_ms) {
     sa.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
 
     if (connect(fd, (struct sockaddr *)&sa, sizeof(sa)) != 0) {
-        close(fd);
+        VCClosePingSocket(fd, cancellation);
         return -1;
     }
     return fd;
 }
 
-static int wait_for_loopback_listener(uint16_t port, pid_t pid, int timeout_ms) {
+static int wait_for_loopback_listener(uint16_t port, pid_t pid, int timeout_ms, VCPingCancellation *cancellation) {
     int waited = 0;
-    while (waited < timeout_ms) {
+    while (waited < timeout_ms && ![cancellation isCancelled]) {
         int ms = 0;
-        if (ConnectLatencyMs("127.0.0.1", port, 250, &ms) == 0) {
+        if (ConnectLatencyMs("127.0.0.1", port, 250, &ms, cancellation) == 0) {
             return 0;
         }
         if (pid > 0) {
-            int st = 0;
-            pid_t wr = waitpid(pid, &st, WNOHANG);
+            pid_t wr = [cancellation pollChild:pid];
             if (wr == pid) return -2;
         }
         usleep(100 * 1000);
@@ -1275,7 +1401,7 @@ static int socks5_connect_domain(int fd, const char *host, uint16_t port) {
 }
 
 static int TunnelConnectOnceMs(uint16_t local_port, int timeout_ms, int *latency_ms) {
-    int fd = connect_loopback_port(local_port, timeout_ms);
+    int fd = connect_loopback_port(local_port, timeout_ms, nil);
     if (fd < 0) return -1;
 
     struct timeval t0, t1;
@@ -1294,8 +1420,9 @@ static int TunnelConnectOnceMs(uint16_t local_port, int timeout_ms, int *latency
     return 0;
 }
 
-static int ProxyGetConnectOnceMs(uint16_t local_port, int timeout_ms, int *latency_ms) {
-    int fd = connect_loopback_port(local_port, timeout_ms);
+static int ProxyGetConnectOnceMs(uint16_t local_port, int timeout_ms, int *latency_ms,
+                                 VCPingCancellation *cancellation) {
+    int fd = connect_loopback_port(local_port, timeout_ms, cancellation);
     if (fd < 0) {
         return -1;
     }
@@ -1305,14 +1432,14 @@ static int ProxyGetConnectOnceMs(uint16_t local_port, int timeout_ms, int *laten
 
     if (socks5_connect_domain(fd, kVCProxyPingHost, kVCProxyPingPort) != 0 ||
         write_all(fd, kVCProxyPingRequest, strlen(kVCProxyPingRequest)) != 0) {
-        close(fd);
+        VCClosePingSocket(fd, cancellation);
         return -2;
     }
 
     char response[512];
     size_t response_len = 0;
     BOOL got_first_byte = NO;
-    while (response_len + 1 < sizeof(response)) {
+    while (response_len + 1 < sizeof(response) && ![cancellation isCancelled]) {
         ssize_t rd = read(fd, response + response_len, sizeof(response) - response_len - 1);
         if (rd < 0 && errno == EINTR) continue;
         if (rd <= 0) break;
@@ -1324,7 +1451,7 @@ static int ProxyGetConnectOnceMs(uint16_t local_port, int timeout_ms, int *laten
         response[response_len] = '\0';
         if (strstr(response, "\r\n") != NULL) break;
     }
-    close(fd);
+    VCClosePingSocket(fd, cancellation);
 
     if (!got_first_byte || response_len < 5 || strncmp(response, "HTTP/", 5) != 0) {
         return -3;
@@ -1337,8 +1464,9 @@ static int ProxyGetConnectOnceMs(uint16_t local_port, int timeout_ms, int *laten
 }
 
 static int ProxyGetViaTempCoreMs(const char *uri, const char *xray_version,
-                                 int timeout_ms, int attempts, int *latency_ms) {
-    if (!uri || !*uri) return -1;
+                                 int timeout_ms, int attempts, int *latency_ms,
+                                 VCPingCancellation *cancellation) {
+    if (!uri || !*uri || [cancellation isCancelled]) return -1;
     if (attempts <= 0) attempts = 1;
 
     int port = pick_free_loopback_port();
@@ -1346,20 +1474,23 @@ static int ProxyGetViaTempCoreMs(const char *uri, const char *xray_version,
 
     pid_t pid = spawn_temp_core_for_ping(uri, (uint16_t)port, xray_version);
     if (pid <= 0) return -3;
+    [cancellation registerChild:pid];
 
     int rc = -4;
-    if (wait_for_loopback_listener((uint16_t)port, pid, 6000) != 0) {
+    if (wait_for_loopback_listener((uint16_t)port, pid, 6000, cancellation) != 0) {
+        [cancellation forgetChild:pid];
         stop_child_process(pid);
         return rc;
     }
 
     int best = -1;
-    for (int i = 0; i < attempts; i++) {
+    for (int i = 0; i < attempts && ![cancellation isCancelled]; i++) {
         int ms = 0;
-        if (ProxyGetConnectOnceMs((uint16_t)port, timeout_ms, &ms) == 0) {
+        if (ProxyGetConnectOnceMs((uint16_t)port, timeout_ms, &ms, cancellation) == 0) {
             if (best < 0 || ms < best) best = ms;
         }
     }
+    [cancellation forgetChild:pid];
     stop_child_process(pid);
 
     if (best < 0) {
@@ -1393,7 +1524,8 @@ static uint16_t ICMPChecksum(const void *bytes, size_t length) {
 static int ICMPLatencyOnceMs(const struct sockaddr_in *target,
                              int timeout_ms,
                              uint16_t sequence,
-                             int *latency_ms) {
+                             int *latency_ms,
+                             VCPingCancellation *cancellation) {
     if (!target) return -1;
 
     int fd = socket(AF_INET, SOCK_DGRAM, IPPROTO_ICMP);
@@ -1401,6 +1533,7 @@ static int ICMPLatencyOnceMs(const struct sockaddr_in *target,
         fd = socket(AF_INET, SOCK_RAW, IPPROTO_ICMP);
     }
     if (fd < 0) return -2;
+    if (cancellation && ![cancellation registerSocket:fd]) return -2;
 
     unsigned char packet[24];
     memset(packet, 0, sizeof(packet));
@@ -1424,19 +1557,13 @@ static int ICMPLatencyOnceMs(const struct sockaddr_in *target,
                           (const struct sockaddr *)target,
                           (socklen_t)sizeof(*target));
     if (sent != (ssize_t)sizeof(packet)) {
-        close(fd);
+        VCClosePingSocket(fd, cancellation);
         return -3;
     }
 
-    fd_set rfds;
-    FD_ZERO(&rfds);
-    FD_SET(fd, &rfds);
-    struct timeval timeout;
-    timeout.tv_sec = timeout_ms / 1000;
-    timeout.tv_usec = (timeout_ms % 1000) * 1000;
-    int selected = select(fd + 1, &rfds, NULL, NULL, &timeout);
-    if (selected <= 0 || !FD_ISSET(fd, &rfds)) {
-        close(fd);
+    int selected = VCWaitForPingSocket(fd, NO, timeout_ms, cancellation);
+    if (selected <= 0) {
+        VCClosePingSocket(fd, cancellation);
         return -4;
     }
 
@@ -1450,7 +1577,7 @@ static int ICMPLatencyOnceMs(const struct sockaddr_in *target,
                                 (struct sockaddr *)&source,
                                 &source_len);
     gettimeofday(&t1, NULL);
-    close(fd);
+    VCClosePingSocket(fd, cancellation);
     if (received < 8 || source.sin_addr.s_addr != target->sin_addr.s_addr) return -5;
 
     size_t offset = 0;
@@ -1473,7 +1600,8 @@ static int ICMPLatencyOnceMs(const struct sockaddr_in *target,
 static int ICMPLatencyBestOfNMs(const char *host,
                                 int timeout_ms,
                                 int attempts,
-                                int *latency_ms) {
+                                int *latency_ms,
+                                VCPingCancellation *cancellation) {
     if (!host || !*host) return -1;
     if (attempts <= 0) attempts = 1;
 
@@ -1494,10 +1622,10 @@ static int ICMPLatencyBestOfNMs(const char *host,
     gettimeofday(&sequence_time, NULL);
     uint16_t first_sequence = (uint16_t)(sequence_time.tv_usec & 0xFFFF);
     int best = -1;
-    for (int i = 0; i < attempts; i++) {
+    for (int i = 0; i < attempts && ![cancellation isCancelled]; i++) {
         int ms = 0;
         uint16_t sequence = (uint16_t)(first_sequence + i);
-        if (ICMPLatencyOnceMs(&target, timeout_ms, sequence, &ms) == 0) {
+        if (ICMPLatencyOnceMs(&target, timeout_ms, sequence, &ms, cancellation) == 0) {
             if (best < 0 || ms < best) best = ms;
         }
     }
@@ -6543,7 +6671,7 @@ static NSString *VCNormalizedIPAddress(NSString *value) {
 }
 
 static NSString *VCExternalIPThroughSOCKS(uint16_t socksPort) {
-    int fd = connect_loopback_port(socksPort, 8000);
+    int fd = connect_loopback_port(socksPort, 8000, nil);
     if (fd < 0) return nil;
     if (socks5_connect_domain(fd, "api.ipify.org", 80) != 0) {
         close(fd);
@@ -6732,7 +6860,7 @@ static NSDictionary *VCRunConnectionQualityChecks(NSDictionary *daemonState) {
 
     BOOL helperRunning = [[daemonState objectForKey:@"core"] isEqualToString:@"running"];
     BOOL listenerReady = ConnectLatencyMs("127.0.0.1", (uint16_t)socksPort, 1500,
-                                         NULL) == 0;
+                                         NULL, nil) == 0;
     [quality setObject:(helperRunning && listenerReady ? @"Running and listening" : @"Unavailable")
                  forKey:@"core"];
 
@@ -6742,7 +6870,7 @@ static NSDictionary *VCRunConnectionQualityChecks(NSDictionary *daemonState) {
 
     int proxyLatency = 0;
     BOOL proxyHTTP = helperRunning && listenerReady &&
-        ProxyGetConnectOnceMs((uint16_t)socksPort, 8000, &proxyLatency) == 0;
+        ProxyGetConnectOnceMs((uint16_t)socksPort, 8000, &proxyLatency, nil) == 0;
     NSString *proxyIP = proxyHTTP ? VCExternalIPThroughSOCKS((uint16_t)socksPort) : nil;
     [quality setObject:(proxyHTTP ? @"Reachable through tunnel" : @"Tunnel request failed")
                  forKey:@"server"];
@@ -9994,7 +10122,7 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
     NSMutableArray *_configs;
     NSMutableArray *_subscriptions;
     NSMutableDictionary *_pingDisplayByURI;
-    NSMutableSet *_standalonePingURIs;
+    NSMutableDictionary *_standalonePingCancellationsByURI;
     NSMutableDictionary *_subscriptionPingPendingByIdentifier;
     NSMutableDictionary *_subscriptionPingOperationsByIdentifier;
     NSMutableDictionary *_subscriptionPingPreviousDisplayByIdentifier;
@@ -10084,6 +10212,7 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
 - (void)refreshMainListCellAppearance:(UITableViewCell *)cell atIndexPath:(NSIndexPath *)indexPath;
 - (void)refreshVisiblePingAccessoriesForURI:(NSString *)uri;
 - (void)refreshVisibleSubscriptionPingAccessories;
+- (void)stopAllPings;
 - (void)configureSubscriptionHeaderCell:(UITableViewCell *)cell atIndex:(NSInteger)index;
 - (void)refreshVisibleSubscriptionHeaderAccessories;
 - (void)refreshVisibleSubscriptionHeaderExpansionAppearanceAnimated:(BOOL)animated;
@@ -11983,6 +12112,11 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
 
 - (void)pingWorker:(NSDictionary *)payload {
     NSAutoreleasePool *pool = [[NSAutoreleasePool alloc] init];
+    VCPingCancellation *cancellation = [payload objectForKey:@"cancellation"];
+    if ([cancellation isCancelled]) {
+        [pool drain];
+        return;
+    }
     NSString *uri = [payload objectForKey:@"uri"];
     VCPingType pingType = (VCPingType)[[payload objectForKey:@"type"] integerValue];
     NSString *host = nil;
@@ -12000,16 +12134,21 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
         if (pingType == VCPingTypeProxyGET) {
             NSString *xrayVersion = VCActiveXrayVersion();
             rc = ProxyGetViaTempCoreMs([uri UTF8String], [xrayVersion UTF8String],
-                                       5000, 2, &latencyMs);
+                                       5000, 2, &latencyMs, cancellation);
         } else if (pingType == VCPingTypeTCP) {
-            rc = ConnectLatencyBestOfNMs([host UTF8String], port, 3500, 2, &latencyMs);
+            rc = ConnectLatencyBestOfNMs([host UTF8String], port, 3500, 2, &latencyMs, cancellation);
         } else if (pingType == VCPingTypeICMP) {
-            rc = ICMPLatencyBestOfNMs([host UTF8String], 3500, 2, &latencyMs);
+            rc = ICMPLatencyBestOfNMs([host UTF8String], 3500, 2, &latencyMs, cancellation);
         }
         ok = (rc == 0 && latencyMs >= 0);
     }
 
-    NSMutableDictionary *out = [NSMutableDictionary dictionaryWithCapacity:5];
+    if ([cancellation isCancelled]) {
+        [pool drain];
+        return;
+    }
+    NSMutableDictionary *out = [NSMutableDictionary dictionaryWithCapacity:6];
+    [out setObject:cancellation forKey:@"cancellation"];
     [out setObject:([uri isKindOfClass:[NSString class]] ? uri : @"") forKey:@"uri"];
     [out setObject:[NSNumber numberWithBool:ok] forKey:@"ok"];
     NSString *batchIdentifier = [payload objectForKey:@"batch_identifier"];
@@ -12027,6 +12166,8 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
 }
 
 - (void)pingResultOnMain:(NSDictionary *)payload {
+    VCPingCancellation *cancellation = [payload objectForKey:@"cancellation"];
+    if ([cancellation isCancelled]) return;
     NSString *uri = [payload objectForKey:@"uri"];
     if (![uri isKindOfClass:[NSString class]] || [uri length] == 0) return;
 
@@ -12039,7 +12180,8 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
         }
     }
     if (!batchIdentifier) {
-        [_standalonePingURIs removeObject:uri];
+        if ([_standalonePingCancellationsByURI objectForKey:uri] != cancellation) return;
+        [_standalonePingCancellationsByURI removeObjectForKey:uri];
     }
 
     BOOL ok = [[payload objectForKey:@"ok"] boolValue];
@@ -12079,18 +12221,22 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
                           priority:(NSOperationQueuePriority)priority
                    batchIdentifier:(NSString *)batchIdentifier
                         batchToken:(NSNumber *)batchToken {
+    VCPingCancellation *cancellation = [[[VCPingCancellation alloc] init] autorelease];
     NSMutableDictionary *payload = [NSMutableDictionary dictionaryWithObjectsAndKeys:
                                     uri, @"uri",
                                     [NSNumber numberWithInteger:pingType], @"type",
+                                    cancellation, @"cancellation",
                                     nil];
     if (batchIdentifier && batchToken) {
         [payload setObject:batchIdentifier forKey:@"batch_identifier"];
         [payload setObject:batchToken forKey:@"batch_token"];
+    } else {
+        cancellation.previousDisplay = [_pingDisplayByURI objectForKey:uri];
+        [_standalonePingCancellationsByURI setObject:cancellation forKey:uri];
     }
-    NSInvocationOperation *operation = [[[NSInvocationOperation alloc]
-        initWithTarget:self
-              selector:@selector(pingWorker:)
-                object:payload] autorelease];
+    [_pingDisplayByURI setObject:kVCPingLoadingValue forKey:uri];
+    VCPingOperation *operation = [[[VCPingOperation alloc]
+        initWithTarget:self payload:payload cancellation:cancellation] autorelease];
     operation.queuePriority = priority;
     [_pingQueue addOperation:operation];
     return operation;
@@ -12098,19 +12244,17 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
 
 - (void)startPingForURI:(NSString *)uri type:(VCPingType)pingType {
     if (![uri isKindOfClass:[NSString class]] || [uri length] == 0) return;
-    if ([_standalonePingURIs containsObject:uri]) return;
+    if ([_standalonePingCancellationsByURI objectForKey:uri]) return;
     if ([[_pingDisplayByURI objectForKey:uri] isEqualToString:kVCPingLoadingValue]) return;
 
-    [_standalonePingURIs addObject:uri];
     VCRecordAppEvent(@"ping", @"Configuration ping started",
                      [NSString stringWithFormat:@"type=%ld", (long)pingType]);
-    [_pingDisplayByURI setObject:kVCPingLoadingValue forKey:uri];
-    [self refreshVisiblePingAccessoriesForURI:uri];
     [self enqueuePingForURI:uri
                        type:pingType
                    priority:NSOperationQueuePriorityHigh
             batchIdentifier:nil
                  batchToken:nil];
+    [self refreshVisiblePingAccessoriesForURI:uri];
 }
 
 - (void)pingButtonPressed:(UIButton *)sender {
@@ -12137,7 +12281,7 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
     if (![uri isKindOfClass:[NSString class]] || [uri length] == 0) {
         return;
     }
-    if ([_standalonePingURIs containsObject:uri]) return;
+    if ([_standalonePingCancellationsByURI objectForKey:uri]) return;
     if ([[_pingDisplayByURI objectForKey:uri] isEqualToString:kVCPingLoadingValue]) return;
 
     sender.enabled = NO;
@@ -12184,7 +12328,6 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
         if ([previous length] > 0 && ![previous isEqualToString:kVCPingLoadingValue]) {
             [previousDisplay setObject:previous forKey:uri];
         }
-        [_pingDisplayByURI setObject:kVCPingLoadingValue forKey:uri];
         NSOperation *operation = [self enqueuePingForURI:uri
                                                     type:pingType
                                                 priority:NSOperationQueuePriorityNormal
@@ -12225,7 +12368,7 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
 
     for (NSString *uri in pending) {
         if (![[_pingDisplayByURI objectForKey:uri] isEqualToString:kVCPingLoadingValue]) continue;
-        if ([self isURIInActiveSubscriptionPing:uri]) {
+        if ([self isURIInActiveSubscriptionPing:uri] || [_standalonePingCancellationsByURI objectForKey:uri]) {
             continue;
         }
         NSString *previous = [previousDisplay objectForKey:uri];
@@ -12257,6 +12400,43 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
     if ([items count] == 0) return;
 
     [self startSubscriptionPingAtIndex:subIdx];
+}
+
+- (void)stopAllPings {
+    if ([_standalonePingCancellationsByURI count] == 0 &&
+        [_subscriptionPingPendingByIdentifier count] == 0) return;
+
+    NSMutableDictionary *previousDisplay = [NSMutableDictionary dictionary];
+    for (NSDictionary *previous in [_subscriptionPingPreviousDisplayByIdentifier allValues]) {
+        [previousDisplay addEntriesFromDictionary:previous];
+    }
+    for (NSString *uri in _standalonePingCancellationsByURI) {
+        VCPingCancellation *cancellation = [_standalonePingCancellationsByURI objectForKey:uri];
+        if ([cancellation.previousDisplay length] > 0) {
+            [previousDisplay setObject:cancellation.previousDisplay forKey:uri];
+        }
+        [cancellation cancel];
+    }
+    [_pingQueue cancelAllOperations];
+    [_standalonePingCancellationsByURI removeAllObjects];
+    [_subscriptionPingPendingByIdentifier removeAllObjects];
+    [_subscriptionPingOperationsByIdentifier removeAllObjects];
+    [_subscriptionPingPreviousDisplayByIdentifier removeAllObjects];
+    [_subscriptionPingTokenByIdentifier removeAllObjects];
+
+    NSArray *uris = [_pingDisplayByURI allKeys];
+    NSUInteger stoppedCount = 0;
+    for (NSString *uri in uris) {
+        if (![[_pingDisplayByURI objectForKey:uri] isEqualToString:kVCPingLoadingValue]) continue;
+        NSString *previous = [previousDisplay objectForKey:uri];
+        if ([previous length] > 0) [_pingDisplayByURI setObject:previous forKey:uri];
+        else [_pingDisplayByURI removeObjectForKey:uri];
+        stoppedCount++;
+    }
+    [self refreshVisiblePingAccessoriesForURI:nil];
+    [self refreshVisibleSubscriptionHeaderAccessories];
+    VCRecordAppEvent(@"ping", @"All pings canceled",
+                     [NSString stringWithFormat:@"pending=%lu", (unsigned long)stoppedCount]);
 }
 
 - (void)updateConnectionSummary {
@@ -12321,6 +12501,7 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
 }
 
 - (void)buttonTouchDown:(UIButton *)sender {
+    if (sender == _connectBtn) [self stopAllPings];
     sender.layer.shadowColor = [UIColor blackColor].CGColor;
     sender.layer.shadowOffset = CGSizeMake(0.0f, 2.0f);
     sender.layer.shadowRadius = 4.0f;
@@ -14860,6 +15041,7 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
         return;
     }
 
+    [self stopAllPings];
     [_pendingReconnectURI release];
     _pendingReconnectURI = [newURI copy];
     _pendingReconnectProtectLogs = protectLogs;
@@ -16194,7 +16376,7 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
 
     [self loadData];
     _pingDisplayByURI = [[NSMutableDictionary alloc] init];
-    _standalonePingURIs = [[NSMutableSet alloc] init];
+    _standalonePingCancellationsByURI = [[NSMutableDictionary alloc] init];
     _subscriptionPingPendingByIdentifier = [[NSMutableDictionary alloc] init];
     _subscriptionPingOperationsByIdentifier = [[NSMutableDictionary alloc] init];
     _subscriptionPingPreviousDisplayByIdentifier = [[NSMutableDictionary alloc] init];
@@ -16570,7 +16752,7 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
     [_configs release];
     [_subscriptions release];
     [_pingDisplayByURI release];
-    [_standalonePingURIs release];
+    [_standalonePingCancellationsByURI release];
     [_subscriptionPingPendingByIdentifier release];
     [_subscriptionPingOperationsByIdentifier release];
     [_subscriptionPingPreviousDisplayByIdentifier release];
@@ -17239,7 +17421,7 @@ moveRowAtIndexPath:(NSIndexPath *)sourceIndexPath
 }
 
 - (void)refreshVisiblePingAccessoriesForURI:(NSString *)uri {
-    if (![uri isKindOfClass:[NSString class]] || [uri length] == 0 || !_tableView) return;
+    if (!_tableView || (uri && (![uri isKindOfClass:[NSString class]] || [uri length] == 0))) return;
 
     NSArray *visibleRows = [_tableView indexPathsForVisibleRows];
     for (NSIndexPath *indexPath in visibleRows) {
@@ -17268,7 +17450,7 @@ moveRowAtIndexPath:(NSIndexPath *)sourceIndexPath
             }
         }
 
-        if (tag < 0 || ![rowURI isEqualToString:uri]) continue;
+        if (tag < 0 || (uri && ![rowURI isEqualToString:uri])) continue;
         UITableViewCell *cell = [_tableView cellForRowAtIndexPath:indexPath];
         if (!cell) continue;
         cell.accessoryView = [self accessoryPingWithTag:tag uri:rowURI];
