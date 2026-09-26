@@ -4049,13 +4049,13 @@ static void VCApplyTouchFeedbackToButton(UIButton *button, id target) {
     _pingButton.enabled = pingLoading || canPing;
     _pingButton.tag = kVCSubscriptionPingButtonTagBase + index;
     _infoButton.tag = kVCSubscriptionInfoButtonTagBase + index;
+    VCApplyTouchFeedbackToButton(_infoButton, _showsActions ? target : nil);
     if (_showsActions) {
         [_pingButton addTarget:target action:@selector(subscriptionPingButtonPressed:)
               forControlEvents:UIControlEventTouchUpInside];
         [_infoButton addTarget:target action:@selector(subscriptionInfoButtonPressed:)
               forControlEvents:UIControlEventTouchUpInside];
     }
-    VCApplyTouchFeedbackToButton(_infoButton, _showsActions ? target : nil);
     _pingButton.accessibilityLabel = pingLoading ? @"Stop subscription ping" : @"Ping all subscription configurations";
     _pingButton.accessibilityHint = pingLoading ? @"Stops the remaining latency tests"
         : [NSString stringWithFormat:@"Runs %@ latency tests", VCPingTypeName(VCSelectedPingType())];
@@ -9957,6 +9957,7 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
     UIView *_compactConnectGlowView;
     UIView *_mainSwitchView;
     UIImageView *_connectPowerIcon;
+    UIActivityIndicatorView *_connectUpdatingIndicator;
     UILabel *_connectButtonTitle;
     UILabel *_connectionStateLabel;
     UILabel *_selectionLabel;
@@ -10045,6 +10046,7 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
     BOOL _mainSectionTransitionInProgress;
     BOOL _mainTabTransitionInProgress;
     BOOL _didRunLaunchAutoUpdate;
+    BOOL _subscriptionRefreshInProgress;
     BOOL _didScheduleAutomaticUpdateCheck;
     BOOL _launchAutoUpdateInProgress;
     BOOL _queuedMainDetailRelayout;
@@ -10095,6 +10097,8 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
 - (void)updatePhoneConnectionLayout;
 - (void)updatePadConnectionLayout;
 - (void)updateConnectionSummary;
+- (void)setSubscriptionRefreshInProgress:(BOOL)inProgress;
+- (BOOL)isConfigurationSwitchInProgress;
 - (CGFloat)maximumMainTableContentOffsetY;
 - (CGFloat)phoneConnectionSnapOffsetForProposedOffset:(CGFloat)proposedOffset
                                          currentOffset:(CGFloat)currentOffset
@@ -12274,9 +12278,15 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
 }
 
 - (void)updateConnectButton {
-    NSString *title = _connected ? @"Disconnect" : @"Connect";
+    NSString *title = _subscriptionRefreshInProgress ? @"Updating" : (_connected ? @"Disconnect" : @"Connect");
     _connectButtonTitle.text = title;
     _connectBtn.accessibilityLabel = title;
+    _connectPowerIcon.hidden = _subscriptionRefreshInProgress;
+    if (_subscriptionRefreshInProgress) {
+        [_connectUpdatingIndicator startAnimating];
+    } else {
+        [_connectUpdatingIndicator stopAnimating];
+    }
     UIColor *fill = _connected
         ? [UIColor colorWithRed:0.12f green:0.58f blue:0.20f alpha:1.0f]
         : VCAccentColor();
@@ -12285,6 +12295,16 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
     _compactConnectGlowView.backgroundColor = [fill colorWithAlphaComponent:0.45f];
     _compactConnectGlowView.layer.shadowColor = fill.CGColor;
     [self updateConnectionSummary];
+}
+
+- (void)setSubscriptionRefreshInProgress:(BOOL)inProgress {
+    if (_subscriptionRefreshInProgress == inProgress) return;
+    _subscriptionRefreshInProgress = inProgress;
+    [self updateConnectButton];
+}
+
+- (BOOL)isConfigurationSwitchInProgress {
+    return _reconnectInProgress || [_pendingReconnectURI length] > 0;
 }
 
 - (void)applyTopButtonFeedbackToButton:(UIButton *)btn {
@@ -12896,6 +12916,10 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
 
 - (BOOL)refreshSubscriptionAtIndex:(NSInteger)idx showStatus:(BOOL)showStatus {
     if (idx < 0 || idx >= (NSInteger)[_subscriptions count]) return NO;
+    if ([self isConfigurationSwitchInProgress]) {
+        if (showStatus) [self showStatus:@"Busy: switching configuration" ok:NO];
+        return NO;
+    }
     NSTimeInterval diagnosticStarted = [NSDate timeIntervalSinceReferenceDate];
     VCRecordAppEvent(@"subscription", @"Single subscription update started", nil);
 
@@ -12987,16 +13011,19 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
         [self showStatus:@"No subscriptions to update" ok:NO];
         return;
     }
-    if (_launchAutoUpdateInProgress) {
-        if (_pendingImportDoneStatus) {
-            [_pendingImportDoneStatus release];
-            _pendingImportDoneStatus = nil;
+    BOOL updateInProgress = _launchAutoUpdateInProgress;
+    BOOL switchingConfiguration = [self isConfigurationSwitchInProgress];
+    if (updateInProgress || switchingConfiguration) {
+        [_pendingImportDoneStatus release];
+        _pendingImportDoneStatus = nil;
+        [_pendingImportRefreshIndices release];
+        _pendingImportRefreshIndices = nil;
+        if (updateInProgress) {
+            [self showStatus:@"Subscriptions update is already running" ok:YES];
+        } else {
+            VCRecordAppEvent(@"subscription", @"Subscription update blocked", @"config switch in progress");
+            [self showStatus:@"Busy: switching configuration" ok:NO];
         }
-        if (_pendingImportRefreshIndices) {
-            [_pendingImportRefreshIndices release];
-            _pendingImportRefreshIndices = nil;
-        }
-        [self showStatus:@"Subscriptions update is already running" ok:YES];
         return;
     }
 
@@ -13064,6 +13091,7 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
     }
 
     _launchAutoUpdateInProgress = YES;
+    [self setSubscriptionRefreshInProgress:YES];
     NSTimeInterval diagnosticStarted = [NSDate timeIntervalSinceReferenceDate];
 
     NSArray *refreshIndices = [[NSArray alloc] initWithArray:refreshIndicesMutable];
@@ -13102,6 +13130,7 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
         dispatch_async(dispatch_get_main_queue(), ^{
             [self setUpdatingSubscriptionIndex:-1];
             _launchAutoUpdateInProgress = NO;
+            [self setSubscriptionRefreshInProgress:NO];
 
             if (![self subscriptionsMatchSnapshotForLaunchAutoUpdate:snapshot]) {
                 VCRecordAppEvent(@"subscription", @"Subscription update batch discarded",
@@ -13163,14 +13192,24 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
 
 - (void)startLaunchAutoUpdateIfNeeded {
     if (_didRunLaunchAutoUpdate) return;
+    if (!_autoUpdateSubscriptions || [_subscriptions count] == 0) {
+        _didRunLaunchAutoUpdate = YES;
+        return;
+    }
+    if ([self isConfigurationSwitchInProgress]) {
+        [self performSelector:@selector(startLaunchAutoUpdateIfNeeded) withObject:nil afterDelay:0.5];
+        return;
+    }
     _didRunLaunchAutoUpdate = YES;
-
-    if (!_autoUpdateSubscriptions || [_subscriptions count] == 0) return;
 
     [self startBackgroundSubscriptionRefreshWithStatus:@"Auto-updating subscriptions in background..."];
 }
 
 - (void)refreshAllSubscriptions:(BOOL)showStatus {
+    if ([self isConfigurationSwitchInProgress]) {
+        if (showStatus) [self showStatus:@"Busy: switching configuration" ok:NO];
+        return;
+    }
     if ([_subscriptions count] == 0) {
         if (showStatus) [self showStatus:@"No subscriptions to update" ok:NO];
         return;
@@ -14916,11 +14955,16 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
 
 - (void)togglePressed {
     VCRecordAppEvent(@"ui", _connected ? @"Disconnect button pressed" : @"Connect button pressed", nil);
+    if (_subscriptionRefreshInProgress) {
+        VCRecordAppEvent(@"connection", @"Connection action blocked", @"subscription update in progress");
+        [self showStatus:@"Busy" ok:NO];
+        return;
+    }
     if (_reorderingSection >= 0) {
         [self setMainReorderingSection:-1 showStatus:NO];
     }
     if (_reconnectInProgress) {
-        VCRecordAppEvent(@"connection", @"Connection action blocked", @"reason=config_switch_in_progress");
+        VCRecordAppEvent(@"connection", @"Connection action blocked", @"config switch in progress");
         [self showStatus:@"Config switch is still in progress" ok:YES];
         return;
     }
@@ -15090,6 +15134,12 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
         [vc finishRefreshWithSubscription:nil errorText:@"Subscription no longer exists"];
         return;
     }
+    if ([self isConfigurationSwitchInProgress]) {
+        VCRecordAppEvent(@"subscription", @"Subscription update blocked", @"config switch in progress");
+        [self showStatus:@"Busy: switching configuration" ok:NO];
+        [vc finishRefreshWithSubscription:nil errorText:@"Configuration switch is in progress"];
+        return;
+    }
     if ([self subscriptionNeedsPlainHTTPApproval:[_subscriptions objectAtIndex:index]]) {
         [self showPlainHTTPSubscriptionWarningForCount:1
                                           confirmation:^{
@@ -15108,6 +15158,7 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
     NSString *expectedURL = [[snapshot objectForKey:@"url"] copy];
     SubscriptionInfoVC *infoVC = [vc retain];
     _launchAutoUpdateInProgress = YES;
+    [self setSubscriptionRefreshInProgress:YES];
     [self setUpdatingSubscriptionIndex:index];
     [self showStatus:@"Updating subscription..." ok:YES];
 
@@ -15120,6 +15171,7 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
         dispatch_async(dispatch_get_main_queue(), ^{
             [self setUpdatingSubscriptionIndex:-1];
             _launchAutoUpdateInProgress = NO;
+            [self setSubscriptionRefreshInProgress:NO];
 
             BOOL stillExists = (index >= 0 && index < (NSInteger)[_subscriptions count]);
             NSString *currentURL = stillExists ? [[_subscriptions objectAtIndex:index] objectForKey:@"url"] : nil;
@@ -15475,6 +15527,9 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
     _compactConnectGlowView.alpha = progress;
     _connectPowerIcon.frame = VCInterpolateRect(CGRectMake(40.5f, 26.0f, 31.0f, 31.0f),
                                                 CGRectMake(11.0f, 14.0f, 20.0f, 20.0f), progress);
+    _connectUpdatingIndicator.center = _connectPowerIcon.center;
+    CGFloat indicatorScale = 1.4f - 0.4f * progress;
+    _connectUpdatingIndicator.transform = CGAffineTransformMakeScale(indicatorScale, indicatorScale);
     _connectButtonTitle.frame = VCInterpolateRect(CGRectMake(10.0f, 61.0f, 92.0f, 24.0f),
                                                   CGRectMake(35.0f, 0.0f, 86.0f, 48.0f), progress);
     CGFloat buttonFontSize = 16.0f - 3.5f * progress;
@@ -15552,6 +15607,8 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
     _compactConnectGlowView.frame = buttonFrame;
     _compactConnectGlowView.alpha = 0.0f;
     _connectPowerIcon.frame = CGRectMake(40.5f, 26.0f, 31.0f, 31.0f);
+    _connectUpdatingIndicator.center = _connectPowerIcon.center;
+    _connectUpdatingIndicator.transform = CGAffineTransformMakeScale(1.4f, 1.4f);
     _connectButtonTitle.frame = CGRectMake(10.0f, 61.0f, 92.0f, 24.0f);
     _connectButtonTitle.font = [UIFont boldSystemFontOfSize:16.0f];
     _connectionStateLabel.frame = CGRectMake(summaryX, topInset + 174.0f, summaryWidth, 19.0f);
@@ -16239,12 +16296,16 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
     _connectBtn.layer.borderWidth = 2.0f;
     _connectBtn.layer.borderColor = [UIColor colorWithWhite:1.0f alpha:0.95f].CGColor;
     _connectBtn.autoresizingMask = UIViewAutoresizingFlexibleLeftMargin | UIViewAutoresizingFlexibleRightMargin;
-    [_connectBtn addTarget:self action:@selector(togglePressed) forControlEvents:UIControlEventTouchUpInside];
     VCApplyTouchFeedbackToButton(_connectBtn, self);
+    [_connectBtn addTarget:self action:@selector(togglePressed) forControlEvents:UIControlEventTouchUpInside];
     _connectPowerIcon = [[UIImageView alloc] initWithImage:VCMakePowerIcon(36.0f)];
     _connectPowerIcon.contentMode = UIViewContentModeScaleAspectFit;
     _connectPowerIcon.userInteractionEnabled = NO;
     [_connectBtn addSubview:_connectPowerIcon];
+    _connectUpdatingIndicator = [[UIActivityIndicatorView alloc] initWithActivityIndicatorStyle:UIActivityIndicatorViewStyleWhite];
+    _connectUpdatingIndicator.hidesWhenStopped = YES;
+    _connectUpdatingIndicator.userInteractionEnabled = NO;
+    [_connectBtn addSubview:_connectUpdatingIndicator];
     _connectButtonTitle = [[UILabel alloc] initWithFrame:CGRectZero];
     _connectButtonTitle.backgroundColor = [UIColor clearColor];
     _connectButtonTitle.textColor = [UIColor whiteColor];
@@ -16451,6 +16512,9 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
 - (void)dealloc {
     [[NSNotificationCenter defaultCenter] removeObserver:self];
     [NSObject cancelPreviousPerformRequestsWithTarget:self
+                                             selector:@selector(startLaunchAutoUpdateIfNeeded)
+                                               object:nil];
+    [NSObject cancelPreviousPerformRequestsWithTarget:self
                                              selector:@selector(startAutomaticUpdateCheckIfNeeded)
                                                object:nil];
     [NSObject cancelPreviousPerformRequestsWithTarget:self
@@ -16475,6 +16539,7 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
     [_connectGlowView release];
     [_compactConnectGlowView release];
     [_connectPowerIcon release];
+    [_connectUpdatingIndicator release];
     [_connectButtonTitle release];
     [_connectionStateLabel release];
     [_selectionLabel release];
@@ -17459,6 +17524,20 @@ moveRowAtIndexPath:(NSIndexPath *)sourceIndexPath
     if (_mainSectionTransitionInProgress) {
         [_tableView deselectRowAtIndexPath:indexPath animated:NO];
         return;
+    }
+    if (_connected && _subscriptionRefreshInProgress) {
+        BOOL selectsConfiguration = indexPath.section == 0;
+        if (indexPath.section == 1) {
+            BOOL isHeader = YES;
+            selectsConfiguration = [self mapSubscriptionRow:indexPath.row
+                                                toSubIndex:NULL itemIndex:NULL isHeader:&isHeader] && !isHeader;
+        }
+        if (selectsConfiguration) {
+            [_tableView deselectRowAtIndexPath:indexPath animated:NO];
+            VCRecordAppEvent(@"connection", @"Configuration switch blocked", @"subscription update in progress");
+            [self showStatus:@"Busy" ok:NO];
+            return;
+        }
     }
     BOOL animateSubscriptionsSection = NO;
     BOOL selectionChanged = NO;
