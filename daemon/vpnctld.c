@@ -138,6 +138,7 @@ typedef struct {
 
 typedef struct {
     int connected;
+    time_t connected_since;
     int socks_port;
     int redir_port;
     int dns_port;
@@ -3393,8 +3394,8 @@ static int connect_all(const char *uri, const char *xray_version, int requested_
             snprintf(msg, msg_cap, "ERR already connected with different log protection");
             return -1;
         }
-        snprintf(msg, msg_cap, "OK already connected mode=%s socks=%d protected=%d",
-                 mode_name(g.mode), g.socks_port, g.protect_logs);
+        snprintf(msg, msg_cap, "OK already connected mode=%s socks=%d protected=%d since=%lld",
+                 mode_name(g.mode), g.socks_port, g.protect_logs, (long long)g.connected_since);
         return 0;
     }
 
@@ -3487,6 +3488,7 @@ static int connect_all(const char *uri, const char *xray_version, int requested_
         log_msg("system PAC proxy enabled on network services port=%d", port);
         diagnostic_event("PAC configured for WebKit traffic");
 #endif
+        g.connected_since = time(NULL);
         update_vpn_icon_state(1);
         g.springboard_pid = springboard_pid(0);
         g.springboard_poll_ms = now_ms();
@@ -3495,8 +3497,8 @@ static int connect_all(const char *uri, const char *xray_version, int requested_
         core_log_event("I", "VPN session established | mode=%s | socks=%d | redir=%d | dns=%d",
                        mode_name(g.mode), g.socks_port, g.redir_port, g.dns_port);
         diagnostic_event("VPN connection established");
-        snprintf(msg, msg_cap, "OK connected mode=%s socks=%d redir=%d protected=%d",
-                 mode_name(g.mode), g.socks_port, g.redir_port, g.protect_logs);
+        snprintf(msg, msg_cap, "OK connected mode=%s socks=%d redir=%d protected=%d since=%lld",
+                 mode_name(g.mode), g.socks_port, g.redir_port, g.protect_logs, (long long)g.connected_since);
         return 0;
     }
 
@@ -3799,8 +3801,8 @@ static void handle_client(int cfd, control_client_t client_type) {
 
     if (strncmp(buf, "STATUS", 6) == 0) {
         if (g.connected) {
-            snprintf(reply, sizeof(reply), "OK connected mode=%s socks=%d redir=%d dns=%d protected=%d\n", mode_name(g.mode), g.socks_port,
-                     g.redir_port, g.dns_port, g.protect_logs ? 1 : 0);
+            snprintf(reply, sizeof(reply), "OK connected mode=%s socks=%d redir=%d dns=%d protected=%d since=%lld\n", mode_name(g.mode), g.socks_port,
+                     g.redir_port, g.dns_port, g.protect_logs ? 1 : 0, (long long)g.connected_since);
         } else {
             snprintf(reply, sizeof(reply), "OK disconnected\n");
         }

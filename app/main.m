@@ -11517,12 +11517,22 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
     }
 }
 
-- (void)startUptimeTimer {
+- (void)startUptimeTimerWithDaemonResponse:(NSString *)response {
     [_uptimeTimer invalidate];
     [_uptimeTimer release];
     _uptimeTimer = nil;
 
     _connectedSince = [[NSDate date] timeIntervalSince1970];
+    for (NSString *field in [response componentsSeparatedByCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]]) {
+        if (![field hasPrefix:@"since="]) continue;
+        NSScanner *scanner = [NSScanner scannerWithString:[field substringFromIndex:6]];
+        long long timestamp = 0;
+        if ([scanner scanLongLong:&timestamp] && [scanner isAtEnd] &&
+            timestamp > 0 && timestamp <= _connectedSince) {
+            _connectedSince = (NSTimeInterval)timestamp;
+        }
+        break;
+    }
     [self refreshUptimeText];
     _uptimeTimer = [[NSTimer scheduledTimerWithTimeInterval:1.0
                                                      target:self
@@ -15220,7 +15230,7 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
                 VCRecordAppEvent(@"connection", @"Configuration switch completed", nil);
                 _connected = YES;
                 _connectedWithProtectedLogs = protectLogs;
-                [self startUptimeTimer];
+                [self startUptimeTimerWithDaemonResponse:connectText];
                 [self showStatus:@"Connected (switched config)" ok:YES];
             } else if (!disconnected) {
                 VCRecordAppEvent(@"connection", @"Configuration switch failed", @"stage=disconnect");
@@ -15333,7 +15343,7 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
                     [self showStatus:@"Ready" ok:YES];
                 } else {
                     VCRecordAppEvent(@"connection", @"VPN connected", protectLogs ? @"protected_logs=1" : @"protected_logs=0");
-                    [self startUptimeTimer];
+                    [self startUptimeTimerWithDaemonResponse:text];
                     [self showStatus:@"Connected" ok:YES];
                     [self scheduleXHTTPConnectHealthCheckForURI:uri];
                 }
@@ -15785,7 +15795,7 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
                 VCRecordAppEvent(@"connection", @"Existing VPN session detected", protectedLogsNow ? @"protected_logs=1" : @"protected_logs=0");
                 _connected = YES;
                 _connectedWithProtectedLogs = protectedLogsNow;
-                [self startUptimeTimer];
+                [self startUptimeTimerWithDaemonResponse:resp];
                 [self showStatus:@"Connected" ok:YES];
             } else {
                 VCRecordAppEvent(@"connection", @"No existing VPN session", nil);
