@@ -950,10 +950,6 @@ static NSString *RoutingPolicyText(void) {
     return policy;
 }
 
-static NSString *SyncRoutingPolicyToDaemon(void) {
-    return SendCommand([NSString stringWithFormat:@"ROUTING\t%@\n", RoutingPolicyText()]);
-}
-
 @interface VCPingCancellation : NSObject {
     NSLock *_lock;
     BOOL _cancelled;
@@ -3326,27 +3322,157 @@ static UIImage *MakeIconImage(VCIconType type, CGFloat size, BOOL active) {
     return img;
 }
 
-static UIImage *VCMakePowerIcon(CGFloat size) {
-    UIGraphicsBeginImageContextWithOptions(CGSizeMake(size, size), NO, 0.0f);
-    [[UIColor whiteColor] setStroke];
-    UIBezierPath *ring = [UIBezierPath bezierPathWithArcCenter:CGPointMake(size * 0.5f, size * 0.55f)
-                                                      radius:size * 0.34f
-                                                  startAngle:(CGFloat)(-M_PI * 0.25)
-                                                    endAngle:(CGFloat)(M_PI * 1.25)
-                                                   clockwise:YES];
-    ring.lineWidth = MAX(2.0f, size * 0.09f);
-    ring.lineCapStyle = kCGLineCapRound;
-    [ring stroke];
-    UIBezierPath *stem = [UIBezierPath bezierPath];
-    [stem moveToPoint:CGPointMake(size * 0.5f, size * 0.19f)];
-    [stem addLineToPoint:CGPointMake(size * 0.5f, size * 0.48f)];
-    stem.lineWidth = ring.lineWidth;
-    stem.lineCapStyle = kCGLineCapRound;
-    [stem stroke];
-    UIImage *image = UIGraphicsGetImageFromCurrentImageContext();
-    UIGraphicsEndImageContext();
-    return image;
+static void VCAddPowerArc(CGMutablePathRef path, CGPoint center, CGFloat radius,
+                          CGFloat start, CGFloat end) {
+    CGFloat tangent = (4.0f / 3.0f) * tanf((end - start) * 0.25f);
+    CGPathAddCurveToPoint(path, NULL,
+                         center.x + radius * (cosf(start) - tangent * sinf(start)),
+                         center.y + radius * (sinf(start) + tangent * cosf(start)),
+                         center.x + radius * (cosf(end) + tangent * sinf(end)),
+                         center.y + radius * (sinf(end) - tangent * cosf(end)),
+                         center.x + radius * cosf(end), center.y + radius * sinf(end));
 }
+
+static CGPathRef VCCreatePowerPath(BOOL loading) {
+    CGPoint center = CGPointMake(18.0f, loading ? 18.0f : 19.8f);
+    CGFloat radius = 12.24f;
+    CGFloat start = -M_PI * 0.25f;
+    CGMutablePathRef path = CGPathCreateMutable();
+    CGPathMoveToPoint(path, NULL, center.x + radius * cosf(start), center.y + radius * sinf(start));
+    for (NSInteger i = 0; i < 4; i++) {
+        CGFloat a = start + M_PI * 1.5f * i / 4.0f;
+        CGFloat b = start + M_PI * 1.5f * (i + 1) / 4.0f;
+        VCAddPowerArc(path, center, radius, a, b);
+    }
+    if (loading) {
+        CGFloat a = M_PI * 1.25f;
+        CGPathMoveToPoint(path, NULL, center.x + radius * cosf(a), center.y + radius * sinf(a));
+        VCAddPowerArc(path, center, radius, a, a + M_PI / 6.0f);
+    } else {
+        CGPathMoveToPoint(path, NULL, 18.0f, 6.84f);
+        CGPathAddCurveToPoint(path, NULL, 18.0f, 10.32f, 18.0f, 13.8f, 18.0f, 17.28f);
+    }
+    return path;
+}
+
+static CFTimeInterval const kVCPowerMorphDuration = 0.28;
+static CFTimeInterval const kVCPowerSpinDuration = 0.85;
+static CFTimeInterval const kVCPowerMinimumLoadingDuration = 0.65;
+
+@interface VCConnectionPowerView : UIView {
+    CALayer *_scaleLayer;
+    CAShapeLayer *_symbolLayer;
+    CGPathRef _powerPath;
+    CGPathRef _spinnerPath;
+    BOOL _loadingRequested;
+    CFTimeInterval _loadingStartedAt;
+    NSUInteger _transitionGeneration;
+}
+- (void)setLoading:(BOOL)loading;
+- (void)animateLoading:(BOOL)loading;
+@end
+
+@implementation VCConnectionPowerView
+- (id)initWithFrame:(CGRect)frame {
+    self = [super initWithFrame:frame];
+    if (self) {
+        self.userInteractionEnabled = NO;
+        _powerPath = VCCreatePowerPath(NO);
+        _spinnerPath = VCCreatePowerPath(YES);
+        _scaleLayer = [[CALayer alloc] init];
+        _scaleLayer.bounds = CGRectMake(0.0f, 0.0f, 36.0f, 36.0f);
+        [self.layer addSublayer:_scaleLayer];
+        _symbolLayer = [[CAShapeLayer alloc] init];
+        _symbolLayer.frame = _scaleLayer.bounds;
+        _symbolLayer.contentsScale = [UIScreen mainScreen].scale;
+        _symbolLayer.fillColor = NULL;
+        _symbolLayer.strokeColor = [UIColor whiteColor].CGColor;
+        _symbolLayer.lineWidth = 3.24f;
+        _symbolLayer.lineCap = kCALineCapRound;
+        _symbolLayer.lineJoin = kCALineJoinRound;
+        _symbolLayer.path = _powerPath;
+        [_scaleLayer addSublayer:_symbolLayer];
+    }
+    return self;
+}
+
+- (void)layoutSubviews {
+    [super layoutSubviews];
+    [CATransaction begin];
+    [CATransaction setDisableActions:YES];
+    _scaleLayer.position = CGPointMake(CGRectGetMidX(self.bounds), CGRectGetMidY(self.bounds));
+    CGFloat scale = MIN(self.bounds.size.width, self.bounds.size.height) / 36.0f;
+    _scaleLayer.transform = CATransform3DMakeScale(scale, scale, 1.0f);
+    [CATransaction commit];
+}
+
+- (void)setLoading:(BOOL)loading {
+    if (_loadingRequested == loading) return;
+    _loadingRequested = loading;
+    NSUInteger generation = ++_transitionGeneration;
+    if (loading) {
+        _loadingStartedAt = CACurrentMediaTime();
+        if (![_symbolLayer animationForKey:@"powerSpin"]) [self animateLoading:YES];
+        return;
+    }
+    CFTimeInterval remaining = kVCPowerMinimumLoadingDuration - (CACurrentMediaTime() - _loadingStartedAt);
+    if (remaining > 0.0) {
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(remaining * NSEC_PER_SEC)),
+                       dispatch_get_main_queue(), ^{
+            if (generation == _transitionGeneration && !_loadingRequested) [self animateLoading:NO];
+        });
+    } else {
+        [self animateLoading:NO];
+    }
+}
+
+- (void)animateLoading:(BOOL)loading {
+    CAShapeLayer *visible = (CAShapeLayer *)(_symbolLayer.presentationLayer ?: _symbolLayer);
+    CGPathRef fromPath = CGPathCreateCopy(visible.path ?: _symbolLayer.path);
+    CGFloat angle = [[visible valueForKeyPath:@"transform.rotation.z"] floatValue];
+
+    [CATransaction begin];
+    [CATransaction setDisableActions:YES];
+    [_symbolLayer removeAnimationForKey:@"powerMorph"];
+    [_symbolLayer removeAnimationForKey:@"powerSpin"];
+    [_symbolLayer removeAnimationForKey:@"powerSettle"];
+    _symbolLayer.path = loading ? _spinnerPath : _powerPath;
+    _symbolLayer.transform = loading ? CATransform3DMakeRotation(angle, 0.0f, 0.0f, 1.0f) : CATransform3DIdentity;
+
+    CABasicAnimation *morph = [CABasicAnimation animationWithKeyPath:@"path"];
+    morph.fromValue = (id)fromPath;
+    morph.toValue = (id)_symbolLayer.path;
+    morph.duration = kVCPowerMorphDuration;
+    morph.timingFunction = [CAMediaTimingFunction functionWithName:kCAMediaTimingFunctionEaseInEaseOut];
+    [_symbolLayer addAnimation:morph forKey:@"powerMorph"];
+
+    CABasicAnimation *rotation = [CABasicAnimation animationWithKeyPath:@"transform.rotation.z"];
+    rotation.fromValue = [NSNumber numberWithFloat:angle];
+    if (loading) {
+        rotation.toValue = [NSNumber numberWithFloat:angle + M_PI * 2.0f];
+        rotation.duration = kVCPowerSpinDuration;
+        rotation.beginTime = [_symbolLayer convertTime:CACurrentMediaTime() fromLayer:nil] + morph.duration;
+        rotation.repeatCount = HUGE_VALF;
+        rotation.timingFunction = [CAMediaTimingFunction functionWithName:kCAMediaTimingFunctionLinear];
+        [_symbolLayer addAnimation:rotation forKey:@"powerSpin"];
+    } else {
+        rotation.toValue = [NSNumber numberWithFloat:0.0f];
+        rotation.duration = morph.duration;
+        rotation.timingFunction = morph.timingFunction;
+        [_symbolLayer addAnimation:rotation forKey:@"powerSettle"];
+    }
+    [CATransaction commit];
+    CGPathRelease(fromPath);
+}
+
+- (void)dealloc {
+    CGPathRelease(_powerPath);
+    CGPathRelease(_spinnerPath);
+    [_symbolLayer release];
+    [_scaleLayer release];
+    [super dealloc];
+}
+@end
 
 static UIImage *VCMakeConnectionGlow(UIColor *color) {
     const CGFloat *rgb = CGColorGetComponents(color.CGColor);
@@ -10084,8 +10210,7 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
     UIImageView *_connectGlowView;
     UIView *_compactConnectGlowView;
     UIView *_mainSwitchView;
-    UIImageView *_connectPowerIcon;
-    UIActivityIndicatorView *_connectUpdatingIndicator;
+    VCConnectionPowerView *_connectPowerIcon;
     UILabel *_connectButtonTitle;
     UILabel *_connectionStateLabel;
     UILabel *_selectionLabel;
@@ -10144,6 +10269,7 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
     NSInteger _activeLogIndex;
     NSUInteger _mainSectionTransitionToken;
     NSUInteger _nextSubscriptionPingToken;
+    NSUInteger _connectionActionGeneration;
     NSString *_logTexts[2];
     CGPoint _logContentOffsets[2];
     CGFloat _mainTableDragStartOffsetY;
@@ -10159,6 +10285,7 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
 
     BOOL _connected;
     BOOL _connectedWithProtectedLogs;
+    BOOL _connectionActionInProgress;
     BOOL _reconnectInProgress;
     BOOL _pendingReconnectProtectLogs;
     BOOL _daemonStatusCheckInFlight;
@@ -10227,7 +10354,7 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
 - (void)updatePadConnectionLayout;
 - (void)updateConnectionSummary;
 - (void)setSubscriptionRefreshInProgress:(BOOL)inProgress;
-- (BOOL)isConfigurationSwitchInProgress;
+- (BOOL)isConnectionActionInProgress;
 - (CGFloat)maximumMainTableContentOffsetY;
 - (CGFloat)phoneConnectionSnapOffsetForProposedOffset:(CGFloat)proposedOffset
                                          currentOffset:(CGFloat)currentOffset
@@ -11419,10 +11546,11 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
 }
 
 - (void)reconcileConnectionStateWithDaemon {
-    if (!_connected || _reconnectInProgress || _daemonStatusCheckInFlight) return;
+    if (!_connected || [self isConnectionActionInProgress] || _daemonStatusCheckInFlight) return;
 
     _daemonStatusCheckInFlight = YES;
     NSTimeInterval expectedConnectedSince = _connectedSince;
+    NSUInteger generation = _connectionActionGeneration;
     dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_DEFAULT, 0), ^{
         NSAutoreleasePool *pool = [[NSAutoreleasePool alloc] init];
         NSString *response = [self sanitizeDaemonText:SendCommand(@"STATUS\n")];
@@ -11431,6 +11559,8 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
         dispatch_async(dispatch_get_main_queue(), ^{
             _daemonStatusCheckInFlight = NO;
             if (!disconnected || !_connected ||
+                generation != _connectionActionGeneration ||
+                [self isConnectionActionInProgress] ||
                 _connectedSince != expectedConnectedSince) {
                 return;
             }
@@ -12083,7 +12213,7 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
 - (void)xhttpConnectHealthCheckResultOnMain:(NSDictionary *)payload {
     BOOL ok = [[payload objectForKey:@"ok"] isEqualToString:@"1"];
     if (ok) return;
-    if (!_connected || _reconnectInProgress || [_pendingReconnectURI length]) return;
+    if (!_connected || [self isConnectionActionInProgress]) return;
 
     NSString *reason = [payload objectForKey:@"reason"];
     if ([reason rangeOfString:@"TOFU pin mismatch"].location == NSNotFound) {
@@ -12461,12 +12591,7 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
     NSString *title = _subscriptionRefreshInProgress ? @"Updating" : (_connected ? @"Disconnect" : @"Connect");
     _connectButtonTitle.text = title;
     _connectBtn.accessibilityLabel = title;
-    _connectPowerIcon.hidden = _subscriptionRefreshInProgress;
-    if (_subscriptionRefreshInProgress) {
-        [_connectUpdatingIndicator startAnimating];
-    } else {
-        [_connectUpdatingIndicator stopAnimating];
-    }
+    [_connectPowerIcon setLoading:_subscriptionRefreshInProgress || [self isConnectionActionInProgress]];
     UIColor *fill = _connected
         ? [UIColor colorWithRed:0.12f green:0.58f blue:0.20f alpha:1.0f]
         : VCAccentColor();
@@ -12483,8 +12608,8 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
     [self updateConnectButton];
 }
 
-- (BOOL)isConfigurationSwitchInProgress {
-    return _reconnectInProgress || [_pendingReconnectURI length] > 0;
+- (BOOL)isConnectionActionInProgress {
+    return _connectionActionInProgress || _reconnectInProgress || [_pendingReconnectURI length] > 0;
 }
 
 - (void)applyTopButtonFeedbackToButton:(UIButton *)btn {
@@ -13097,8 +13222,8 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
 
 - (BOOL)refreshSubscriptionAtIndex:(NSInteger)idx showStatus:(BOOL)showStatus {
     if (idx < 0 || idx >= (NSInteger)[_subscriptions count]) return NO;
-    if ([self isConfigurationSwitchInProgress]) {
-        if (showStatus) [self showStatus:@"Busy: switching configuration" ok:NO];
+    if ([self isConnectionActionInProgress]) {
+        if (showStatus) [self showStatus:@"Busy" ok:NO];
         return NO;
     }
     NSTimeInterval diagnosticStarted = [NSDate timeIntervalSinceReferenceDate];
@@ -13193,8 +13318,8 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
         return;
     }
     BOOL updateInProgress = _launchAutoUpdateInProgress;
-    BOOL switchingConfiguration = [self isConfigurationSwitchInProgress];
-    if (updateInProgress || switchingConfiguration) {
+    BOOL connectionActionInProgress = [self isConnectionActionInProgress];
+    if (updateInProgress || connectionActionInProgress) {
         [_pendingImportDoneStatus release];
         _pendingImportDoneStatus = nil;
         [_pendingImportRefreshIndices release];
@@ -13202,8 +13327,8 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
         if (updateInProgress) {
             [self showStatus:@"Subscriptions update is already running" ok:YES];
         } else {
-            VCRecordAppEvent(@"subscription", @"Subscription update blocked", @"config switch in progress");
-            [self showStatus:@"Busy: switching configuration" ok:NO];
+            VCRecordAppEvent(@"subscription", @"Subscription update blocked", @"connection action in progress");
+            [self showStatus:@"Busy" ok:NO];
         }
         return;
     }
@@ -13377,7 +13502,7 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
         _didRunLaunchAutoUpdate = YES;
         return;
     }
-    if ([self isConfigurationSwitchInProgress]) {
+    if ([self isConnectionActionInProgress]) {
         [self performSelector:@selector(startLaunchAutoUpdateIfNeeded) withObject:nil afterDelay:0.5];
         return;
     }
@@ -13387,8 +13512,8 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
 }
 
 - (void)refreshAllSubscriptions:(BOOL)showStatus {
-    if ([self isConfigurationSwitchInProgress]) {
-        if (showStatus) [self showStatus:@"Busy: switching configuration" ok:NO];
+    if ([self isConnectionActionInProgress]) {
+        if (showStatus) [self showStatus:@"Busy" ok:NO];
         return;
     }
     if ([_subscriptions count] == 0) {
@@ -15053,6 +15178,7 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
         [self performSelector:@selector(beginPendingReconnect) withObject:nil afterDelay:0.2];
     }
     [self showStatus:@"Switching to selected config..." ok:YES];
+    [self updateConnectButton];
 }
 
 - (void)beginPendingReconnect {
@@ -15065,6 +15191,7 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
     _pendingReconnectURI = nil;
     _pendingReconnectProtectLogs = NO;
     _reconnectInProgress = YES;
+    ++_connectionActionGeneration;
 
     NSString *routingCommand = [[NSString stringWithFormat:@"ROUTING\t%@\n", RoutingPolicyText()] copy];
     NSString *connectCommand = [ConnectCommandForURI(uri, protectLogs) copy];
@@ -15094,7 +15221,6 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
                 _connected = YES;
                 _connectedWithProtectedLogs = protectLogs;
                 [self startUptimeTimer];
-                [self updateConnectButton];
                 [self showStatus:@"Connected (switched config)" ok:YES];
             } else if (!disconnected) {
                 VCRecordAppEvent(@"connection", @"Configuration switch failed", @"stage=disconnect");
@@ -15103,7 +15229,6 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
                 _connected = NO;
                 _connectedWithProtectedLogs = NO;
                 [self stopUptimeTimer];
-                [self updateConnectButton];
                 NSString *stage = routingSaved ? @"connect" : @"routing";
                 VCRecordAppEvent(@"connection", @"Configuration switch failed",
                                  [NSString stringWithFormat:@"stage=%@", stage]);
@@ -15123,6 +15248,7 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
             } else if (connected) {
                 [self scheduleXHTTPConnectHealthCheckForURI:uri];
             }
+            [self updateConnectButton];
 
             [disconnectResponse release];
             [routingResponse release];
@@ -15137,8 +15263,9 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
 
 - (void)togglePressed {
     VCRecordAppEvent(@"ui", _connected ? @"Disconnect button pressed" : @"Connect button pressed", nil);
-    if (_subscriptionRefreshInProgress) {
-        VCRecordAppEvent(@"connection", @"Connection action blocked", @"subscription update in progress");
+    if (_subscriptionRefreshInProgress || _connectionActionInProgress) {
+        VCRecordAppEvent(@"connection", @"Connection action blocked",
+                         _subscriptionRefreshInProgress ? @"subscription update in progress" : @"connection action in progress");
         [self showStatus:@"Busy" ok:NO];
         return;
     }
@@ -15158,8 +15285,11 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
         _pendingReconnectURI = nil;
         _pendingReconnectProtectLogs = NO;
     }
-    if (!_connected) {
-        NSString *uri = [self uriForCurrentSelection];
+    BOOL disconnecting = _connected;
+    NSString *uri = nil;
+    BOOL protectLogs = NO;
+    if (!disconnecting) {
+        uri = [self uriForCurrentSelection];
         if (!uri) {
             VCRecordAppEvent(@"connection", @"Connection failed", @"stage=selection reason=none_selected");
             [self showStatus:@"Select/import a configuration first" ok:NO];
@@ -15171,42 +15301,53 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
             return;
         }
 
-        NSString *routingResp = [self sanitizeDaemonText:SyncRoutingPolicyToDaemon()];
-        if (![routingResp hasPrefix:@"OK"]) {
-            VCRecordAppEvent(@"connection", @"Connection failed", @"stage=routing_sync");
-            [self showStatus:[NSString stringWithFormat:@"Routing sync failed: %@", routingResp] ok:NO];
-            return;
-        }
-        BOOL protectLogs = [self selectedSubscriptionIsHappEncrypted];
-        NSString *cmd = ConnectCommandForURI(uri, protectLogs);
-        NSString *resp = [self sanitizeDaemonText:SendCommand(cmd)];
-        if ([resp hasPrefix:@"OK"]) {
-            VCRecordAppEvent(@"connection", @"VPN connected", protectLogs ? @"protected_logs=1" : @"protected_logs=0");
-            _connected = YES;
-            _connectedWithProtectedLogs = protectLogs;
-            [self startUptimeTimer];
-            [self updateConnectButton];
-            [self showStatus:@"Connected" ok:YES];
-            [self scheduleXHTTPConnectHealthCheckForURI:uri];
-        } else {
-            VCRecordAppEvent(@"connection", @"Connection failed", @"stage=daemon_connect");
-            [self showStatus:resp ok:NO];
-        }
-        return;
+        protectLogs = [self selectedSubscriptionIsHappEncrypted];
     }
 
-    NSString *resp = [self sanitizeDaemonText:SendCommand(@"DISCONNECT\n")];
-    if ([resp hasPrefix:@"OK"]) {
-        VCRecordAppEvent(@"connection", @"VPN disconnected", nil);
-        _connected = NO;
-        _connectedWithProtectedLogs = NO;
-        [self stopUptimeTimer];
-        [self updateConnectButton];
-        [self showStatus:@"Ready" ok:YES];
-    } else {
-        VCRecordAppEvent(@"connection", @"Disconnect failed", nil);
-        [self showStatus:resp ok:NO];
-    }
+    NSString *routingCommand = disconnecting ? nil : [NSString stringWithFormat:@"ROUTING\t%@\n", RoutingPolicyText()];
+    NSString *command = disconnecting ? @"DISCONNECT\n" : ConnectCommandForURI(uri, protectLogs);
+    _connectionActionInProgress = YES;
+    ++_connectionActionGeneration;
+    [self updateConnectButton];
+    [self showStatus:disconnecting ? @"Disconnecting..." : @"Connecting..." ok:YES];
+
+    dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_DEFAULT, 0), ^{
+        NSAutoreleasePool *pool = [[NSAutoreleasePool alloc] init];
+        NSString *routingResponse = disconnecting ? nil : [SendCommand(routingCommand) copy];
+        NSString *response = (disconnecting || [routingResponse hasPrefix:@"OK"])
+            ? [SendCommand(command) copy] : nil;
+
+        dispatch_async(dispatch_get_main_queue(), ^{
+            _connectionActionInProgress = NO;
+            NSString *routingText = [self sanitizeDaemonText:routingResponse];
+            NSString *text = [self sanitizeDaemonText:response];
+            if (!disconnecting && ![routingText hasPrefix:@"OK"]) {
+                VCRecordAppEvent(@"connection", @"Connection failed", @"stage=routing_sync");
+                [self showStatus:[NSString stringWithFormat:@"Routing sync failed: %@", routingText] ok:NO];
+            } else if ([text hasPrefix:@"OK"]) {
+                _connected = !disconnecting;
+                _connectedWithProtectedLogs = !disconnecting && protectLogs;
+                if (disconnecting) {
+                    VCRecordAppEvent(@"connection", @"VPN disconnected", nil);
+                    [self stopUptimeTimer];
+                    [self showStatus:@"Ready" ok:YES];
+                } else {
+                    VCRecordAppEvent(@"connection", @"VPN connected", protectLogs ? @"protected_logs=1" : @"protected_logs=0");
+                    [self startUptimeTimer];
+                    [self showStatus:@"Connected" ok:YES];
+                    [self scheduleXHTTPConnectHealthCheckForURI:uri];
+                }
+            } else {
+                VCRecordAppEvent(@"connection", disconnecting ? @"Disconnect failed" : @"Connection failed",
+                                 disconnecting ? nil : @"stage=daemon_connect");
+                [self showStatus:text ok:NO];
+            }
+            [self updateConnectButton];
+            [routingResponse release];
+            [response release];
+        });
+        [pool drain];
+    });
 }
 
 - (void)plusPressed {
@@ -15316,10 +15457,10 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
         [vc finishRefreshWithSubscription:nil errorText:@"Subscription no longer exists"];
         return;
     }
-    if ([self isConfigurationSwitchInProgress]) {
-        VCRecordAppEvent(@"subscription", @"Subscription update blocked", @"config switch in progress");
-        [self showStatus:@"Busy: switching configuration" ok:NO];
-        [vc finishRefreshWithSubscription:nil errorText:@"Configuration switch is in progress"];
+    if ([self isConnectionActionInProgress]) {
+        VCRecordAppEvent(@"subscription", @"Subscription update blocked", @"connection action in progress");
+        [self showStatus:@"Busy" ok:NO];
+        [vc finishRefreshWithSubscription:nil errorText:@"Connection action is in progress"];
         return;
     }
     if ([self subscriptionNeedsPlainHTTPApproval:[_subscriptions objectAtIndex:index]]) {
@@ -15558,14 +15699,17 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
     BOOL followTail = _logContentOffsetsValid[newIndex]
         ? _logFollowsTail[newIndex]
         : YES;
-    [self displayLogText:ReadLogAtIndex(newIndex)
+    NSString *text = [self isConnectionActionInProgress]
+        ? (_logTexts[newIndex] ? _logTexts[newIndex] : @"(waiting for connection action...)\n")
+        : ReadLogAtIndex(newIndex);
+    [self displayLogText:text
                  atIndex:newIndex
                   offset:savedOffset
               followTail:followTail];
 }
 
 - (void)refreshLogs {
-    if (!_showingTerminal || _activeLogIndex < 0 || _activeLogIndex > 1) {
+    if ([self isConnectionActionInProgress] || !_showingTerminal || _activeLogIndex < 0 || _activeLogIndex > 1) {
         return;
     }
     if (_logView.tracking || _logView.dragging || _logView.decelerating ||
@@ -15604,6 +15748,10 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
 
 - (void)clearLogsPressed {
     VCRecordAppEvent(@"ui", @"Clear logs button pressed", nil);
+    if ([self isConnectionActionInProgress]) {
+        [self showStatus:@"Busy" ok:NO];
+        return;
+    }
     NSString *resp = [self sanitizeDaemonText:ClearLogsViaDaemon()];
     [self forceRefreshLogs];
 
@@ -15622,6 +15770,7 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
 
 - (void)queryInitialStatus {
     [self showStatus:@"Checking daemon..." ok:YES];
+    NSUInteger generation = _connectionActionGeneration;
 
     dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_DEFAULT, 0), ^{
         NSAutoreleasePool *pool = [[NSAutoreleasePool alloc] init];
@@ -15631,6 +15780,7 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
             [resp rangeOfString:@"protected=1"].location != NSNotFound;
 
         dispatch_async(dispatch_get_main_queue(), ^{
+            if (generation != _connectionActionGeneration || [self isConnectionActionInProgress]) return;
             if (connectedNow) {
                 VCRecordAppEvent(@"connection", @"Existing VPN session detected", protectedLogsNow ? @"protected_logs=1" : @"protected_logs=0");
                 _connected = YES;
@@ -15709,9 +15859,6 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
     _compactConnectGlowView.alpha = progress;
     _connectPowerIcon.frame = VCInterpolateRect(CGRectMake(40.5f, 26.0f, 31.0f, 31.0f),
                                                 CGRectMake(11.0f, 14.0f, 20.0f, 20.0f), progress);
-    _connectUpdatingIndicator.center = _connectPowerIcon.center;
-    CGFloat indicatorScale = 1.4f - 0.4f * progress;
-    _connectUpdatingIndicator.transform = CGAffineTransformMakeScale(indicatorScale, indicatorScale);
     _connectButtonTitle.frame = VCInterpolateRect(CGRectMake(10.0f, 61.0f, 92.0f, 24.0f),
                                                   CGRectMake(35.0f, 0.0f, 86.0f, 48.0f), progress);
     CGFloat buttonFontSize = 16.0f - 3.5f * progress;
@@ -15789,8 +15936,6 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
     _compactConnectGlowView.frame = buttonFrame;
     _compactConnectGlowView.alpha = 0.0f;
     _connectPowerIcon.frame = CGRectMake(40.5f, 26.0f, 31.0f, 31.0f);
-    _connectUpdatingIndicator.center = _connectPowerIcon.center;
-    _connectUpdatingIndicator.transform = CGAffineTransformMakeScale(1.4f, 1.4f);
     _connectButtonTitle.frame = CGRectMake(10.0f, 61.0f, 92.0f, 24.0f);
     _connectButtonTitle.font = [UIFont boldSystemFontOfSize:16.0f];
     _connectionStateLabel.frame = CGRectMake(summaryX, topInset + 174.0f, summaryWidth, 19.0f);
@@ -16480,14 +16625,8 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
     _connectBtn.autoresizingMask = UIViewAutoresizingFlexibleLeftMargin | UIViewAutoresizingFlexibleRightMargin;
     VCApplyTouchFeedbackToButton(_connectBtn, self);
     [_connectBtn addTarget:self action:@selector(togglePressed) forControlEvents:UIControlEventTouchUpInside];
-    _connectPowerIcon = [[UIImageView alloc] initWithImage:VCMakePowerIcon(36.0f)];
-    _connectPowerIcon.contentMode = UIViewContentModeScaleAspectFit;
-    _connectPowerIcon.userInteractionEnabled = NO;
+    _connectPowerIcon = [[VCConnectionPowerView alloc] initWithFrame:CGRectZero];
     [_connectBtn addSubview:_connectPowerIcon];
-    _connectUpdatingIndicator = [[UIActivityIndicatorView alloc] initWithActivityIndicatorStyle:UIActivityIndicatorViewStyleWhite];
-    _connectUpdatingIndicator.hidesWhenStopped = YES;
-    _connectUpdatingIndicator.userInteractionEnabled = NO;
-    [_connectBtn addSubview:_connectUpdatingIndicator];
     _connectButtonTitle = [[UILabel alloc] initWithFrame:CGRectZero];
     _connectButtonTitle.backgroundColor = [UIColor clearColor];
     _connectButtonTitle.textColor = [UIColor whiteColor];
@@ -16721,7 +16860,6 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
     [_connectGlowView release];
     [_compactConnectGlowView release];
     [_connectPowerIcon release];
-    [_connectUpdatingIndicator release];
     [_connectButtonTitle release];
     [_connectionStateLabel release];
     [_selectionLabel release];
@@ -17707,7 +17845,7 @@ moveRowAtIndexPath:(NSIndexPath *)sourceIndexPath
         [_tableView deselectRowAtIndexPath:indexPath animated:NO];
         return;
     }
-    if (_connected && _subscriptionRefreshInProgress) {
+    if (_connectionActionInProgress || (_connected && _subscriptionRefreshInProgress)) {
         BOOL selectsConfiguration = indexPath.section == 0;
         if (indexPath.section == 1) {
             BOOL isHeader = YES;
@@ -17716,7 +17854,8 @@ moveRowAtIndexPath:(NSIndexPath *)sourceIndexPath
         }
         if (selectsConfiguration) {
             [_tableView deselectRowAtIndexPath:indexPath animated:NO];
-            VCRecordAppEvent(@"connection", @"Configuration switch blocked", @"subscription update in progress");
+            VCRecordAppEvent(@"connection", @"Configuration switch blocked",
+                             _connectionActionInProgress ? @"connection action in progress" : @"subscription update in progress");
             [self showStatus:@"Busy" ok:NO];
             return;
         }
