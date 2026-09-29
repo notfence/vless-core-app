@@ -1,18 +1,18 @@
 # vless-core-app
 
-`vless-core-app` is an iOS 6–14 app + root daemon for full-device VLESS/SOCKS5 routing.
+`vless-core-app` is an iOS 5–14 app + root daemon for full-device VLESS/SOCKS5 routing.
 
 ## Compatibility
 
-- iOS 6.x through iOS 14.x
-- iOS 6–10 uses the original ARMv7 runtime, including ARM64 devices through 32-bit compatibility
+- iOS 5.0 through iOS 14.x
+- iOS 5–10 uses the ARMv7 runtime, including ARM64 devices through 32-bit compatibility
 - iOS 11–14 uses a native ARM64 runtime
 - Jailbreak required (rootful)
 
 One `.deb` contains separate thin ARMv7 and ARM64 versions of the app, daemon,
 core, and helper binaries. During installation, `postinst` selects ARM64 only on
 iOS 11 or newer. It leaves the original ARMv7 implementation in the runtime
-paths on iOS 6–10, even when the device itself has an ARM64 CPU.
+paths on iOS 5–10, even when the device itself has an ARM64 CPU.
 
 See the [Issues](https://github.com/notfence/vless-core-app/issues) page for the current bug list.
 
@@ -120,6 +120,10 @@ make clean
 make deb IOS_TOOLCHAIN=$IOS_TOOLCHAIN APP_IOS_SDK=$APP_IOS_SDK ARM64_IOS_SDK=$ARM64_IOS_SDK
 ```
 
+The historical `ios6` target and directory names now build ARMv7 components
+with an iOS 5.0 deployment target. Rebuild the dependencies above before
+packaging; `make deb` rejects stale ARMv7 binaries targeting a newer iOS.
+
 Output:
 
 - `build/com.vlesscore.app_iphoneos-arm.deb`
@@ -142,7 +146,7 @@ make deb \
   CA_BUNDLE=/abs/path/to/cacert.pem
 ```
 
-Package uses `gzip` compression for old iOS 6 `dpkg` compatibility.
+Package uses `gzip` compression for old iOS `dpkg` compatibility.
 
 ## Runtime paths
 
@@ -150,7 +154,7 @@ Package uses `gzip` compression for old iOS 6 `dpkg` compatibility.
 - Daemon API: authenticated Unix socket at `/var/run/vpnctld.sock`
 - `postinst` keeps only the runtime selected for the installed iOS version and removes the other architecture
 - Selected runtime: `/usr/share/vless-core/runtime-architecture`
-- Core runtime path: `/usr/bin/vless-core-darwin-armv7` on iOS 6–10 or `/usr/bin/vless-core-darwin-arm64` on iOS 11+
+- Core runtime path: `/usr/bin/vless-core-darwin-armv7` on iOS 5–10 or `/usr/bin/vless-core-darwin-arm64` on iOS 11+
 - Subscription fetch runtime path: `/usr/bin/vless-core-curl`
 - CA bundle: `/usr/share/vless-core/cacert.pem`
 - Redsocks helper: `/usr/bin/redsocks-vless-core`

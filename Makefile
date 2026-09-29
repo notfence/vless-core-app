@@ -1,5 +1,6 @@
 ROOT := $(abspath .)
 BUILD_DIR := $(ROOT)/build
+LEGACY_IOS_MIN_VERSION ?= 5.0
 LEGAL_DIR := $(ROOT)/legal
 
 IOS_TOOLCHAIN ?= $(abspath ../toolchains/ios6)
@@ -80,21 +81,21 @@ APP_OBJ := \
 APP_ARM64_OBJ := \
 	$(patsubst %.m,$(BUILD_DIR)/arm64/app/%.o,$(filter %.m,$(APP_SRC))) \
 	$(patsubst %.c,$(BUILD_DIR)/arm64/app/%.o,$(filter %.c,$(APP_SRC)))
-DAEMON_SRC := daemon/vpnctld.c daemon/vpnicon_statusbar.c daemon/system_proxy.c
-DAEMON_HEADERS := daemon/vpnctld_protocol.h daemon/system_proxy.h
+DAEMON_SRC := daemon/vpnctld.c daemon/socket_peer_pid.c daemon/legacy_loopback.c daemon/legacy_dns.c daemon/vpnicon_statusbar.c daemon/system_proxy.c
+DAEMON_HEADERS := daemon/vpnctld_protocol.h daemon/socket_peer_pid.h daemon/legacy_loopback.h daemon/legacy_dns.h daemon/system_proxy.h
 BOOTSTRAP_SRC := daemon/vpnctld_bootstrap.c
 
-APP_CFLAGS := -fno-objc-arc -Wall -Wextra -O2 -arch armv7 -miphoneos-version-min=6.0 -isysroot $(APP_IOS_SDK) -Iintegrations/happ -Iintegrations/karing -I$(ZBAR_DIR) -I$(OPENSSL_IOS_INCLUDE)
-APP_LDFLAGS := -Wl,-pie -Wl,-platform_version,ios,6.0,$(APP_IOS_SDK_VERSION) -framework UIKit -framework Foundation -framework CoreGraphics -framework QuartzCore -framework AVFoundation -framework CoreMedia -framework CoreVideo -framework SystemConfiguration -liconv -lsqlite3 -lz $(OPENSSL_IOS_CRYPTO_LIB)
-ZBAR_CFLAGS := -w -O2 -arch armv7 -miphoneos-version-min=6.0 -isysroot $(APP_IOS_SDK) -I$(ZBAR_DIR)
+APP_CFLAGS := -fno-objc-arc -Wall -Wextra -O2 -arch armv7 -miphoneos-version-min=$(LEGACY_IOS_MIN_VERSION) -isysroot $(APP_IOS_SDK) -Iintegrations/happ -Iintegrations/karing -I$(ZBAR_DIR) -I$(OPENSSL_IOS_INCLUDE)
+APP_LDFLAGS := -Wl,-pie -Wl,-platform_version,ios,$(LEGACY_IOS_MIN_VERSION),$(APP_IOS_SDK_VERSION) -framework UIKit -framework Foundation -framework CoreGraphics -framework QuartzCore -framework AVFoundation -framework CoreMedia -framework CoreVideo -framework SystemConfiguration -liconv -lsqlite3 -lz $(OPENSSL_IOS_CRYPTO_LIB)
+ZBAR_CFLAGS := -w -O2 -arch armv7 -miphoneos-version-min=$(LEGACY_IOS_MIN_VERSION) -isysroot $(APP_IOS_SDK) -I$(ZBAR_DIR)
 APP_ARM64_CFLAGS := -fno-objc-arc -Wall -Wextra -O2 -arch arm64 -miphoneos-version-min=$(ARM64_IOS_MIN_VERSION) -isysroot $(ARM64_IOS_SDK) -Iintegrations/happ -Iintegrations/karing -I$(ZBAR_DIR) -I$(OPENSSL_IOS_ARM64_INCLUDE)
 APP_ARM64_LDFLAGS := -Wl,-pie -framework UIKit -framework Foundation -framework CoreGraphics -framework QuartzCore -framework AVFoundation -framework CoreMedia -framework CoreVideo -framework SystemConfiguration -liconv -lsqlite3 -lz $(OPENSSL_IOS_ARM64_CRYPTO_LIB)
 ZBAR_ARM64_CFLAGS := -w -O2 -arch arm64 -miphoneos-version-min=$(ARM64_IOS_MIN_VERSION) -isysroot $(ARM64_IOS_SDK) -I$(ZBAR_DIR)
 ARM64_RUNTIME_DEFINES := -DVC_CORE_EXECUTABLE_PATH='"/usr/bin/vless-core-darwin-arm64"' -DVC_CORE_EXECUTABLE_NAME='"vless-core-darwin-arm64"'
 APP_ARM64_CFLAGS += $(ARM64_RUNTIME_DEFINES)
 
-DAEMON_CFLAGS := -Wall -Wextra -O2 -std=c11 -arch armv7 -miphoneos-version-min=6.0 -isysroot $(IOS_SDK)
-DAEMON_LDFLAGS := -Wl,-pie
+DAEMON_CFLAGS := -Wall -Wextra -O2 -std=c11 -arch armv7 -miphoneos-version-min=$(LEGACY_IOS_MIN_VERSION) -isysroot $(IOS_SDK)
+DAEMON_LDFLAGS := -Wl,-pie -framework CoreFoundation
 DAEMON_ARM64_CFLAGS := -Wall -Wextra -O2 -std=c11 -arch arm64 -miphoneos-version-min=$(ARM64_IOS_MIN_VERSION) -isysroot $(ARM64_IOS_SDK) $(ARM64_RUNTIME_DEFINES)
 DAEMON_ARM64_LDFLAGS := -Wl,-pie -framework CoreFoundation
 BOOTSTRAP_ARM64_LDFLAGS := -Wl,-pie
@@ -147,6 +148,7 @@ check-package-inputs:
 	@for binary in "$(VLESS_CORE_BIN)" "$(VLESS_CORE_CURL_BIN)" "$(REDSOCKS_BIN)"; do \
 		$(IOS_LIPO) -info "$$binary" | grep -q 'architecture: armv7' || { echo "Refusing non-armv7 legacy binary: $$binary"; exit 1; }; \
 		$(IOS_OTOOL) -hv "$$binary" | grep -qw PIE || { echo "Refusing non-PIE armv7 binary: $$binary"; exit 1; }; \
+		$(IOS_OTOOL) -l "$$binary" | awk '/cmd LC_VERSION_MIN_IPHONEOS/{found=1; next} found && /version /{if ($$2 != "5.0") exit 1; valid=1; exit} END{if (!valid) exit 1}' || { echo "Refusing ARMv7 binary not targeting iOS 5.0: $$binary"; exit 1; }; \
 	done
 	@for binary in "$(VLESS_CORE_ARM64_BIN)" "$(VLESS_CORE_CURL_ARM64_BIN)" "$(REDSOCKS_ARM64_BIN)"; do \
 		$(IOS_LIPO) -info "$$binary" | grep -q 'architecture: arm64' || { echo "Refusing non-arm64 modern binary: $$binary"; exit 1; }; \
@@ -215,7 +217,7 @@ $(BUILD_DIR)/arm64/app/%.o: %.c $(APP_HEADERS)
 
 $(APP_ARMV7_BIN): check-ios-toolchain $(APP_OBJ) $(ZBAR_LIB)
 	mkdir -p $(dir $@)
-	PATH="$(IOS_BIN):$$PATH" $(IOS_RUNTIME_ENV) $(IOS_CC) -arch armv7 -miphoneos-version-min=6.0 -isysroot $(IOS_SDK) $(APP_OBJ) $(ZBAR_LIB) -o $@ $(APP_LDFLAGS)
+	PATH="$(IOS_BIN):$$PATH" $(IOS_RUNTIME_ENV) $(IOS_CC) -arch armv7 -miphoneos-version-min=$(LEGACY_IOS_MIN_VERSION) -isysroot $(IOS_SDK) $(APP_OBJ) $(ZBAR_LIB) -o $@ $(APP_LDFLAGS)
 	@$(IOS_OTOOL) -hv $@ | grep -qw PIE || (echo "Refusing non-PIE iOS binary: $@"; exit 1)
 
 $(APP_ARM64_BIN): check-ios-toolchain $(APP_ARM64_OBJ) $(ZBAR_ARM64_LIB)

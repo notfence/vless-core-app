@@ -56,7 +56,7 @@
     <key>NSCameraUsageDescription</key>
     <string>Camera is used to scan QR codes for importing links.</string>
     <key>MinimumOSVersion</key>
-    <string>6.0</string>
+    <string>5.0</string>
     <key>UILaunchImages</key>
     <array>
         <dict>

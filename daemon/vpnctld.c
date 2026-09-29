@@ -34,6 +34,9 @@
 #include "vpnicon_statusbar.h"
 #include "vpnctld_protocol.h"
 #include "system_proxy.h"
+#include "socket_peer_pid.h"
+#include "legacy_loopback.h"
+#include "legacy_dns.h"
 
 #if __has_include(<net/pfvar.h>)
 #include <net/pfvar.h>
@@ -156,6 +159,7 @@ typedef struct {
     int protect_logs;
     int system_proxy_enabled;
     long long system_proxy_refresh_ms;
+    long long loopback_check_ms;
     pid_t springboard_pid;
     pid_t springboard_candidate_pid;
     unsigned int springboard_candidate_polls;
@@ -875,14 +879,18 @@ static int executable_path_matches(const char *actual,
 static control_client_t control_client_type(int client_fd,
                                             control_auth_diagnostic_t *diagnostic) {
     if (diagnostic) memset(diagnostic, 0, sizeof(*diagnostic));
-    pid_t peer_pid = 0;
-    socklen_t peer_pid_size = (socklen_t)sizeof(peer_pid);
-    int peer_pid_rc = getsockopt(client_fd, SOL_LOCAL, LOCAL_PEERPID, &peer_pid, &peer_pid_size);
-    if (peer_pid_rc != 0 ||
-        peer_pid_size != sizeof(peer_pid) || peer_pid <= 0) {
+    const char *expected_paths[] = {
+        VC_APP_EXECUTABLE_PATH,
+        VC_BOOTSTRAP_EXECUTABLE_PATH,
+        VC_CORE_EXECUTABLE_PATH,
+        VC_REDSOCKS_EXECUTABLE_PATH,
+    };
+    pid_t peer_pid = vc_socket_peer_pid(client_fd, expected_paths,
+                                      sizeof(expected_paths) / sizeof(expected_paths[0]));
+    if (peer_pid <= 0) {
         if (diagnostic) {
             diagnostic->failure = CONTROL_AUTH_FAILURE_PEER_PID;
-            diagnostic->error_number = peer_pid_rc != 0 ? errno : 0;
+            diagnostic->error_number = errno;
             diagnostic->peer_pid = peer_pid;
         }
         return CONTROL_CLIENT_UNAUTHORIZED;
@@ -900,12 +908,6 @@ static control_client_t control_client_type(int client_fd,
                              sizeof(diagnostic->executable),
                              "%s",
                              executable);
-    const char *expected_paths[] = {
-        VC_APP_EXECUTABLE_PATH,
-        VC_BOOTSTRAP_EXECUTABLE_PATH,
-        VC_CORE_EXECUTABLE_PATH,
-        VC_REDSOCKS_EXECUTABLE_PATH,
-    };
     const control_client_t expected_clients[] = {
         CONTROL_CLIENT_APP,
         CONTROL_CLIENT_BOOTSTRAP,
@@ -979,7 +981,7 @@ static int should_record_auth_failure(control_auth_failure_t failure) {
 
 static const char *mode_name(vpn_mode_t mode) {
     switch (mode) {
-        case MODE_PF: return "pf+redsocks";
+        case MODE_PF: return vc_legacy_loopback_active() ? "pf+loopback+redsocks" : "pf+redsocks";
         default: return "none";
     }
 }
@@ -1285,7 +1287,7 @@ static int route_direct_reference(const char *ip, int add) {
             log_msg("routing direct bypass released ip=%s refs=%u", ip, entry->references);
             return 0;
         }
-        if (pf_table_change("delete", ip) != 0) {
+        if (vc_legacy_loopback_direct(ip, 0) != 0 || pf_table_change("delete", ip) != 0) {
             return -1;
         }
         memset(entry, 0, sizeof(*entry));
@@ -1294,7 +1296,11 @@ static int route_direct_reference(const char *ip, int add) {
     }
 
     if (!add) return 0;
-    if (!free_entry || pf_table_change("add", ip) != 0) {
+    if (!free_entry || vc_legacy_loopback_direct(ip, 1) != 0) {
+        return -1;
+    }
+    if (pf_table_change("add", ip) != 0) {
+        (void)vc_legacy_loopback_direct(ip, 0);
         return -1;
     }
     snprintf(free_entry->ip, sizeof(free_entry->ip), "%s", ip);
@@ -2563,6 +2569,7 @@ typedef enum {
     PF_RULE_RDR_TO = 4,
     PF_RULE_RDR_TO_OLD = 5,
     PF_RULE_LEGACY_RDR = 6,
+    PF_RULE_LOOPBACK_ROUTES = 7,
 } pf_rule_mode_t;
 
 static const char *pf_rule_mode_name(pf_rule_mode_t mode) {
@@ -2574,6 +2581,7 @@ static const char *pf_rule_mode_name(pf_rule_mode_t mode) {
         case PF_RULE_RDR_TO: return "rdr-to";
         case PF_RULE_RDR_TO_OLD: return "rdr-to-old";
         case PF_RULE_LEGACY_RDR: return "legacy-rdr";
+        case PF_RULE_LOOPBACK_ROUTES: return "loopback-routes+rdr";
         default: return "unknown";
     }
 }
@@ -2598,7 +2606,24 @@ static int write_pf_conf(const char *server_ips, char ifnames[][32], size_t if_c
         return -1;
     }
 
-    if (mode == PF_RULE_ROUTE_TO_LO0) {
+    if (mode == PF_RULE_LOOPBACK_ROUTES) {
+        if (write_pf_bypass_table(fp, server_ips) != 0 || fprintf(fp,
+            "rdr pass on lo0 inet proto tcp from any to ! <vlesscore_bypass> -> 127.0.0.1 port %d\n"
+            "rdr pass on lo0 inet proto udp from any to any port 53 -> 127.0.0.1 port %d\n"
+            "pass out quick on lo0 inet proto tcp from any to ! <vlesscore_bypass> no state\n"
+            "pass out quick on lo0 inet proto udp from any to any port 53 no state\n"
+            "block return out quick on lo0 inet proto udp from any to ! <vlesscore_bypass>\n",
+            redir_port, dns_port) < 0) { fclose(fp); return -1; }
+        for (size_t i = 0; i < if_count; i++) {
+            if (fprintf(fp,
+                "block return out quick on %s inet proto tcp from any to ! <vlesscore_bypass>\n"
+                "block return out quick on %s inet proto udp from any to any port 53\n"
+                "block return out quick on %s inet proto udp from any to ! <vlesscore_bypass>\n"
+                "block return out quick on %s inet6 all\n"
+                "pass out on %s all keep state\n",
+                ifnames[i], ifnames[i], ifnames[i], ifnames[i], ifnames[i]) < 0) { fclose(fp); return -1; }
+        }
+    } else if (mode == PF_RULE_ROUTE_TO_LO0) {
         if (write_pf_bypass_table(fp, server_ips) != 0) {
             fclose(fp);
             return -1;
@@ -3128,6 +3153,12 @@ static int apply_pf_rules(const char *server_ips, int redir_port, int dns_port) 
         mode_count = sizeof(modes_cellular) / sizeof(modes_cellular[0]);
         log_msg("pf detected cellular interfaces");
     }
+    const pf_rule_mode_t modes_ios5[] = {PF_RULE_LOOPBACK_ROUTES};
+    if (vc_legacy_loopback_required()) {
+        modes = modes_ios5;
+        mode_count = 1;
+        log_msg("iOS 5: using ordinary loopback routes");
+    }
 
     for (size_t i = 0; i < mode_count; i++) {
         pf_rule_mode_t mode = modes[i];
@@ -3160,6 +3191,7 @@ static int clear_pf_rules(void) {
     const char *pfctl = find_pfctl_bin();
     if (!pfctl) return -1;
     int result = 0;
+    int legacy = vc_legacy_loopback_required();
 
     char *empty_argv[] = {
         (char *)pfctl,
@@ -3171,6 +3203,7 @@ static int clear_pf_rules(void) {
         NULL,
     };
     if (run_argv(empty_argv) != 0) result = -1;
+    if (legacy && flush_pf_states() != 0) result = -1;
 
     char *flush_tables_argv[] = {
         (char *)pfctl,
@@ -3185,7 +3218,7 @@ static int clear_pf_rules(void) {
 
     if (g.pf_dispatch_installed && remove_owned_pf_dispatch(pfctl) != 0) result = -1;
 
-    if (flush_pf_states() != 0) result = -1;
+    if (!legacy && flush_pf_states() != 0) result = -1;
 
     if (!g.pf_enabled_before) {
         char *disable_argv[] = {
@@ -3218,6 +3251,13 @@ static int recover_stale_pf_state(void) {
     pf_root_state_t root_state = pfctl ? pf_root_state(pfctl) : PF_ROOT_ERROR;
     int stale_dispatch_present =
         root_state == PF_ROOT_OWN_DISPATCH || root_state == PF_ROOT_SHARED_DISPATCH;
+    if (vc_legacy_loopback_required() && state_result == 0 && !was_enabled &&
+        root_state == PF_ROOT_OWN_DISPATCH) {
+        char *disable_argv[] = {(char *)pfctl, "-q", "-d", NULL};
+        (void)run_argv(disable_argv);
+        if (pf_enabled_state(pfctl) != PF_DISABLED) return -1;
+        log_msg("iOS 5: disabled owned stale PF before recovery");
+    }
 
     if (state_result == 1) {
         if (!stale_dispatch_present) return 0;
@@ -3261,6 +3301,11 @@ static int disconnect_all(void) {
     char routing[sizeof(g.routing)];
     snprintf(routing, sizeof(routing), "%s", g.routing);
     int routing_bypass_lan = g.routing_bypass_lan;
+
+    if (vc_legacy_dns_stop() != 0 || vc_legacy_loopback_stop() != 0) {
+        log_error("failed to restore iOS 5 DNS/routes; keeping VPN helpers alive");
+        return -1;
+    }
 
 #if defined(__LP64__)
     if (g.system_proxy_enabled && vc_system_proxy_disable() != 0) {
@@ -3337,6 +3382,14 @@ static void monitor_connected_children(void) {
     }
 #else
     long long current_ms = now_ms();
+    if (vc_legacy_loopback_active() && current_ms - g.loopback_check_ms >= 1000) {
+        g.loopback_check_ms = current_ms;
+        if (!vc_legacy_loopback_healthy() || !vc_legacy_dns_healthy()) {
+            log_warning("iOS 5 network/DNS configuration changed; restoring legacy routing");
+            (void)disconnect_all();
+            return;
+        }
+    }
 #endif
     monitor_springboard_icon(current_ms);
 }
@@ -3372,6 +3425,21 @@ static int try_connect_pf(int socks_port) {
         return -40 + pf_rc;
     }
     diagnostic_event("PF routing activated");
+
+    if (vc_legacy_loopback_required()) {
+        int legacy_rc = vc_legacy_loopback_start(pf_server_ips, g.routing_bypass_lan);
+        if (legacy_rc != 0) log_error("iOS 5 loopback route setup failed errno=%d", errno);
+        else {
+            legacy_rc = vc_legacy_dns_start();
+            if (legacy_rc != 0) log_error("iOS 5 DNS override failed result=%d", legacy_rc);
+        }
+        if (legacy_rc != 0) {
+            g.mode = MODE_PF;
+            (void)disconnect_all();
+            return -49;
+        }
+        log_msg("iOS 5 ordinary loopback routes and unscoped DNS activated");
+    }
 
     g.mode = MODE_PF;
     g.connected = 1;
@@ -3836,7 +3904,8 @@ static void handle_client(int cfd, control_client_t client_type) {
         char *nl = strchr(ip, '\n');
         if (nl) *nl = '\0';
         if (route_direct_reference(ip, add) == 0) {
-            snprintf(reply, sizeof(reply), "OK\n");
+            snprintf(reply, sizeof(reply), "%s", add && vc_legacy_loopback_active() &&
+                     !ipv4_is_permanent_bypass(ip) ? "OK hold\n" : "OK\n");
         } else {
             snprintf(reply, sizeof(reply), "ERR route bypass update failed\n");
         }
@@ -3970,6 +4039,10 @@ int main(int argc, char **argv) {
 #endif
     if (recover_stale_pf_state() != 0) {
         log_error("fatal: cannot restore stale PF state");
+        return 1;
+    }
+    if (vc_legacy_dns_stop() != 0 || vc_legacy_loopback_stop() != 0) {
+        log_error("fatal: cannot restore stale iOS 5 DNS/routes");
         return 1;
     }
     update_vpn_icon_state(0);

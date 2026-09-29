@@ -195,7 +195,7 @@ static int initialize_locked(void) {
         set_error_locked("cannot read iOS ProductVersion");
         return VPNICON_STATUSBAR_ERROR;
     }
-    if (g_ios_major < 6 || g_ios_major > 14) {
+    if (g_ios_major < 5 || g_ios_major > 14) {
         g_unsupported = 1;
         return VPNICON_STATUSBAR_UNSUPPORTED;
     }

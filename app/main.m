@@ -111,6 +111,17 @@ static NSString *SendCommand(NSString *cmdLine);
 static void VCRecordAppEvent(NSString *category, NSString *action, NSString *detail);
 static void VCRecordDaemonAuthorizationFailure(NSString *response);
 
+static void VCSetLabelMinimumScaleFactor(UILabel *label, CGFloat factor) {
+    if ([label respondsToSelector:@selector(setMinimumScaleFactor:)]) {
+        label.minimumScaleFactor = factor;
+    } else {
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wdeprecated-declarations"
+        label.minimumFontSize = label.font.pointSize * factor;
+#pragma clang diagnostic pop
+    }
+}
+
 static CGFloat VCMainStatusBarInset(void) {
     if ([[UIDevice currentDevice].systemVersion integerValue] < 7 ||
         [UIApplication sharedApplication].statusBarHidden) {
@@ -2748,6 +2759,7 @@ static UIColor *VCLogLevelColor(unichar level) {
     return VCSecondaryTextColor();
 }
 
+static NSAttributedString *VCFormattedLogText(NSString *text) NS_AVAILABLE_IOS(6_0);
 static NSAttributedString *VCFormattedLogText(NSString *text) {
     NSString *source = text ? text : @"";
     NSMutableParagraphStyle *paragraph = [[[NSMutableParagraphStyle alloc] init] autorelease];
@@ -3005,7 +3017,7 @@ static void VCAppearanceApplyHeaderView(UIView *view) {
 }
 
 static void VCAppearanceRefreshVisibleTableHeaders(UITableView *tableView) {
-    if (!tableView) return;
+    if (!tableView || ![tableView respondsToSelector:@selector(headerViewForSection:)]) return;
 
     [tableView setNeedsLayout];
     [tableView layoutIfNeeded];
@@ -4664,7 +4676,7 @@ typedef NS_ENUM(NSInteger, VCDebugSection) {
 
     NSArray *compatibility = [NSArray arrayWithObject:
         [self question:@"Which devices are supported?"
-                 answer:@"A rootful jailbreak is required. vless-core supports iOS 6 through iOS 14. On iOS 6 - iOS 10 it uses the ARMv7 runtime, including ARM64 devices through 32-bit compatibility. On iOS 11 - iOS 14 it uses the native ARM64 runtime. The package selects the correct runtime automatically during installation."]];
+                 answer:@"A rootful jailbreak is required. vless-core supports iOS 5 through iOS 14. On iOS 5 - iOS 10 it uses the ARMv7 runtime, including ARM64 devices through 32-bit compatibility. On iOS 11 - iOS 14 it uses the native ARM64 runtime. The package selects the correct runtime automatically during installation."]];
 
     NSArray *newSections = [[NSArray alloc] initWithObjects:
         [self sectionWithTitle:@"Getting started" questions:gettingStarted],
@@ -8934,6 +8946,7 @@ static NSString *VCDiagnosticValue(NSDictionary *dictionary,
         return;
     }
 
+    if (![_previewLayer respondsToSelector:@selector(captureDevicePointOfInterestForPoint:)]) return;
     CGPoint devicePoint = [_previewLayer captureDevicePointOfInterestForPoint:viewPoint];
     NSError *error = nil;
     if (![_camera lockForConfiguration:&error]) return;
@@ -8969,10 +8982,17 @@ static NSString *VCDiagnosticValue(NSDictionary *dictionary,
 - (void)updateCaptureConnectionOrientations {
     AVCaptureVideoOrientation v = [self captureVideoOrientationForCurrentInterfaceOrientation];
 
-    AVCaptureConnection *previewConn = [_previewLayer connection];
-    if (previewConn && [previewConn isVideoOrientationSupported]) {
-        [previewConn setVideoOrientation:v];
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wdeprecated-declarations"
+    if ([_previewLayer respondsToSelector:@selector(connection)]) {
+        AVCaptureConnection *previewConn = [_previewLayer connection];
+        if (previewConn && [previewConn isVideoOrientationSupported]) {
+            [previewConn setVideoOrientation:v];
+        }
+    } else if ([_previewLayer isOrientationSupported]) {
+        [_previewLayer setOrientation:v];
     }
+#pragma clang diagnostic pop
 
     AVCaptureConnection *metadataConn = [_metadataOutput connectionWithMediaType:AVMediaTypeVideo];
     if (metadataConn && [metadataConn isVideoOrientationSupported]) {
@@ -15650,7 +15670,11 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
     NSString *copiedText = [(text ? text : @"") copy];
     [_logTexts[index] release];
     _logTexts[index] = copiedText;
-    _logView.attributedText = VCFormattedLogText(_logTexts[index]);
+    if ([_logView respondsToSelector:@selector(setAttributedText:)]) {
+        _logView.attributedText = VCFormattedLogText(_logTexts[index]);
+    } else {
+        _logView.text = _logTexts[index];
+    }
     [_logView setNeedsLayout];
     [_logView layoutIfNeeded];
 
@@ -15874,6 +15898,7 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
     CGFloat buttonFontSize = 16.0f - 3.5f * progress;
     if (fabs([_connectButtonTitle.font pointSize] - buttonFontSize) > 0.35f) {
         _connectButtonTitle.font = [UIFont boldSystemFontOfSize:buttonFontSize];
+        VCSetLabelMinimumScaleFactor(_connectButtonTitle, 0.75f);
     }
 
     _connectionStateLabel.frame = VCInterpolateRect(expandedStateFrame, compactStateFrame, progress);
@@ -15948,6 +15973,7 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
     _connectPowerIcon.frame = CGRectMake(40.5f, 26.0f, 31.0f, 31.0f);
     _connectButtonTitle.frame = CGRectMake(10.0f, 61.0f, 92.0f, 24.0f);
     _connectButtonTitle.font = [UIFont boldSystemFontOfSize:16.0f];
+    VCSetLabelMinimumScaleFactor(_connectButtonTitle, 0.75f);
     _connectionStateLabel.frame = CGRectMake(summaryX, topInset + 174.0f, summaryWidth, 19.0f);
     _selectionLabel.frame = CGRectMake(summaryX, topInset + 194.0f, summaryWidth, 18.0f);
     _uptimeLabel.frame = CGRectMake(summaryX, topInset + 214.0f, summaryWidth, 18.0f);
@@ -16499,7 +16525,11 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
     if (_logView && _activeLogIndex >= 0 && _activeLogIndex <= 1 &&
         _logTexts[_activeLogIndex]) {
         CGPoint savedLogOffset = _logView.contentOffset;
-        _logView.attributedText = VCFormattedLogText(_logTexts[_activeLogIndex]);
+        if ([_logView respondsToSelector:@selector(setAttributedText:)]) {
+            _logView.attributedText = VCFormattedLogText(_logTexts[_activeLogIndex]);
+        } else {
+            _logView.text = _logTexts[_activeLogIndex];
+        }
         [_logView setContentOffset:savedLogOffset animated:NO];
     }
     _logView.indicatorStyle = VCAppearanceIsDark() ? UIScrollViewIndicatorStyleWhite
@@ -16642,7 +16672,7 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
     _connectButtonTitle.textColor = [UIColor whiteColor];
     _connectButtonTitle.textAlignment = NSTextAlignmentCenter;
     _connectButtonTitle.adjustsFontSizeToFitWidth = YES;
-    _connectButtonTitle.minimumScaleFactor = 0.75f;
+    VCSetLabelMinimumScaleFactor(_connectButtonTitle, 0.75f);
     [_connectBtn addSubview:_connectButtonTitle];
     [self.view addSubview:_connectBtn];
 
@@ -16656,7 +16686,7 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
     _selectionLabel.font = [UIFont systemFontOfSize:13.0f];
     _selectionLabel.backgroundColor = [UIColor clearColor];
     _selectionLabel.adjustsFontSizeToFitWidth = YES;
-    _selectionLabel.minimumScaleFactor = 0.75f;
+    VCSetLabelMinimumScaleFactor(_selectionLabel, 0.75f);
     _selectionLabel.autoresizingMask = UIViewAutoresizingFlexibleWidth;
     [self.view addSubview:_selectionLabel];
 
@@ -17111,7 +17141,7 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
                                            : UIViewAutoresizingFlexibleLeftMargin;
         button.titleLabel.font = [UIFont boldSystemFontOfSize:11.5f];
         button.titleLabel.adjustsFontSizeToFitWidth = YES;
-        button.titleLabel.minimumScaleFactor = 0.85f;
+        VCSetLabelMinimumScaleFactor(button.titleLabel, 0.85f);
         button.titleEdgeInsets = UIEdgeInsetsMake(0.0f, 2.0f, 0.0f, 26.0f);
         [button setTitle:tab == 0 ? @"Configurations" : @"Subscriptions"
                 forState:UIControlStateNormal];
@@ -17132,7 +17162,7 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
         countBadge.userInteractionEnabled = NO;
         countBadge.titleLabel.font = [UIFont boldSystemFontOfSize:11.0f];
         countBadge.titleLabel.adjustsFontSizeToFitWidth = YES;
-        countBadge.titleLabel.minimumScaleFactor = 0.65f;
+        VCSetLabelMinimumScaleFactor(countBadge.titleLabel, 0.65f);
         countBadge.layer.cornerRadius = 9.0f;
         [button addSubview:countBadge];
         [self updateMainTabButton:button section:tab];
