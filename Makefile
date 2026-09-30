@@ -17,6 +17,7 @@ IOS_STRIP ?= $(IOS_BIN)/arm-apple-darwin11-strip
 IOS_OTOOL ?= $(IOS_BIN)/arm-apple-darwin11-otool
 IOS_LIPO ?= $(IOS_BIN)/arm-apple-darwin11-lipo
 LDID ?= $(IOS_BIN)/ldid
+ARM64_LDID ?= $(IOS_BIN)/ldid-procursus
 IOS_BLOCKS_RUNTIME_LIB ?= libBlocksRuntime.so
 IOS_BLOCKS_RUNTIME_DIR ?= $(shell \
 	if [ -f "$(IOS_TOOLCHAIN)/lib/$(IOS_BLOCKS_RUNTIME_LIB)" ]; then \
@@ -130,6 +131,8 @@ check-ios-toolchain:
 	@test -f "$(OPENSSL_IOS_ARM64_CRYPTO_LIB)" || (echo "Missing arm64 OpenSSL crypto library: $(OPENSSL_IOS_ARM64_CRYPTO_LIB)"; echo "Run make openssl-ios-arm64 in ../vless-core-cli"; exit 1)
 	@test -n "$(IOS_BLOCKS_RUNTIME_DIR)" || (echo "Missing $(IOS_BLOCKS_RUNTIME_LIB) under $(IOS_TOOLCHAIN)"; echo "Add it to the toolchain or set IOS_BLOCKS_RUNTIME_DIR=/path/to/runtime/lib"; exit 1)
 	@test -x "$(LDID)" || (echo "Missing ldid tool: $(LDID)"; echo "Set IOS_TOOLCHAIN correctly or override LDID"; exit 1)
+	@test -x "$(ARM64_LDID)" || (echo "Missing modern arm64 signer: $(ARM64_LDID)"; echo "Install Procursus ldid or set ARM64_LDID=/path/to/ldid"; exit 1)
+	@$(ARM64_LDID) -v 2>&1 | grep -q '^Link Identity Editor v' || (echo "ARM64_LDID must be a modern Procursus ldid; the legacy signer produces incompatible arm64e signatures."; exit 1)
 	@test -f "$(APP_ENTITLEMENTS)" || (echo "Missing app entitlements: $(APP_ENTITLEMENTS)"; exit 1)
 	@test -f "$(DAEMON_ENTITLEMENTS)" || (echo "Missing daemon entitlements: $(DAEMON_ENTITLEMENTS)"; exit 1)
 
@@ -343,10 +346,10 @@ package-root: check-package-inputs $(APP_ARMV7_BIN) $(APP_ARM64_BIN) $(DAEMON_AR
 		$(PKG_ROOT)/usr/bin/vless-core-darwin-arm64 \
 		$(PKG_ROOT)/usr/bin/vless-core-curl-arm64 \
 		$(PKG_ROOT)/usr/bin/redsocks-vless-core-arm64; do \
-		$(LDID) -S "$$binary"; \
+		$(ARM64_LDID) -S "$$binary"; \
 	done
-	$(LDID) -S$(APP_ENTITLEMENTS) $(PKG_ROOT)/Applications/vless-core.app/vless-core-arm64
-	$(LDID) -S$(DAEMON_ENTITLEMENTS) $(PKG_ROOT)/usr/bin/vpnctld-arm64
+	$(ARM64_LDID) -S$(APP_ENTITLEMENTS) $(PKG_ROOT)/Applications/vless-core.app/vless-core-arm64
+	$(ARM64_LDID) -S$(DAEMON_ENTITLEMENTS) $(PKG_ROOT)/usr/bin/vpnctld-arm64
 	chmod 4755 $(PKG_ROOT)/usr/bin/vpnctld-bootstrap
 
 tarball: package-root
