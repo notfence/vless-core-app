@@ -9006,23 +9006,27 @@ static NSString *VCDiagnosticValue(NSDictionary *dictionary,
 }
 
 - (void)setCaptureSessionRunning:(BOOL)running {
-    if (!_captureSession || !_sessionQueue) return;
+    if (!_sessionQueue) return;
 
-    AVCaptureSession *session = [_captureSession retain];
-    QRScanVC *controller = (running && _metadataOutput) ? [self retain] : nil;
+    __block QRScanVC *controller = [self retain];
     dispatch_async(_sessionQueue, ^{
+        NSAutoreleasePool *pool = [[NSAutoreleasePool alloc] init];
+        AVCaptureSession *session = controller->_captureSession;
         if (running) {
+            [controller->_videoOutput setSampleBufferDelegate:controller queue:controller->_videoQueue];
+            [controller->_metadataOutput setMetadataObjectsDelegate:controller queue:dispatch_get_main_queue()];
             if (![session isRunning]) [session startRunning];
         } else {
+            [controller->_videoOutput setSampleBufferDelegate:nil queue:NULL];
+            [controller->_metadataOutput setMetadataObjectsDelegate:nil queue:NULL];
             if ([session isRunning]) [session stopRunning];
+            if (controller->_videoQueue) dispatch_sync(controller->_videoQueue, ^{});
         }
-        if (controller) {
-            dispatch_async(dispatch_get_main_queue(), ^{
-                [controller applyNativeQRMetadataType];
-                [controller release];
-            });
-        }
-        [session release];
+        [pool drain];
+        dispatch_async(dispatch_get_main_queue(), ^{
+            if (running) [controller applyNativeQRMetadataType];
+            [controller release];
+        });
     });
 }
 
@@ -9444,6 +9448,7 @@ static NSString *VCDiagnosticValue(NSDictionary *dictionary,
 
 - (void)viewDidAppear:(BOOL)animated {
     [super viewDidAppear:animated];
+    if (_didFinish) return;
     _scannerVisible = YES;
     _scanEnabledAt = CACurrentMediaTime() + 1.0;
     _nextZBarScanAt = _scanEnabledAt;
@@ -9465,7 +9470,10 @@ static NSString *VCDiagnosticValue(NSDictionary *dictionary,
 }
 
 - (void)cancelPressed {
+    if (_didFinish) return;
     _didFinish = YES;
+    _cancelButton.enabled = NO;
+    _torchButton.enabled = NO;
     [_pendingScanResult release];
     _pendingScanResult = nil;
     [self setTorchEnabled:NO];
@@ -9556,8 +9564,9 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
 
 - (void)dealloc {
     [NSObject cancelPreviousPerformRequestsWithTarget:self];
-    [self setTorchEnabled:NO];
-    [self setCaptureSessionRunning:NO];
+    [_videoOutput setSampleBufferDelegate:nil queue:NULL];
+    [_metadataOutput setMetadataObjectsDelegate:nil queue:NULL];
+    [_previewLayer setSession:nil];
     if (_sessionQueue) {
         dispatch_release(_sessionQueue);
         _sessionQueue = NULL;
