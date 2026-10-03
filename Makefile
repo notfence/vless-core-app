@@ -50,40 +50,27 @@ OPENSSL_IOS_ARM64_INCLUDE ?= $(OPENSSL_IOS_ARM64_DIR)/include
 OPENSSL_IOS_ARM64_SSL_LIB ?= $(OPENSSL_IOS_ARM64_DIR)/lib/libssl.a
 OPENSSL_IOS_ARM64_CRYPTO_LIB ?= $(OPENSSL_IOS_ARM64_DIR)/lib/libcrypto.a
 
-ZBAR_DIR := third_party/zbar/zbar
-ZBAR_SRC := \
-	$(ZBAR_DIR)/config.c \
-	$(ZBAR_DIR)/decoder/qr_finder.c \
-	$(ZBAR_DIR)/decoder.c \
-	$(ZBAR_DIR)/error.c \
-	$(ZBAR_DIR)/image.c \
-	$(ZBAR_DIR)/img_scanner.c \
-	$(ZBAR_DIR)/qrcode/bch15_5.c \
-	$(ZBAR_DIR)/qrcode/binarize.c \
-	$(ZBAR_DIR)/qrcode/isaac.c \
-	$(ZBAR_DIR)/qrcode/qrdec.c \
-	$(ZBAR_DIR)/qrcode/qrdectxt.c \
-	$(ZBAR_DIR)/qrcode/rs.c \
-	$(ZBAR_DIR)/qrcode/util.c \
-	$(ZBAR_DIR)/refcnt.c \
-	$(ZBAR_DIR)/scanner.c \
-	$(ZBAR_DIR)/symbol.c
+include $(ROOT)/common/zbar_sources.mk
 ZBAR_HEADERS := $(shell find $(ZBAR_DIR) -type f -name '*.h')
 ZBAR_OBJ := $(patsubst $(ZBAR_DIR)/%.c,$(BUILD_DIR)/zbar/%.o,$(ZBAR_SRC))
 ZBAR_LIB := $(BUILD_DIR)/libzbar-qr.a
 ZBAR_ARM64_OBJ := $(patsubst $(ZBAR_DIR)/%.c,$(BUILD_DIR)/arm64/zbar/%.o,$(ZBAR_SRC))
 ZBAR_ARM64_LIB := $(BUILD_DIR)/arm64/libzbar-qr.a
 
-APP_SRC := app/main.m integrations/happ/happ_crypto.c integrations/karing/karing_backup.m
-APP_HEADERS := integrations/happ/happ_crypto.h integrations/karing/karing_backup.h daemon/vpnctld_protocol.h
+COMMON_APP_SRC := common/foundation_logic.m common/profile_logic.m common/secure_store.m common/connection_logic.m common/main_geometry.c common/list_logic.m
+COMMON_APP_HEADERS := $(wildcard common/*.h)
+APP_SCREEN_SRC := app/main.m app/main_screen.m app/main_state.m app/main_connection.m app/main_ping.m app/main_subscriptions.m app/main_import.m app/main_layout.m app/main_settings.m app/main_terminal.m app/main_table.m
+APP_SUPPORT_SRC := app/app_support.m app/daemon_client.m app/network_ping.m app/runtime_info.m app/subscription_fetch.m app/update_checker.m app/diagnostics.m app/appearance.m app/connection_button.m app/main_cells.m app/settings.m app/help_controllers.m app/routing.m app/qr_scanner.m app/subscription_info.m app/import_browser.m
+APP_SRC := $(APP_SCREEN_SRC) $(APP_SUPPORT_SRC) $(COMMON_APP_SRC) integrations/happ/happ_crypto.c integrations/karing/karing_backup.m
+APP_HEADERS := $(wildcard app/*.h) integrations/happ/happ_crypto.h integrations/karing/karing_backup.h daemon/vpnctld_protocol.h $(COMMON_APP_HEADERS)
 APP_OBJ := \
 	$(patsubst %.m,$(BUILD_DIR)/app/%.o,$(filter %.m,$(APP_SRC))) \
 	$(patsubst %.c,$(BUILD_DIR)/app/%.o,$(filter %.c,$(APP_SRC)))
 APP_ARM64_OBJ := \
 	$(patsubst %.m,$(BUILD_DIR)/arm64/app/%.o,$(filter %.m,$(APP_SRC))) \
 	$(patsubst %.c,$(BUILD_DIR)/arm64/app/%.o,$(filter %.c,$(APP_SRC)))
-DAEMON_SRC := daemon/vpnctld.c daemon/socket_peer_pid.c daemon/legacy_loopback.c daemon/legacy_dns.c daemon/vpnicon_statusbar.c daemon/system_proxy.c
-DAEMON_HEADERS := daemon/vpnctld_protocol.h daemon/socket_peer_pid.h daemon/legacy_loopback.h daemon/legacy_dns.h daemon/system_proxy.h
+DAEMON_SRC := daemon/vpnctld.c common/daemon_policy.c common/control_auth.c common/helper_monitor.c common/dns_relay.c daemon/socket_peer_pid.c daemon/legacy_loopback.c daemon/legacy_dns.c daemon/vpnicon_statusbar.c daemon/system_proxy.c
+DAEMON_HEADERS := daemon/vpnctld_protocol.h daemon/socket_peer_pid.h daemon/legacy_loopback.h daemon/legacy_dns.h daemon/system_proxy.h common/daemon_policy.h common/control_auth.h common/helper_monitor.h common/dns_relay.h
 BOOTSTRAP_SRC := daemon/vpnctld_bootstrap.c
 
 APP_CFLAGS := -fno-objc-arc -Wall -Wextra -O2 -arch armv7 -miphoneos-version-min=$(LEGACY_IOS_MIN_VERSION) -isysroot $(APP_IOS_SDK) -Iintegrations/happ -Iintegrations/karing -I$(ZBAR_DIR) -I$(OPENSSL_IOS_INCLUDE)
@@ -112,6 +99,20 @@ REDSOCKS_ARM64_BIN ?= $(ROOT)/third_party/redsocks-vless-core-arm64
 CA_BUNDLE ?= $(abspath ../vless-core-cli/third_party/cacert.pem)
 
 all: deb
+
+test:
+	$(MAKE) -C $(ROOT)/tests test HOST_BUILD_DIR=$(BUILD_DIR)/host-tests
+
+preflight: test
+
+test-sanitizers:
+	$(MAKE) -C $(ROOT)/tests sanitizers HOST_BUILD_DIR=$(BUILD_DIR)/host-tests
+
+test-asan:
+	$(MAKE) -C $(ROOT)/tests asan HOST_BUILD_DIR=$(BUILD_DIR)/host-tests
+
+verify-deb:
+	python3 $(ROOT)/tests/test_package.py --deb $(DEB_OUT)
 
 check-ios-toolchain:
 	@test -x "$(IOS_CC)" || (echo "Missing iOS compiler: $(IOS_CC)"; echo "Set IOS_TOOLCHAIN=/path/to/ios6/toolchain"; exit 1)
@@ -186,7 +187,7 @@ check-package-inputs:
 		fi; \
 	done
 
-$(BUILD_DIR)/zbar/%.o: $(ZBAR_DIR)/%.c $(ZBAR_HEADERS)
+$(BUILD_DIR)/zbar/%.o: $(ZBAR_DIR)/%.c $(ZBAR_HEADERS) | preflight
 	mkdir -p $(dir $@)
 	PATH="$(IOS_BIN):$$PATH" $(IOS_RUNTIME_ENV) $(IOS_CC) $(ZBAR_CFLAGS) -c $< -o $@
 
@@ -194,7 +195,7 @@ $(ZBAR_LIB): check-ios-toolchain $(ZBAR_OBJ)
 	$(IOS_AR) rcs $@ $(ZBAR_OBJ)
 	$(IOS_RANLIB) $@
 
-$(BUILD_DIR)/arm64/zbar/%.o: $(ZBAR_DIR)/%.c $(ZBAR_HEADERS)
+$(BUILD_DIR)/arm64/zbar/%.o: $(ZBAR_DIR)/%.c $(ZBAR_HEADERS) | preflight
 	mkdir -p $(dir $@)
 	PATH="$(IOS_BIN):$$PATH" $(IOS_RUNTIME_ENV) $(IOS_CC) $(ZBAR_ARM64_CFLAGS) -c $< -o $@
 
@@ -202,55 +203,55 @@ $(ZBAR_ARM64_LIB): check-ios-toolchain $(ZBAR_ARM64_OBJ)
 	$(IOS_AR) rcs $@ $(ZBAR_ARM64_OBJ)
 	$(IOS_RANLIB) $@
 
-$(BUILD_DIR)/app/%.o: %.m $(APP_HEADERS)
+$(BUILD_DIR)/app/%.o: %.m $(APP_HEADERS) | preflight
 	mkdir -p $(dir $@)
 	PATH="$(IOS_BIN):$$PATH" $(IOS_RUNTIME_ENV) $(IOS_CC) $(APP_CFLAGS) -c $< -o $@
 
-$(BUILD_DIR)/app/%.o: %.c $(APP_HEADERS)
+$(BUILD_DIR)/app/%.o: %.c $(APP_HEADERS) | preflight
 	mkdir -p $(dir $@)
 	PATH="$(IOS_BIN):$$PATH" $(IOS_RUNTIME_ENV) $(IOS_CC) $(APP_CFLAGS) -c $< -o $@
 
-$(BUILD_DIR)/arm64/app/%.o: %.m $(APP_HEADERS)
+$(BUILD_DIR)/arm64/app/%.o: %.m $(APP_HEADERS) | preflight
 	mkdir -p $(dir $@)
 	PATH="$(IOS_BIN):$$PATH" $(IOS_RUNTIME_ENV) $(IOS_CC) $(APP_ARM64_CFLAGS) -c $< -o $@
 
-$(BUILD_DIR)/arm64/app/%.o: %.c $(APP_HEADERS)
+$(BUILD_DIR)/arm64/app/%.o: %.c $(APP_HEADERS) | preflight
 	mkdir -p $(dir $@)
 	PATH="$(IOS_BIN):$$PATH" $(IOS_RUNTIME_ENV) $(IOS_CC) $(APP_ARM64_CFLAGS) -c $< -o $@
 
-$(APP_ARMV7_BIN): check-ios-toolchain $(APP_OBJ) $(ZBAR_LIB)
+$(APP_ARMV7_BIN): check-ios-toolchain $(APP_OBJ) $(ZBAR_LIB) | preflight
 	mkdir -p $(dir $@)
 	PATH="$(IOS_BIN):$$PATH" $(IOS_RUNTIME_ENV) $(IOS_CC) -arch armv7 -miphoneos-version-min=$(LEGACY_IOS_MIN_VERSION) -isysroot $(IOS_SDK) $(APP_OBJ) $(ZBAR_LIB) -o $@ $(APP_LDFLAGS)
 	@$(IOS_OTOOL) -hv $@ | grep -qw PIE || (echo "Refusing non-PIE iOS binary: $@"; exit 1)
 
-$(APP_ARM64_BIN): check-ios-toolchain $(APP_ARM64_OBJ) $(ZBAR_ARM64_LIB)
+$(APP_ARM64_BIN): check-ios-toolchain $(APP_ARM64_OBJ) $(ZBAR_ARM64_LIB) | preflight
 	mkdir -p $(dir $@)
 	PATH="$(IOS_BIN):$$PATH" $(IOS_RUNTIME_ENV) $(IOS_CC) $(APP_ARM64_CFLAGS) $(APP_ARM64_OBJ) $(ZBAR_ARM64_LIB) -o $@ $(APP_ARM64_LDFLAGS)
 	@$(IOS_OTOOL) -hv $@ | grep -qw PIE || (echo "Refusing non-PIE iOS binary: $@"; exit 1)
 
-$(DAEMON_ARMV7_BIN): check-ios-toolchain $(DAEMON_SRC) $(DAEMON_HEADERS)
+$(DAEMON_ARMV7_BIN): check-ios-toolchain $(DAEMON_SRC) $(DAEMON_HEADERS) | preflight
 	mkdir -p $(dir $@)
 	PATH="$(IOS_BIN):$$PATH" $(IOS_RUNTIME_ENV) $(IOS_CC) $(DAEMON_CFLAGS) $(DAEMON_SRC) -o $@ $(DAEMON_LDFLAGS)
 	@$(IOS_OTOOL) -hv $@ | grep -qw PIE || (echo "Refusing non-PIE iOS binary: $@"; exit 1)
 
-$(DAEMON_ARM64_BIN): check-ios-toolchain $(DAEMON_SRC) $(DAEMON_HEADERS)
+$(DAEMON_ARM64_BIN): check-ios-toolchain $(DAEMON_SRC) $(DAEMON_HEADERS) | preflight
 	mkdir -p $(dir $@)
 	PATH="$(IOS_BIN):$$PATH" $(IOS_RUNTIME_ENV) $(IOS_CC) $(DAEMON_ARM64_CFLAGS) $(DAEMON_SRC) -o $@ $(DAEMON_ARM64_LDFLAGS)
 	@$(IOS_OTOOL) -hv $@ | grep -qw PIE || (echo "Refusing non-PIE iOS binary: $@"; exit 1)
 
-$(BOOTSTRAP_ARMV7_BIN): check-ios-toolchain $(BOOTSTRAP_SRC) $(DAEMON_HEADERS)
+$(BOOTSTRAP_ARMV7_BIN): check-ios-toolchain $(BOOTSTRAP_SRC) $(DAEMON_HEADERS) | preflight
 	mkdir -p $(dir $@)
 	PATH="$(IOS_BIN):$$PATH" $(IOS_RUNTIME_ENV) $(IOS_CC) $(DAEMON_CFLAGS) $(BOOTSTRAP_SRC) -o $@ $(DAEMON_LDFLAGS)
 	@$(IOS_OTOOL) -hv $@ | grep -qw PIE || (echo "Refusing non-PIE iOS binary: $@"; exit 1)
 
-$(BOOTSTRAP_ARM64_BIN): check-ios-toolchain $(BOOTSTRAP_SRC) $(DAEMON_HEADERS)
+$(BOOTSTRAP_ARM64_BIN): check-ios-toolchain $(BOOTSTRAP_SRC) $(DAEMON_HEADERS) | preflight
 	mkdir -p $(dir $@)
 	PATH="$(IOS_BIN):$$PATH" $(IOS_RUNTIME_ENV) $(IOS_CC) $(DAEMON_ARM64_CFLAGS) $(BOOTSTRAP_SRC) -o $@ $(BOOTSTRAP_ARM64_LDFLAGS)
 	@$(IOS_OTOOL) -hv $@ | grep -qw PIE || (echo "Refusing non-PIE iOS binary: $@"; exit 1)
 
-app: $(APP_ARMV7_BIN) $(APP_ARM64_BIN)
+app: preflight $(APP_ARMV7_BIN) $(APP_ARM64_BIN)
 
-daemon: $(DAEMON_ARMV7_BIN) $(DAEMON_ARM64_BIN) $(BOOTSTRAP_ARMV7_BIN) $(BOOTSTRAP_ARM64_BIN)
+daemon: preflight $(DAEMON_ARMV7_BIN) $(DAEMON_ARM64_BIN) $(BOOTSTRAP_ARMV7_BIN) $(BOOTSTRAP_ARM64_BIN)
 
 package-root: check-package-inputs $(APP_ARMV7_BIN) $(APP_ARM64_BIN) $(DAEMON_ARMV7_BIN) $(DAEMON_ARM64_BIN) $(BOOTSTRAP_ARMV7_BIN) $(BOOTSTRAP_ARM64_BIN)
 	mkdir -p $(PKG_ROOT)
@@ -352,14 +353,15 @@ package-root: check-package-inputs $(APP_ARMV7_BIN) $(APP_ARM64_BIN) $(DAEMON_AR
 	$(ARM64_LDID) -S$(DAEMON_ENTITLEMENTS) $(PKG_ROOT)/usr/bin/vpnctld-arm64
 	chmod 4755 $(PKG_ROOT)/usr/bin/vpnctld-bootstrap
 
-tarball: package-root
+tarball: preflight package-root
 	cd $(BUILD_DIR) && tar -czf vless-core-app-bundle.tar.gz -C pkgroot .
 
-deb: package-root
+deb: preflight package-root
 	rm -f $(BUILD_DIR)/com.vlesscore.app*_iphoneos-arm.deb
 	dpkg-deb --uniform-compression -Zgzip -z6 --root-owner-group -b $(PKG_ROOT) $(DEB_OUT)
+	python3 $(ROOT)/tests/test_package.py --deb $(DEB_OUT)
 
 clean:
 	rm -rf $(BUILD_DIR)
 
-.PHONY: all app daemon check-ios-toolchain check-package-inputs package-root deb clean tarball
+.PHONY: all app daemon test preflight test-sanitizers test-asan verify-deb check-ios-toolchain check-package-inputs package-root deb clean tarball

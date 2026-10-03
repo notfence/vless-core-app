@@ -1,6 +1,6 @@
 #define _DARWIN_C_SOURCE 1
 #include "legacy_dns.h"
-#if !defined(__LP64__)
+#if !defined(__LP64__) || defined(VC_HOST_LEGACY_TEST)
 #include <CoreFoundation/CoreFoundation.h>
 #include <dlfcn.h>
 #include <errno.h>

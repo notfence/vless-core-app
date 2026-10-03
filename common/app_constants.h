@@ -1,0 +1,76 @@
+#ifndef VC_APP_CONSTANTS_H
+#define VC_APP_CONSTANTS_H
+#import <Foundation/Foundation.h>
+
+static NSString *const kDefaultsConfigsKey = @"vlesscore.configs";
+static NSString *const kDefaultsSubsKey = @"vlesscore.subscriptions";
+static NSString *const kDefaultsAutoUpdateSubsKey = @"vlesscore.auto_update_subs";
+static NSString *const kDefaultsPreserveCustomSubscriptionNamesKey = @"vlesscore.preserve_custom_subscription_names";
+static NSString *const kDefaultsStealthModeKey = @"vlesscore.stealth_mode";
+static NSString *const kDefaultsDarkThemeKey = @"vlesscore.dark_theme";
+static NSString *const kDefaultsAccentColorKey = @"vlesscore.accent_color";
+static NSString *const kDefaultsAutomaticUpdateChecksKey = @"vlesscore.update.automatic";
+static NSString *const kDefaultsPingTypeKey = @"vlesscore.ping.type";
+static NSString *const kDefaultsXrayVersionSpoofEnabledKey = @"vlesscore.xray.version.spoof.enabled";
+static NSString *const kDefaultsXrayVersionKey = @"vlesscore.xray.version";
+static NSString *const kDefaultsLastSelectionKey = @"vlesscore.last_selection";
+static NSString *const kDefaultsConfigurationsExpandedKey = @"vlesscore.configurations_expanded";
+static NSString *const kDefaultsSubscriptionsExpandedKey = @"vlesscore.subscriptions_expanded";
+static NSString *const kDefaultsExpandedSubscriptionKey = @"vlesscore.expanded_subscription";
+static NSString *const kDefaultsLastUpdateCheckKey = @"vlesscore.update.last_check";
+static NSString *const kDefaultsLatestVersionKey = @"vlesscore.update.latest_version";
+static NSString *const kDefaultsLatestReleaseURLKey = @"vlesscore.update.latest_release_url";
+static NSString *const kDefaultsRoutingEnabledKey = @"vlesscore.routing.enabled";
+static NSString *const kDefaultsRoutingDefaultKey = @"vlesscore.routing.default";
+static NSString *const kDefaultsRoutingBypassLANKey = @"vlesscore.routing.bypass_lan";
+static NSString *const kDefaultsRoutingRulesKey = @"vlesscore.routing.rules";
+static NSString *const kDefaultsSubHWIDKey = @"vlesscore.subscription_hwid";
+static NSString *const kDefaultsDiagnosticAppActivityKey = @"vlesscore.diagnostics.app_activity";
+static NSString *const kDefaultsPreferGitHubLegacyKey = @"vlesscore.links.prefer_github_legacy";
+static NSString *const kSubscriptionAllowInsecureFetchKey = @"allow_insecure_fetch";
+static NSString *const kSubscriptionAllowPlainHTTPKey = @"allow_plain_http";
+static NSString *const kSubscriptionHappSourceKey = @"happ_source";
+static NSString *const kHappSubscriptionUserAgent = @"Happ/3.26.3/iOS";
+static NSString *const kHappAddPrefix = @"happ://add/";
+static NSString *const kSubscriptionUserInfoKey = @"subscription_userinfo";
+static NSString *const kSubscriptionUploadKey = @"upload";
+static NSString *const kSubscriptionDownloadKey = @"download";
+static NSString *const kSubscriptionTotalKey = @"total";
+static NSString *const kSubscriptionExpireKey = @"expire";
+static NSString *const kSubscriptionMetadataKey = @"metadata";
+static NSString *const kSubscriptionDescriptionKey = @"description";
+static NSString *const kSubscriptionSupportURLKey = @"support_url";
+static NSString *const kSubscriptionWebPageURLKey = @"web_page_url";
+static NSString *const kSubscriptionUpdateIntervalKey = @"update_interval_hours";
+static NSString *const kSubscriptionRefillDateKey = @"refill_date";
+static NSString *const kSubscriptionLastUpdatedKey = @"last_updated";
+static NSString *const kSubscriptionCustomNameKey = @"custom_name";
+static NSString *const kHiddenLinkText = @"**link is hidden**";
+static NSString *const kDefaultXrayVersion = @"26.3.27";
+static NSString *const kVCQRMetadataType = @"org.iso.QRCode";
+static NSString *const kUpdateAPIURL = @"https://api.github.com/repos/notfence/vless-core-app/releases/latest";
+static NSString *const kUpdateReleasesURL = @"https://github.com/notfence/vless-core-app/releases";
+static NSString *const kProjectURL = @"https://github.com/notfence/vless-core-app";
+static NSString *const kGitHubLegacyProjectURL = @"githublegacy://repo/notfence/vless-core-app";
+static NSString *const kGitHubLegacyLatestReleaseURL = @"githublegacy://release/notfence/vless-core-app/latest";
+static const NSTimeInterval kAutomaticUpdateCheckInterval = 24.0 * 60.0 * 60.0;
+static NSString *const kImportDirectoryPath = @"/var/mobile/vless-core-import";
+static NSString *const kSecureStoreDirectoryPath = @"/private/var/mobile/Library/Application Support/vless-core";
+static NSString *const kSecureStoreFilePath = @"/private/var/mobile/Library/Application Support/vless-core/configs.dat";
+static NSString *const kDiagnosticEventDatabasePath = @"/private/var/mobile/Library/Application Support/vless-core/diagnostic-events.sqlite3";
+static NSString *const kVCDiagnosticEventsClearedNotification = @"VCDiagnosticEventsClearedNotification";
+static const NSUInteger kVCDiagnosticEventCapacity = 250;
+static const NSUInteger kVCMaximumConfigURIBytes = 4095;
+static const NSUInteger kVCMaximumConfigQueryParameters = 128;
+static const NSUInteger kVCMaximumConfigQueryKeyBytes = 127;
+static const NSUInteger kVCMaximumSubscriptionURLBytes = 8192;
+static const NSUInteger kVCMaximumSubscriptionBytes = 32U * 1024U * 1024U;
+static const unsigned char kVCSecureStoreMagic[8] = {'V', 'C', 'S', 'A', 'F', 'E', '0', '1'};
+static const size_t kVCSecureStoreKeyLength = 32;
+static const size_t kVCSecureStoreNonceLength = 12;
+static const size_t kVCSecureStoreTagLength = 16;
+static const NSUInteger kVCSecureStoreMaximumBytes = 64U * 1024U * 1024U;
+static NSString *const kVCPingLoadingValue = @"__loading__";
+static NSString *const kVCPingFailureValue = @"Failed";
+
+#endif

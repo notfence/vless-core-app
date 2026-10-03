@@ -7,9 +7,13 @@
 #include <sys/un.h>
 #include <unistd.h>
 
-#if !defined(__LP64__)
+#if !defined(__LP64__) || defined(VC_HOST_PEER_TEST)
 #include <sys/syscall.h>
+#if defined(VC_HOST_PEER_TEST)
+#include "../tests/support/darwin_peer.h"
+#else
 #include <sys/ucred.h>
+#endif
 
 typedef struct {
     unsigned char file_info[24];
@@ -125,7 +129,7 @@ pid_t vc_socket_peer_pid(int fd, const char *const *paths, size_t path_count) {
         if (size != sizeof(pid) || pid <= 0) { errno = EINVAL; return -1; }
         return pid;
     }
-#if !defined(__LP64__)
+#if !defined(__LP64__) || defined(VC_HOST_PEER_TEST)
     if (errno == EOPNOTSUPP) {
         return vc_legacy_socket_peer_pid(fd, paths, path_count);
     }

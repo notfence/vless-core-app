@@ -14,7 +14,9 @@
 #include <sys/types.h>
 #include <unistd.h>
 
+#ifndef VC_PROXY_STATE_DIRECTORY
 #define VC_PROXY_STATE_DIRECTORY "/var/db/vless-core"
+#endif
 #define VC_PROXY_BACKUP_PATH VC_PROXY_STATE_DIRECTORY "/system-proxy-backup.plist"
 #define VC_PROXY_BACKUP_TEMP_PATH VC_PROXY_STATE_DIRECTORY "/system-proxy-backup.plist.tmp"
 #define VC_PROXY_BACKUP_CORRUPT_PATH VC_PROXY_STATE_DIRECTORY "/system-proxy-backup.corrupt.plist"

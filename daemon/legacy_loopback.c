@@ -1,7 +1,7 @@
 #define _DARWIN_C_SOURCE 1
 #include "legacy_loopback.h"
 
-#if !defined(__LP64__)
+#if !defined(__LP64__) || defined(VC_HOST_LEGACY_TEST)
 #include <arpa/inet.h>
 #include <errno.h>
 #include <fcntl.h>
@@ -15,6 +15,9 @@
 #include <sys/stat.h>
 #include <sys/utsname.h>
 #include <unistd.h>
+#if defined(VC_HOST_LEGACY_TEST)
+#include "../tests/support/darwin_route.h"
+#endif
 
 #ifndef VC_LOOPBACK_STATE_PATH
 #define VC_LOOPBACK_STATE_PATH "/var/db/vless-core/loopback-routes"
