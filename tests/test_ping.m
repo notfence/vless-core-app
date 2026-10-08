@@ -40,11 +40,20 @@ pid_t __wrap_waitpid(pid_t pid, int *status, int options) {
     return waitResult;
 }
 
-@interface VCPingTestOwner : NSObject
+@interface VCPingTestOwner : NSObject {
+    VCPingCancellation *ping;
+    NSUInteger stopped;
+}
+@property(nonatomic, retain) VCPingCancellation *ping;
+@property(nonatomic) NSUInteger stopped;
 - (void)pingWorker:(id)payload;
+- (void)stopAllPings;
 @end
 @implementation VCPingTestOwner
+@synthesize ping, stopped;
+- (void)dealloc { [ping release]; [super dealloc]; }
 - (void)pingWorker:(id)payload { (void)payload; }
+- (void)stopAllPings { stopped++; [ping cancel]; }
 @end
 
 static void *cancelWhileWaiting(void *opaque) {
@@ -104,6 +113,53 @@ int main(void) {
     VCPingOperation *operation = [[[VCPingOperation alloc] initWithTarget:owner payload:@{} cancellation:cancellation] autorelease];
     [operation cancel];
     CHECK("ping/queue-cancel-propagates-to-worker", [operation isCancelled] && [cancellation isCancelled]);
+    NSString *record = @"2026-10-05 I [probe] v=1 id=2 success=1 stage=none dns_ms=3 tcp_ms=4 transport_ms=5 protocol_ms=6 carry_ms=7 total_ms=25\n";
+    NSDictionary *report = VCProbeReportFromLog(record);
+    CHECK("ping/parse-real-core-report", [[report objectForKey:@"id"] intValue] == 2 && [[report objectForKey:@"carry_ms"] intValue] == 7);
+    CHECK("ping/ignore-partially-written-record", VCProbeReportFromLog([record stringByTrimmingCharactersInSet:[NSCharacterSet newlineCharacterSet]]) == nil);
+    CHECK("ping/ignore-unstructured-helper-log", VCProbeReportFromLog(@"connection failed\n") == nil && VCProbeReportFromLog(nil) == nil);
+    NSArray *malformed = @[
+        [record stringByReplacingOccurrencesOfString:@"v=1" withString:@"v=4294967297"],
+        [record stringByReplacingOccurrencesOfString:@"success=1" withString:@"success=4294967297"],
+        [record stringByReplacingOccurrencesOfString:@"success=1" withString:@"success=0"],
+        [record stringByReplacingOccurrencesOfString:@"stage=none" withString:@"stage=unknown"],
+        [record stringByReplacingOccurrencesOfString:@"dns_ms=3" withString:@"dns_ms=-2"],
+        [record stringByReplacingOccurrencesOfString:@"tcp_ms=4" withString:@"tcp_ms=nan"],
+        [record stringByReplacingOccurrencesOfString:@"total_ms=25" withString:@"total_ms=-1"],
+        [record stringByReplacingOccurrencesOfString:@"id=2" withString:@"id=0"],
+        [record stringByReplacingOccurrencesOfString:@"id=2" withString:@"id=999999999999999999999999"],
+        [record stringByReplacingOccurrencesOfString:@"\n" withString:@" uri=secret\n"],
+        [record stringByReplacingOccurrencesOfString:@"\n" withString:@" id=3\n"]
+    ];
+    for (NSString *invalid in malformed) CHECK("ping/reject-malformed-or-ambiguous-report", VCProbeReportFromLog(invalid) == nil);
+    NSString *failed = [record stringByReplacingOccurrencesOfString:@"success=1 stage=none" withString:@"success=0 stage=transport"];
+    report = VCProbeReportFromLog([record stringByAppendingString:failed]);
+    CHECK("ping/latest-complete-attempt-wins", ![[report objectForKey:@"success"] boolValue] && [[report objectForKey:@"stage"] isEqual:@"transport"]);
+    CHECK("ping/failure-stage-visible-and-red", [VCProbeFailureDisplay(report) isEqual:@"Transport"] && VCPingDisplayIsFailure(VCProbeFailureDisplay(report)));
+    for (NSString *stage in @[@"dns", @"tcp", @"transport", @"protocol", @"carry"])
+        CHECK("ping/every-failed-stage-has-a-label", VCPingDisplayIsFailure(VCProbeFailureDisplay(@{@"stage":stage})));
+    CHECK("ping/legacy-helper-falls-back-without-guessing", [VCProbeFailureDisplay(nil) isEqual:@"Failed"] && [VCProbeSummary(nil) isEqual:@"details=unavailable"]);
+    CHECK("ping/latency-and-loading-not-errors", !VCPingDisplayIsFailure(@"15 ms") && !VCPingDisplayIsFailure(@"...") && !VCPingDisplayIsFailure(nil));
+    NSMutableDictionary *mutableReport = [NSMutableDictionary dictionaryWithDictionary:report];
+    cancellation.diagnosticReport = mutableReport;
+    [mutableReport setObject:@"dns" forKey:@"stage"];
+    CHECK("ping/report-is-an-immutable-snapshot", [[cancellation.diagnosticReport objectForKey:@"stage"] isEqual:@"transport"]);
+    CHECK("ping/summary-contains-measured-stages", [VCProbeSummary(report) rangeOfString:@"transport_ms=5"].location != NSNotFound);
+    CHECK("ping/summary-never-contains-private-extra-fields", [VCProbeSummary(@{@"stage":@"tcp", @"uri":@"secret", @"password":@"secret"}) rangeOfString:@"secret"].location == NSNotFound);
+    CHECK("ping/accept-result-from-current-network", VCPingResultIsCurrent(3,3));
+    CHECK("ping/reject-result-from-old-network", !VCPingResultIsCurrent(2,3));
+    NSString *network = nil;
+    NSUInteger generation = 0;
+    NSMutableDictionary *displays = [NSMutableDictionary dictionary];
+    owner.ping = [[[VCPingCancellation alloc] init] autorelease];
+    CHECK("ping/initial-network-does-not-cancel-work", !VCPingUpdateNetwork(owner,@"wifi-a",&network,&generation,displays) && generation == 1 && owner.stopped == 0);
+    [displays setObject:@"17 ms" forKey:@"vless-core"];
+    CHECK("ping/same-network-preserves-results", !VCPingUpdateNetwork(owner,@"wifi-a",&network,&generation,displays) && [displays count] == 1 && ![owner.ping isCancelled]);
+    NSUInteger measuredGeneration = generation;
+    CHECK("ping/network-change-cancels-real-operation", VCPingUpdateNetwork(owner,@"wifi-b",&network,&generation,displays) && owner.stopped == 1 && [owner.ping isCancelled]);
+    CHECK("ping/network-change-clears-old-displays", [displays count] == 0 && !VCPingResultIsCurrent(measuredGeneration,generation));
+    CHECK("ping/unknown-network-does-not-invent-change", !VCPingUpdateNetwork(owner,nil,&network,&generation,displays) && owner.stopped == 1);
+    [network release];
     FINISH("ping cancellation");
     alarm(0);
     [pool drain];

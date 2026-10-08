@@ -1,8 +1,76 @@
 #import "app_support.h"
+#include <ifaddrs.h>
+#include <net/if.h>
+#import <SystemConfiguration/CaptiveNetwork.h>
+
+static long long PingMonotonicMs(void) {
+    return (long long)([[NSProcessInfo processInfo] systemUptime] * 1000.0);
+}
+
+static NSDictionary *NativePingReport(NSString *stage, long long dns, long long tcp, long long carry, long long total) {
+    return @{@"v":@1, @"id":@0, @"success":@([stage isEqualToString:@"none"]), @"stage":stage,
+             @"dns_ms":@(dns), @"tcp_ms":@(tcp), @"transport_ms":@(-1), @"protocol_ms":@(-1),
+             @"carry_ms":@(carry), @"total_ms":@(total)};
+}
+
+NSString *VCPingNetworkSignature(void) {
+    struct ifaddrs *interfaces = NULL;
+    if (getifaddrs(&interfaces) != 0) return nil;
+    NSMutableArray *addresses = [NSMutableArray array];
+    for (struct ifaddrs *it = interfaces; it; it = it->ifa_next) {
+        if (!it->ifa_addr || !it->ifa_name || !(it->ifa_flags & IFF_UP) || !(it->ifa_flags & IFF_RUNNING)) continue;
+        if (strncmp(it->ifa_name,"en",2) && strncmp(it->ifa_name,"pdp_ip",6)) continue;
+        char address[INET6_ADDRSTRLEN];
+        int family = it->ifa_addr->sa_family;
+        const void *bytes = family == AF_INET ? (const void *)&((struct sockaddr_in *)it->ifa_addr)->sin_addr
+            : family == AF_INET6 ? (const void *)&((struct sockaddr_in6 *)it->ifa_addr)->sin6_addr : NULL;
+        if (bytes && inet_ntop(family,bytes,address,sizeof(address)))
+            [addresses addObject:[NSString stringWithFormat:@"%s=%s",it->ifa_name,address]];
+    }
+    freeifaddrs(interfaces);
+    CFArrayRef wifiInterfaces = CNCopySupportedInterfaces();
+    for (NSString *interface in (NSArray *)wifiInterfaces) {
+        CFDictionaryRef info = CNCopyCurrentNetworkInfo((CFStringRef)interface);
+        NSString *bssid = info ? [(NSDictionary *)info objectForKey:(NSString *)kCNNetworkInfoKeyBSSID] : nil;
+        if ([bssid isKindOfClass:[NSString class]]) [addresses addObject:[NSString stringWithFormat:@"wifi=%@",bssid]];
+        if (info) CFRelease(info);
+    }
+    if (wifiInterfaces) CFRelease(wifiInterfaces);
+    [addresses sortUsingSelector:@selector(compare:)];
+    struct sockaddr_in route;
+    memset(&route,0,sizeof(route));
+    route.sin_len = sizeof(route);
+    route.sin_family = AF_INET;
+    SCNetworkReachabilityRef reachability = SCNetworkReachabilityCreateWithAddress(kCFAllocatorDefault,(struct sockaddr *)&route);
+    SCNetworkReachabilityFlags flags = 0;
+    if (reachability) {
+        SCNetworkReachabilityGetFlags(reachability,&flags);
+        CFRelease(reachability);
+    }
+    return [NSString stringWithFormat:@"%u|%@",(unsigned)(flags & kSCNetworkReachabilityFlagsIsWWAN),[addresses componentsJoinedByString:@"|"]];
+}
+
+static NSDictionary *ReadProbeReport(int fd, long long previousID, VCPingCancellation *cancellation) {
+    if (fd < 0) return nil;
+    for (int attempt = 0; attempt < 20 && ![cancellation isCancelled]; attempt++) {
+        struct stat state;
+        if (fstat(fd,&state) != 0) break;
+        size_t length = state.st_size > 65536 ? 65536 : (size_t)state.st_size;
+        char *buffer = calloc(1,length + 1);
+        if (!buffer) break;
+        ssize_t count = pread(fd,buffer,length,state.st_size - length);
+        NSDictionary *report = count > 0 ? VCProbeReportFromLog([NSString stringWithUTF8String:buffer]) : nil;
+        free(buffer);
+        if ([[report objectForKey:@"id"] longLongValue] > previousID) return report;
+        usleep(5000);
+    }
+    return nil;
+}
 
 int ConnectLatencyMs(const char *host, uint16_t port, int timeout_ms, int *latency_ms,
                             VCPingCancellation *cancellation) {
     if (!host || !*host) return -1;
+    long long started = PingMonotonicMs();
 
     char port_str[16];
     snprintf(port_str, sizeof(port_str), "%u", (unsigned)port);
@@ -14,8 +82,11 @@ int ConnectLatencyMs(const char *host, uint16_t port, int timeout_ms, int *laten
 
     struct addrinfo *res = NULL;
     if (getaddrinfo(host, port_str, &hints, &res) != 0 || !res) {
+        long long elapsed = PingMonotonicMs() - started;
+        cancellation.diagnosticReport = NativePingReport(@"dns",elapsed,-1,-1,elapsed);
         return -2;
     }
+    long long dns = PingMonotonicMs() - started;
 
     int rc_out = -3;
     for (struct addrinfo *ai = res; ai && ![cancellation isCancelled]; ai = ai->ai_next) {
@@ -55,6 +126,8 @@ int ConnectLatencyMs(const char *host, uint16_t port, int timeout_ms, int *laten
     }
 
     freeaddrinfo(res);
+    long long elapsed = PingMonotonicMs() - started;
+    cancellation.diagnosticReport = NativePingReport(rc_out == 0 ? @"none" : @"tcp",dns,elapsed - dns,-1,elapsed);
     return rc_out;
 }
 
@@ -63,12 +136,16 @@ int ConnectLatencyBestOfNMs(const char *host, uint16_t port, int timeout_ms, int
     if (attempts <= 0) attempts = 1;
 
     int best = -1;
+    NSDictionary *selectedReport = nil;
     for (int i = 0; i < attempts && ![cancellation isCancelled]; i++) {
         int ms = 0;
         if (ConnectLatencyMs(host, port, timeout_ms, &ms, cancellation) == 0) {
-            if (best < 0 || ms < best) best = ms;
+            if (best < 0 || ms < best) { best = ms; selectedReport = cancellation.diagnosticReport; }
+        } else if (best < 0) {
+            selectedReport = cancellation.diagnosticReport;
         }
     }
+    cancellation.diagnosticReport = selectedReport;
 
     if (best < 0) return -1;
     if (latency_ms) *latency_ms = best;
@@ -194,7 +271,7 @@ static void stop_child_process(pid_t pid) {
     if (wr < 0 && errno == ECHILD) return;
 }
 
-static pid_t spawn_temp_core_for_ping(const char *uri, uint16_t port, const char *xray_version) {
+static pid_t spawn_temp_core_for_ping(const char *uri, uint16_t port, const char *xray_version, int diagnostics_fd) {
     if (!uri || !*uri) return -1;
     size_t uri_length = strlen(uri);
     if (uri_length > kVCMaximumConfigURIBytes) return -1;
@@ -230,6 +307,10 @@ static pid_t spawn_temp_core_for_ping(const char *uri, uint16_t port, const char
             (void)dup2(dn, STDOUT_FILENO);
             (void)dup2(dn, STDERR_FILENO);
             if (dn > STDERR_FILENO) close(dn);
+        }
+        if (diagnostics_fd >= 0) {
+            if (dup2(diagnostics_fd,STDERR_FILENO) < 0) _exit(126);
+            if (diagnostics_fd > STDERR_FILENO) close(diagnostics_fd);
         }
         if (xray_version && *xray_version) {
             execl(core, VC_CORE_EXECUTABLE_NAME, "--uri-fd", "0", "--listen-port", port_str,
@@ -385,32 +466,54 @@ int ProxyGetConnectOnceMs(uint16_t local_port, int timeout_ms, int *latency_ms,
 int ProxyGetViaTempCoreMs(const char *uri, const char *xray_version,
                                  int timeout_ms, int attempts, int *latency_ms,
                                  VCPingCancellation *cancellation) {
+    cancellation.diagnosticReport = nil;
     if (!uri || !*uri || [cancellation isCancelled]) return -1;
     if (attempts <= 0) attempts = 1;
 
     int port = pick_free_loopback_port();
     if (port <= 0 || port > 65535) return -2;
 
-    pid_t pid = spawn_temp_core_for_ping(uri, (uint16_t)port, xray_version);
-    if (pid <= 0) return -3;
+    char capturePath[] = "/tmp/vlesscore-probe-XXXXXX";
+    int capture = mkstemp(capturePath);
+    if (capture >= 0) {
+        if (unlink(capturePath) != 0 || fcntl(capture,F_SETFD,FD_CLOEXEC) != 0) { close(capture); capture = -1; }
+    }
+    pid_t pid = spawn_temp_core_for_ping(uri, (uint16_t)port, xray_version,capture);
+    if (pid <= 0) { if (capture >= 0) close(capture); return -3; }
     [cancellation registerChild:pid];
 
     int rc = -4;
     if (wait_for_loopback_listener((uint16_t)port, pid, 6000, cancellation) != 0) {
         [cancellation forgetChild:pid];
         stop_child_process(pid);
+        if (capture >= 0) close(capture);
         return rc;
     }
 
     int best = -1;
+    long long previousID = 0;
+    NSDictionary *selectedReport = nil;
     for (int i = 0; i < attempts && ![cancellation isCancelled]; i++) {
         int ms = 0;
-        if (ProxyGetConnectOnceMs((uint16_t)port, timeout_ms, &ms, cancellation) == 0) {
-            if (best < 0 || ms < best) best = ms;
+        int result = ProxyGetConnectOnceMs((uint16_t)port, timeout_ms, &ms, cancellation);
+        NSDictionary *report = ReadProbeReport(capture,previousID,cancellation);
+        if (report) previousID = [[report objectForKey:@"id"] longLongValue];
+        if (result == 0) {
+            if (best < 0 || ms < best) { best = ms; selectedReport = report; }
+        } else if (best < 0) {
+            if ([[report objectForKey:@"success"] boolValue]) {
+                NSMutableDictionary *failure = [NSMutableDictionary dictionaryWithDictionary:report];
+                [failure setObject:@0 forKey:@"success"];
+                [failure setObject:@"carry" forKey:@"stage"];
+                report = failure;
+            }
+            selectedReport = report;
         }
     }
     [cancellation forgetChild:pid];
     stop_child_process(pid);
+    if (capture >= 0) close(capture);
+    cancellation.diagnosticReport = selectedReport;
 
     if (best < 0) {
         return -5;
@@ -523,6 +626,7 @@ int ICMPLatencyBestOfNMs(const char *host,
                                 VCPingCancellation *cancellation) {
     if (!host || !*host) return -1;
     if (attempts <= 0) attempts = 1;
+    long long started = PingMonotonicMs();
 
     struct addrinfo hints;
     memset(&hints, 0, sizeof(hints));
@@ -530,7 +634,12 @@ int ICMPLatencyBestOfNMs(const char *host,
     hints.ai_socktype = SOCK_DGRAM;
 
     struct addrinfo *result = NULL;
-    if (getaddrinfo(host, NULL, &hints, &result) != 0 || !result) return -2;
+    if (getaddrinfo(host, NULL, &hints, &result) != 0 || !result) {
+        long long elapsed = PingMonotonicMs() - started;
+        cancellation.diagnosticReport = NativePingReport(@"dns",elapsed,-1,-1,elapsed);
+        return -2;
+    }
+    long long dns = PingMonotonicMs() - started;
 
     struct sockaddr_in target;
     memset(&target, 0, sizeof(target));
@@ -541,13 +650,27 @@ int ICMPLatencyBestOfNMs(const char *host,
     gettimeofday(&sequence_time, NULL);
     uint16_t first_sequence = (uint16_t)(sequence_time.tv_usec & 0xFFFF);
     int best = -1;
+    NSDictionary *selectedReport = nil;
     for (int i = 0; i < attempts && ![cancellation isCancelled]; i++) {
         int ms = 0;
         uint16_t sequence = (uint16_t)(first_sequence + i);
-        if (ICMPLatencyOnceMs(&target, timeout_ms, sequence, &ms, cancellation) == 0) {
-            if (best < 0 || ms < best) best = ms;
+        long long attemptStarted = PingMonotonicMs();
+        int result = ICMPLatencyOnceMs(&target, timeout_ms, sequence, &ms, cancellation);
+        long long carry = PingMonotonicMs() - attemptStarted;
+        NSDictionary *report = NativePingReport(result == 0 ? @"none" : result == -2 ? @"transport" : @"carry",dns,-1,carry,dns + carry);
+        if (result == -2) {
+            NSMutableDictionary *failure = [NSMutableDictionary dictionaryWithDictionary:report];
+            [failure setObject:@(carry) forKey:@"transport_ms"];
+            [failure setObject:@(-1) forKey:@"carry_ms"];
+            report = failure;
+        }
+        if (result == 0) {
+            if (best < 0 || ms < best) { best = ms; selectedReport = report; }
+        } else if (best < 0) {
+            selectedReport = report;
         }
     }
+    cancellation.diagnosticReport = selectedReport;
     if (best < 0) return -3;
     if (latency_ms) *latency_ms = best;
     return 0;

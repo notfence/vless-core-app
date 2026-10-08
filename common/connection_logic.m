@@ -6,6 +6,96 @@
 #include <unistd.h>
 #include <signal.h>
 #include <errno.h>
+#include <stdlib.h>
+#include <string.h>
+
+NSDictionary *VCProbeReportFromLog(NSString *text) {
+    if (![text isKindOfClass:[NSString class]]) return nil;
+    NSArray *numericKeys = @[@"v", @"id", @"success", @"dns_ms", @"tcp_ms", @"transport_ms", @"protocol_ms", @"carry_ms", @"total_ms"];
+    NSSet *stages = [NSSet setWithObjects:@"none", @"dns", @"tcp", @"transport", @"protocol", @"carry", nil];
+    NSDictionary *latest = nil;
+    NSArray *lines = [text componentsSeparatedByString:@"\n"];
+    for (NSUInteger index = 0; index + 1 < [lines count]; index++) {
+        NSString *line = [lines objectAtIndex:index];
+        NSRange marker = [line rangeOfString:@"[probe] "];
+        if (marker.location == NSNotFound) continue;
+        NSString *body = [line substringFromIndex:NSMaxRange(marker)];
+        NSMutableDictionary *report = [NSMutableDictionary dictionary];
+        BOOL valid = YES;
+        for (NSString *field in [body componentsSeparatedByString:@" "]) {
+            NSArray *parts = [field componentsSeparatedByString:@"="];
+            if ([parts count] != 2) { valid = NO; break; }
+            NSString *key = [parts objectAtIndex:0], *value = [parts objectAtIndex:1];
+            if ([report objectForKey:key]) { valid = NO; break; }
+            if ([key isEqualToString:@"stage"]) {
+                if (![stages containsObject:value]) { valid = NO; break; }
+                [report setObject:value forKey:key];
+            } else {
+                if (![numericKeys containsObject:key] || [value length] == 0) { valid = NO; break; }
+                const char *number = [value UTF8String];
+                if (!number || strlen(number) != [value lengthOfBytesUsingEncoding:NSUTF8StringEncoding]) { valid = NO; break; }
+                char *end = NULL;
+                int savedErrno = errno;
+                errno = 0;
+                long long parsed = strtoll(number, &end, 10);
+                BOOL parsedOK = errno == 0 && end != number && *end == '\0';
+                errno = savedErrno;
+                if (!parsedOK || parsed < ([key hasSuffix:@"_ms"] && ![key isEqualToString:@"total_ms"] ? -1 : 0)) { valid = NO; break; }
+                [report setObject:[NSNumber numberWithLongLong:parsed] forKey:key];
+            }
+        }
+        if (!valid || [report count] != 10 || [[report objectForKey:@"v"] longLongValue] != 1 ||
+            [[report objectForKey:@"id"] longLongValue] == 0 || [[report objectForKey:@"success"] longLongValue] > 1) continue;
+        BOOL success = [[report objectForKey:@"success"] boolValue];
+        if (success != [[report objectForKey:@"stage"] isEqualToString:@"none"]) continue;
+        latest = report;
+    }
+    return latest;
+}
+
+NSString *VCProbeFailureDisplay(NSDictionary *report) {
+    if (![report isKindOfClass:[NSDictionary class]]) return @"Failed";
+    NSDictionary *labels = @{@"dns":@"DNS", @"tcp":@"TCP", @"transport":@"Transport", @"protocol":@"Protocol", @"carry":@"Response"};
+    NSString *stage = [report objectForKey:@"stage"];
+    NSString *label = [stage isKindOfClass:[NSString class]] ? [labels objectForKey:stage] : nil;
+    return label ? label : @"Failed";
+}
+
+BOOL VCPingDisplayIsFailure(NSString *display) {
+    return [[NSSet setWithObjects:@"Failed", @"DNS", @"TCP", @"Transport", @"Protocol", @"Response", nil] containsObject:display ? display : @""];
+}
+
+NSString *VCProbeSummary(NSDictionary *report) {
+    if (![report isKindOfClass:[NSDictionary class]]) return @"details=unavailable";
+    NSMutableArray *fields = [NSMutableArray array];
+    for (NSString *key in @[@"id", @"success", @"stage", @"dns_ms", @"tcp_ms", @"transport_ms", @"protocol_ms", @"carry_ms", @"total_ms"]) {
+        id value = [report objectForKey:key];
+        BOOL knownStage = [key isEqualToString:@"stage"] && [[NSSet setWithObjects:@"none", @"dns", @"tcp", @"transport", @"protocol", @"carry", nil] containsObject:value ? value : @""];
+        if ([value isKindOfClass:[NSNumber class]] || knownStage)
+            [fields addObject:[NSString stringWithFormat:@"%@=%@", key, value]];
+    }
+    return [fields componentsJoinedByString:@" "];
+}
+
+BOOL VCPingResultIsCurrent(NSUInteger expectedGeneration, NSUInteger generation) {
+    return expectedGeneration == generation;
+}
+
+BOOL VCPingUpdateNetwork(id owner, NSString *signature, NSString **storedSignature, NSUInteger *generation, NSMutableDictionary *displays) {
+    if (!signature || !storedSignature || !generation) return NO;
+    BOOL changed = *storedSignature && ![*storedSignature isEqualToString:signature];
+    if (!*storedSignature || changed) {
+        NSString *copy = [signature copy];
+        [*storedSignature release];
+        *storedSignature = copy;
+        ++*generation;
+    }
+    if (changed) {
+        [owner performSelector:NSSelectorFromString(@"stopAllPings")];
+        [displays removeAllObjects];
+    }
+    return changed;
+}
 
 @implementation VCPingCancellation
 @synthesize previousDisplay = _previousDisplay;
@@ -19,8 +109,22 @@
 }
 - (void)dealloc {
     [_previousDisplay release];
+    [_diagnosticReport release];
     [_lock release];
     [super dealloc];
+}
+- (NSDictionary *)diagnosticReport {
+    [_lock lock];
+    NSDictionary *report = [_diagnosticReport retain];
+    [_lock unlock];
+    return [report autorelease];
+}
+- (void)setDiagnosticReport:(NSDictionary *)report {
+    NSDictionary *copy = [report copy];
+    [_lock lock];
+    [_diagnosticReport release];
+    _diagnosticReport = copy;
+    [_lock unlock];
 }
 - (BOOL)isCancelled {
     [_lock lock];

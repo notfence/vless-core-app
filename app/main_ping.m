@@ -2,6 +2,27 @@
 
 @implementation MainVC (VCMainPing)
 
+- (void)refreshPingNetworkState {
+    NSString *signature = VCPingNetworkSignature();
+    if (!signature) return;
+    BOOL changed = VCPingUpdateNetwork(self,signature,&_pingNetworkSignature,&_pingNetworkGeneration,_pingDisplayByURI);
+    if (changed) {
+        [self refreshVisiblePingAccessoriesForURI:nil];
+        [self refreshVisibleSubscriptionHeaderAccessories];
+        VCRecordAppEvent(@"ping", @"Network changed; ping results cleared", nil);
+    }
+    if ([_pingDisplayByURI count] == 0 && _pingNetworkTimer) {
+        [_pingNetworkTimer invalidate];
+        [_pingNetworkTimer release];
+        _pingNetworkTimer = nil;
+    }
+}
+
+- (void)pingNetworkTick:(NSTimer *)timer {
+    (void)timer;
+    [self refreshPingNetworkState];
+}
+
 - (void)pingWorker:(NSDictionary *)payload {
     NSAutoreleasePool *pool = [[NSAutoreleasePool alloc] init];
     VCPingCancellation *cancellation = [payload objectForKey:@"cancellation"];
@@ -52,12 +73,16 @@
     if (ok) {
         [out setObject:[NSNumber numberWithInt:latencyMs] forKey:@"ms"];
     }
+    if (cancellation.diagnosticReport) [out setObject:cancellation.diagnosticReport forKey:@"diagnostics"];
+    [out setObject:[payload objectForKey:@"network_generation"] forKey:@"network_generation"];
     [self performSelectorOnMainThread:@selector(pingResultOnMain:) withObject:out waitUntilDone:NO];
 
     [pool drain];
 }
 
 - (void)pingResultOnMain:(NSDictionary *)payload {
+    [self refreshPingNetworkState];
+    if (!VCPingResultIsCurrent([[payload objectForKey:@"network_generation"] unsignedIntegerValue],_pingNetworkGeneration)) return;
     VCPingCancellation *cancellation = [payload objectForKey:@"cancellation"];
     if ([cancellation isCancelled]) return;
     NSString *uri = [payload objectForKey:@"uri"];
@@ -79,8 +104,11 @@
     BOOL ok = [[payload objectForKey:@"ok"] boolValue];
     NSString *display = ok
         ? [NSString stringWithFormat:@"%d ms", [[payload objectForKey:@"ms"] intValue]]
-        : kVCPingFailureValue;
+        : VCProbeFailureDisplay([payload objectForKey:@"diagnostics"]);
     [_pingDisplayByURI setObject:display forKey:uri];
+    VCRecordAppEvent(@"ping", @"Probe stages",
+                     [NSString stringWithFormat:@"network_generation=%lu %@",(unsigned long)_pingNetworkGeneration,
+                      VCProbeSummary([payload objectForKey:@"diagnostics"])]);
     if (!batchIdentifier) {
         VCRecordAppEvent(@"ping", @"Configuration ping finished",
                          ok ? [NSString stringWithFormat:@"success=1 latency_ms=%d", [[payload objectForKey:@"ms"] intValue]]
@@ -119,6 +147,7 @@
                                     [NSNumber numberWithInteger:pingType], @"type",
                                     cancellation, @"cancellation",
                                     nil];
+    [payload setObject:[NSNumber numberWithUnsignedInteger:_pingNetworkGeneration] forKey:@"network_generation"];
     if (batchIdentifier && batchToken) {
         [payload setObject:batchIdentifier forKey:@"batch_identifier"];
         [payload setObject:batchToken forKey:@"batch_token"];
@@ -127,6 +156,10 @@
         [_standalonePingCancellationsByURI setObject:cancellation forKey:uri];
     }
     [_pingDisplayByURI setObject:kVCPingLoadingValue forKey:uri];
+    if (!_pingNetworkTimer) {
+        _pingNetworkTimer = [[NSTimer scheduledTimerWithTimeInterval:1.0 target:self selector:@selector(pingNetworkTick:)
+                                                         userInfo:nil repeats:YES] retain];
+    }
     VCPingOperation *operation = [[[VCPingOperation alloc]
         initWithTarget:self payload:payload cancellation:cancellation] autorelease];
     operation.queuePriority = priority;
@@ -135,6 +168,7 @@
 }
 
 - (void)startPingForURI:(NSString *)uri type:(VCPingType)pingType {
+    [self refreshPingNetworkState];
     if (![uri isKindOfClass:[NSString class]] || [uri length] == 0) return;
     if ([_standalonePingCancellationsByURI objectForKey:uri]) return;
     if ([[_pingDisplayByURI objectForKey:uri] isEqualToString:kVCPingLoadingValue]) return;
@@ -181,6 +215,7 @@
 }
 
 - (void)startSubscriptionPingAtIndex:(NSInteger)subIdx {
+    [self refreshPingNetworkState];
     NSArray *items = [self subscriptionItemsAtIndex:subIdx];
     if ([items count] == 0 || [self isSubscriptionPingInProgressAtIndex:subIdx]) return;
 

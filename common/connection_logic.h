@@ -9,8 +9,10 @@
     int _socket;
     pid_t _child;
     NSString *_previousDisplay;
+    NSDictionary *_diagnosticReport;
 }
 @property(nonatomic, copy) NSString *previousDisplay;
+@property(nonatomic, copy) NSDictionary *diagnosticReport;
 - (BOOL)isCancelled;
 - (void)cancel;
 - (BOOL)registerSocket:(int)fd;
@@ -37,4 +39,10 @@ void VCConnectionTouchDown(id target, BOOL connectionButton);
 NSTimeInterval VCConnectedSince(NSString *response, NSTimeInterval now);
 NSString *VCFormatDuration(NSTimeInterval seconds);
 BOOL VCConnectionLossApplies(BOOL disconnected, BOOL connected, NSUInteger expectedGeneration, NSUInteger generation, BOOL action, NSTimeInterval expectedSince, NSTimeInterval since);
+NSDictionary *VCProbeReportFromLog(NSString *text);
+NSString *VCProbeFailureDisplay(NSDictionary *report);
+NSString *VCProbeSummary(NSDictionary *report);
+BOOL VCPingDisplayIsFailure(NSString *display);
+BOOL VCPingResultIsCurrent(NSUInteger expectedGeneration, NSUInteger generation);
+BOOL VCPingUpdateNetwork(id owner, NSString *signature, NSString **storedSignature, NSUInteger *generation, NSMutableDictionary *displays);
 #endif

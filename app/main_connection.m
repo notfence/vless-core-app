@@ -95,6 +95,7 @@
 
 - (void)applicationDidBecomeActiveNotification:(NSNotification *)notification {
     (void)notification;
+    [self refreshPingNetworkState];
     [self reconcileConnectionStateWithDaemon];
 }
 

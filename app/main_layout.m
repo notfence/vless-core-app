@@ -395,7 +395,7 @@
     NSString *display = ([uri isKindOfClass:[NSString class]] ? [_pingDisplayByURI objectForKey:uri] : nil);
     BOOL loading = [display isEqualToString:kVCPingLoadingValue];
     BOOL hasResult = ([display length] > 0 && !loading);
-    BOOL failed = [display isEqualToString:kVCPingFailureValue];
+    BOOL failed = VCPingDisplayIsFailure(display);
     UIView *v = [[[UIView alloc] initWithFrame:CGRectMake(0, 0, 24.0f, 24.0f)] autorelease];
     v.clipsToBounds = NO;
     v.autoresizingMask = UIViewAutoresizingFlexibleLeftMargin;

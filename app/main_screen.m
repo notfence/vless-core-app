@@ -381,6 +381,9 @@
     [_configs release];
     [_subscriptions release];
     [_pingDisplayByURI release];
+    [_pingNetworkSignature release];
+    [_pingNetworkTimer invalidate];
+    [_pingNetworkTimer release];
     [_standalonePingCancellationsByURI release];
     [_subscriptionPingPendingByIdentifier release];
     [_subscriptionPingOperationsByIdentifier release];

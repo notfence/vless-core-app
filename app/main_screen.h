@@ -48,6 +48,9 @@
     NSMutableArray *_configs;
     NSMutableArray *_subscriptions;
     NSMutableDictionary *_pingDisplayByURI;
+    NSString *_pingNetworkSignature;
+    NSTimer *_pingNetworkTimer;
+    NSUInteger _pingNetworkGeneration;
     NSMutableDictionary *_standalonePingCancellationsByURI;
     NSMutableDictionary *_subscriptionPingPendingByIdentifier;
     NSMutableDictionary *_subscriptionPingOperationsByIdentifier;
@@ -195,6 +198,8 @@
 @end
 
 @interface MainVC (VCMainPing)
+- (void)refreshPingNetworkState;
+- (void)pingNetworkTick:(NSTimer *)timer;
 - (void)pingWorker:(NSDictionary *)payload;
 - (void)pingResultOnMain:(NSDictionary *)payload;
 - (NSOperation *)enqueuePingForURI:(NSString *)uri

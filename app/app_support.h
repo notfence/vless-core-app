@@ -137,6 +137,7 @@ int ProxyGetConnectOnceMs(uint16_t local_port, int timeout_ms, int *latency_ms,
 int ProxyGetViaTempCoreMs(const char *uri, const char *xray_version,
                                  int timeout_ms, int attempts, int *latency_ms,
                                  VCPingCancellation *cancellation);
+NSString *VCPingNetworkSignature(void);
 
 int ICMPLatencyBestOfNMs(const char *host,
                                 int timeout_ms,
