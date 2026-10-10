@@ -928,9 +928,9 @@
     if ([transport length] == 0) transport = [self queryValueForURLString:uri key:@"network"];
     if ([transport length] == 0) transport = [self queryValueForURLString:uri key:@"net"];
 
-    transport = [self safeTrim:transport];
-    if ([transport length] == 0) return @"tcp";
-    return [transport lowercaseString];
+    transport = [[self safeTrim:transport] lowercaseString];
+    if ([transport length] == 0 || [transport isEqualToString:@"raw"]) return @"tcp";
+    return transport;
 }
 
 - (NSString *)securityTypeFromURI:(NSString *)uri {
@@ -1005,7 +1005,7 @@
     NSString *network = [[self safeTrim:[self happJSONStringValue:[stream objectForKey:@"network"]]] lowercaseString];
     NSString *security = [[self safeTrim:[self happJSONStringValue:[stream objectForKey:@"security"]]] lowercaseString];
     if ([network isEqualToString:@"splithttp"]) network = @"xhttp";
-    if ([network length] == 0) network = @"tcp";
+    if ([network length] == 0 || [network isEqualToString:@"raw"]) network = @"tcp";
     if ([security length] == 0) security = @"none";
 
     BOOL tcpSupported = [network isEqualToString:@"tcp"] &&

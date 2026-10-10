@@ -1,6 +1,10 @@
-# vless-core-app
+<img src="app/icons/Icon@2x.png" width="96" align="left" hspace="12" alt="vless-core-app icon">
+
+<h3><big>vless-core-app</big></h3>
 
 `vless-core-app` is an iOS 5–14 app + root daemon for full-device VLESS/SOCKS5 routing.
+
+<br clear="left">
 
 ## Compatibility
 

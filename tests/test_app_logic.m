@@ -100,16 +100,29 @@ static void importTests(void) {
     CHECK("import/utf8-text", [[p decodeImportTextData:[unicode dataUsingEncoding:NSUTF8StringEncoding]] isEqual:unicode]);
     CHECK("import/cp1251-text", [[p decodeImportTextData:[unicode dataUsingEncoding:NSWindowsCP1251StringEncoding]] isEqual:unicode]);
     NSString *base = @"vless://11111111-2222-4333-8444-555555555555@example.test:443";
-    for (NSString *transport in @[@"tcp", @"xhttp", @"splithttp", @"grpc", @"ws", @"websocket"]) {
+    for (NSString *transport in @[@"tcp", @"raw", @"xhttp", @"splithttp", @"grpc", @"ws", @"websocket"]) {
         for (NSString *security in @[@"none", @"tls", @"reality"]) {
             NSString *uri = [NSString stringWithFormat:@"%@?type=%@&security=%@", base, transport, security];
             BOOL supported = !(([transport isEqual:@"ws"] || [transport isEqual:@"websocket"]) && [security isEqual:@"reality"]);
             CHECK("import/transport-security-matrix", [p isSupportedConfigTupleForURI:uri] == supported);
         }
     }
+    for (NSString *key in @[@"type", @"transport", @"network", @"net"]) {
+        for (NSString *value in @[@"raw", @"RAW", @"%72aw"]) {
+            NSString *uri = [base stringByAppendingFormat:@"?%@=%@", key, value];
+            CHECK("import/raw-alias-normalized", [[p transportTypeFromURI:uri] isEqual:@"tcp"]);
+            CHECK("import/raw-alias-supported", [p isSupportedConfigTupleForURI:uri]);
+        }
+        for (NSString *security in @[@"none", @"tls", @"reality"]) {
+            NSString *uri = [base stringByAppendingFormat:@"?%@=raw&security=%@&flow=xtls-rprx-vision", key, security];
+            CHECK("import/raw-vision-security-policy", [p isSupportedConfigTupleForURI:uri] == ![security isEqual:@"none"]);
+            CHECK("import/raw-invalid-flow-rejected", ![p isSupportedConfigTupleForURI:[base stringByAppendingFormat:@"?%@=raw&security=%@&flow=unsupported", key, security]]);
+        }
+        CHECK("import/raw-invalid-fingerprint-rejected", ![p isSupportedConfigTupleForURI:[base stringByAppendingFormat:@"?%@=raw&security=reality&fp=unknown", key]]);
+    }
     for (NSString *mode in @[@"auto", @"packet-up", @"stream-one", @"stream-up"])
         CHECK("import/xhttp-mode-matrix", [p isSupportedConfigTupleForURI:[base stringByAppendingFormat:@"?type=xhttp&security=tls&mode=%@", mode]]);
-    for (NSString *query in @[@"type=tcp&type=ws", @"security=tls&security=none", @"type=tcp&flow=unsupported", @"type=xhttp&mode=invalid", @"type=grpc&mode=invalid", @"type=tcp&security=reality&fp=unknown", @"type=quic", @"type=%ZZ"]) {
+    for (NSString *query in @[@"type=tcp&type=ws", @"type=raw&network=tcp", @"type=raw&type=ws", @"type=raw-invalid", @"security=tls&security=none", @"type=tcp&flow=unsupported", @"type=xhttp&mode=invalid", @"type=grpc&mode=invalid", @"type=tcp&security=reality&fp=unknown", @"type=quic", @"type=%ZZ"]) {
         const char *scenario = [[@"import/rejected/" stringByAppendingString:query] UTF8String];
         CHECK(scenario, ![p isSupportedConfigTupleForURI:[base stringByAppendingFormat:@"?%@", query]]);
     }
@@ -121,6 +134,10 @@ static void importTests(void) {
     CHECK("import/text-deduplication", [[p parseSubscriptionData:[feed dataUsingEncoding:NSUTF8StringEncoding]] count] == 2);
     NSString *b64 = [[feed dataUsingEncoding:NSUTF8StringEncoding] base64EncodedStringWithOptions:0];
     CHECK("import/base64-subscription", [[p parseSubscriptionData:[b64 dataUsingEncoding:NSUTF8StringEncoding]] count] == 2);
+    NSString *rawURI = [base stringByAppendingString:@"?type=raw&security=tls#vless-core"];
+    NSArray *rawSubscription = [p parseSubscriptionData:[rawURI dataUsingEncoding:NSUTF8StringEncoding]];
+    CHECK("import/raw-subscription-preserves-uri", [rawSubscription count] == 1 && [[rawSubscription objectAtIndex:0] isEqual:rawURI]);
+    CHECK("import/raw-subscription-supported", [p isSupportedConfigTupleForURI:[rawSubscription firstObject]]);
     CHECK("import/empty-subscription", [[p parseSubscriptionData:[NSData data]] count] == 0);
     NSDictionary *info = [p subscriptionUserInfoFromHeaderValue:@"upload=1024; download=2048; total=4096; expire=1900000000"];
     CHECK("subscription/usage-metadata", [[info objectForKey:@"download"] unsignedLongLongValue] == 2048);

@@ -40,5 +40,21 @@ int main(void) {
     NSData *json = [NSJSONSerialization dataWithJSONObject:config options:0 error:NULL];
     NSArray *uris = [VCProfiles() extractConfigURIsFromHappJSONData:json];
     CHECK("happ/json-conversion", [uris count] == 1 && [[uris objectAtIndex:0] rangeOfString:@"security=tls"].location != NSNotFound);
+    NSDictionary *outbound = [[config objectForKey:@"outbounds"] objectAtIndex:0];
+    for (NSString *security in @[@"none", @"tls", @"reality"]) {
+        NSMutableDictionary *rawOutbound = [[outbound mutableCopy] autorelease];
+        NSMutableDictionary *stream = [[[outbound objectForKey:@"streamSettings"] mutableCopy] autorelease];
+        [stream setObject:@"raw" forKey:@"network"];
+        [stream setObject:security forKey:@"security"];
+        [stream setObject:@{@"serverName": @"edge.test", @"publicKey": @"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"} forKey:@"realitySettings"];
+        [rawOutbound setObject:stream forKey:@"streamSettings"];
+        NSDictionary *rawConfig = @{@"outbounds": @[rawOutbound]};
+        NSString *rawURI = [VCProfiles() vlessURIFromHappJSONConfig:rawConfig];
+        CHECK("happ/raw-network-supported", rawURI != nil && [VCProfiles() isSupportedConfigTupleForURI:rawURI]);
+        NSData *rawJSON = [NSJSONSerialization dataWithJSONObject:rawConfig options:0 error:NULL];
+        CHECK("happ/raw-network-json-import", [[VCProfiles() extractConfigURIsFromHappJSONData:rawJSON] isEqual:@[rawURI]]);
+        [stream setObject:@"tcp" forKey:@"network"];
+        CHECK("happ/raw-network-matches-tcp", [rawURI isEqual:[VCProfiles() vlessURIFromHappJSONConfig:rawConfig]]);
+    }
     FINISH("import formats"); [pool drain]; return 0;
 }
