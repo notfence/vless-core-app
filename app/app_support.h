@@ -43,6 +43,7 @@
 #import "../common/profile_logic.h"
 #import "../common/secure_store.h"
 #import "../common/connection_logic.h"
+#import "proxy_probe.h"
 #include "../common/main_geometry.h"
 #import "../common/list_logic.h"
 
@@ -100,9 +101,6 @@ extern NSInteger const kVCSubscriptionInfoButtonTagBase;
 extern NSInteger const kVCSubscriptionPingButtonTagBase;
 extern NSInteger const kVCSubscriptionWebPageButtonTagBase;
 extern NSInteger const kVCSubscriptionSupportButtonTagBase;
-extern const char *kVCProxyPingHost;
-extern const uint16_t kVCProxyPingPort;
-extern const char *kVCProxyPingRequest;
 extern CGFloat const kVCDetailLabelGap;
 extern NSTimeInterval const kVCMarqueePauseSeconds;
 extern CGFloat const kVCMarqueePixelsPerSecond;
@@ -122,17 +120,6 @@ int ConnectLatencyMs(const char *host, uint16_t port, int timeout_ms, int *laten
 
 int ConnectLatencyBestOfNMs(const char *host, uint16_t port, int timeout_ms, int attempts, int *latency_ms,
                                    VCPingCancellation *cancellation);
-
-int write_all(int fd, const void *buf, size_t len);
-
-int connect_loopback_port(uint16_t port, int timeout_ms, VCPingCancellation *cancellation);
-
-int socks5_connect_domain(int fd, const char *host, uint16_t port);
-
-int TunnelConnectOnceMs(uint16_t local_port, int timeout_ms, int *latency_ms);
-
-int ProxyGetConnectOnceMs(uint16_t local_port, int timeout_ms, int *latency_ms,
-                                 VCPingCancellation *cancellation);
 
 int ProxyGetViaTempCoreMs(const char *uri, const char *xray_version,
                                  int timeout_ms, int attempts, int *latency_ms,

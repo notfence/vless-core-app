@@ -24,6 +24,7 @@ HOST_TESTS += $(HOST_BUILD_DIR)/test_qr $(HOST_BUILD_DIR)/test_import_formats
 HOST_TESTS += $(HOST_BUILD_DIR)/test_helper_monitor
 HOST_TESTS += $(HOST_BUILD_DIR)/test_dns_relay
 HOST_TESTS += $(HOST_BUILD_DIR)/test_ping
+HOST_TESTS += $(HOST_BUILD_DIR)/test_proxy_probe
 include $(ROOT)/common/zbar_sources.mk
 HOST_ZBAR_OBJECTS := $(patsubst $(ZBAR_DIR)/%.c,$(HOST_BUILD_DIR)/zbar/%.o,$(ZBAR_SRC))
 HOST_ZBAR_HEADERS := $(shell find $(ROOT)/$(ZBAR_DIR) -name '*.h')
@@ -42,6 +43,7 @@ test: requirements $(HOST_TESTS)
 	$(HOST_BUILD_DIR)/test_helper_monitor
 	$(HOST_BUILD_DIR)/test_dns_relay
 	$(HOST_BUILD_DIR)/test_ping
+	$(HOST_BUILD_DIR)/test_proxy_probe
 	python3 $(ROOT)/tests/test_app_structure.py
 	python3 $(ROOT)/tests/test_package.py
 	python3 $(ROOT)/tests/test_preflight.py
@@ -72,6 +74,13 @@ $(HOST_BUILD_DIR)/test_app_logic: $(APP_OBJECTS)
 
 $(HOST_BUILD_DIR)/test_ping: $(HOST_BUILD_DIR)/test_ping.o $(HOST_BUILD_DIR)/common/connection_logic.o
 	$(HOST_CC) $(SANITIZE) $^ -o $@ $(HOST_LIBS) -Wl,--wrap=kill,--wrap=waitpid,--wrap=select
+
+$(HOST_BUILD_DIR)/app/proxy_probe.o: ../app/proxy_probe.m ../app/proxy_probe.h ../common/connection_logic.h | requirements
+	mkdir -p $(dir $@)
+	$(HOST_CC) $(HOST_CPPFLAGS) $(HOST_OBJCFLAGS) $(HOST_CFLAGS) -MMD -MP -c $< -o $@
+
+$(HOST_BUILD_DIR)/test_proxy_probe: $(HOST_BUILD_DIR)/test_proxy_probe.o $(HOST_BUILD_DIR)/app/proxy_probe.o $(HOST_BUILD_DIR)/common/connection_logic.o
+	$(HOST_CC) $(SANITIZE) $^ -o $@ $(HOST_LIBS) -Wl,--wrap=socket,--wrap=write,--wrap=read
 
 $(HOST_BUILD_DIR)/test_legacy_loopback_host: test_legacy_loopback_host.c legacy_loopback_test.c ../daemon/legacy_loopback.c ../daemon/legacy_loopback.h support/darwin_route.h | requirements
 	mkdir -p $(dir $@)
@@ -129,5 +138,5 @@ sanitizers:
 asan:
 	ASAN_OPTIONS=detect_leaks=0 $(MAKE) test HOST_BUILD_DIR=$(HOST_BUILD_DIR)-asan SANITIZE='-fsanitize=address -fno-omit-frame-pointer'
 
--include $(APP_OBJECTS:.o=.d) $(HOST_BUILD_DIR)/test_ping.d $(HOST_BUILD_DIR)/test_import_formats.d $(HOST_BUILD_DIR)/integrations/karing/karing_backup.d
+-include $(APP_OBJECTS:.o=.d) $(HOST_BUILD_DIR)/test_ping.d $(HOST_BUILD_DIR)/test_proxy_probe.d $(HOST_BUILD_DIR)/app/proxy_probe.d $(HOST_BUILD_DIR)/test_import_formats.d $(HOST_BUILD_DIR)/integrations/karing/karing_backup.d
 .PHONY: test requirements sanitizers asan
