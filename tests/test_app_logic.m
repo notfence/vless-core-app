@@ -127,6 +127,16 @@ static void importTests(void) {
         CHECK(scenario, ![p isSupportedConfigTupleForURI:[base stringByAppendingFormat:@"?%@", query]]);
     }
     CHECK("import/socks-plain", [p isSupportedConfigTupleForURI:@"socks5://proxy.test:1080"]);
+    CHECK("import/socks-explicit-none", [p isSupportedConfigTupleForURI:@"socks5://proxy.test:1080?security=none"]);
+    CHECK("import/socks-tls-is-not-supported", ![p isSupportedConfigTupleForURI:@"socks5://proxy.test:1080?security=tls"]);
+    NSString *encryptedVision = [base stringByAppendingString:@"?type=tcp&security=none&flow=xtls-rprx-vision&encryption=mlkem768x25519plus.native.0rtt.AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8"];
+    CHECK("import/encrypted-vision-without-outer-tls", [p isSupportedConfigTupleForURI:encryptedVision]);
+    for (NSString *transport in @[@"tcp", @"ws", @"grpc", @"xhttp"]) {
+        NSString *candidate = [encryptedVision stringByReplacingOccurrencesOfString:@"type=tcp" withString:[@"type=" stringByAppendingString:transport]];
+        CHECK("import/encrypted-vision-transport-matrix", [p isSupportedConfigTupleForURI:candidate]);
+        NSString *bad = [candidate stringByReplacingOccurrencesOfString:@"flow=xtls-rprx-vision" withString:@"flow=not-supported"];
+        CHECK("import/unsupported-flow-rejected", ![p isSupportedConfigTupleForURI:bad]);
+    }
     CHECK("import/socks-credentials-ipv6", [p isSupportedConfigTupleForURI:@"socks5://user:pass@[2001:db8::1]:1080#vless-core"]);
     CHECK("import/socks-zero-port", ![p isSupportedConfigTupleForURI:@"socks5://proxy.test:0"]);
     CHECK("import/foreign-protocol", ![p isSupportedConfigTupleForURI:@"trojan://secret@example.test:443"]);

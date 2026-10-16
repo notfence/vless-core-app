@@ -651,6 +651,8 @@ static void VCProfileUnknown(NSDictionary *object, NSArray *known, NSString *sco
     NSString *security = [[self securityTypeFromURI:uri] lowercaseString];
 
     if ([scheme isEqualToString:@"socks5"]) {
+        NSString *requestedSecurity = [[self queryValueForURLString:uri key:@"security"] lowercaseString];
+        if ([requestedSecurity length] && ![requestedSecurity isEqualToString:@"none"]) return @"SOCKS5 supports only security=none";
         NSString *host = nil;
         uint16_t port = 0;
         if (![self parseSOCKS5Host:&host port:&port fromURI:uri] || [host length] == 0 || port == 0) {
@@ -663,9 +665,15 @@ static void VCProfileUnknown(NSDictionary *object, NSArray *known, NSString *sco
         return @"protocol must be vless or socks5";
     }
 
+    NSString *flowValue = [self realityFlowFromURI:uri];
+    if ([flowValue length] && ![flowValue isEqualToString:@"xtls-rprx-vision"]) return @"unsupported flow";
+    if (([security isEqualToString:@"tls"] || [security isEqualToString:@"reality"]) &&
+        ![self isSupportedRealityFingerprint:[self realityFingerprintFromURI:uri]]) return @"unsupported fp";
+
     if ([transport isEqualToString:@"tcp"] && [security isEqualToString:@"none"]) {
         NSString *flow = [self realityFlowFromURI:uri];
-        if ([flow length] > 0) {
+        NSString *encryption = [self queryValueForURLString:uri key:@"encryption"];
+        if ([flow length] > 0 && (![encryption length] || [encryption isEqualToString:@"none"])) {
             return [NSString stringWithFormat:@"unsupported flow=%@ without security", flow];
         }
         return nil;
