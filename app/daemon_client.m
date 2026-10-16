@@ -198,7 +198,7 @@ NSString *SendCommand(NSString *cmdLine) {
                             [cmdLine hasPrefix:@"CONNECT_PRIVATE\t"];
 
     struct timeval cmd_tv;
-    cmd_tv.tv_sec = isConnectCommand ? 8 : 2;
+    cmd_tv.tv_sec = isConnectCommand ? 15 : 2;
     cmd_tv.tv_usec = 0;
 
     NSData *outData = [cmdLine dataUsingEncoding:NSUTF8StringEncoding];

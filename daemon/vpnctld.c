@@ -8,6 +8,7 @@
 #include <net/if.h>
 #include <netinet/in.h>
 #include <pthread.h>
+#include <poll.h>
 #include <pwd.h>
 #include <grp.h>
 #include <signal.h>
@@ -34,6 +35,7 @@
 #include "vpnicon_statusbar.h"
 #include "vpnctld_protocol.h"
 #include "system_proxy.h"
+#include "core_config.h"
 #include "socket_peer_pid.h"
 #include "legacy_loopback.h"
 #include "legacy_dns.h"
@@ -158,6 +160,8 @@ typedef struct {
     int pf_dispatch_installed;
     char server_ip[64];
     char server_ips[512];
+    char download_ips[512];
+    char bypass_ips[512];
     char routing[8192];
     int routing_bypass_lan;
     int protect_logs;
@@ -172,7 +176,6 @@ typedef struct {
 } vpn_state_t;
 
 static vpn_state_t g;
-static const int kConnectResolveTimeoutMs = 8000;
 static const char *kStateDirectory = "/var/db/vless-core";
 static const char *kPFPreviousStatePath = "/var/db/vless-core/pf-state";
 static const char *kPFPreviousStateTempPath = "/var/db/vless-core/pf-state.tmp";
@@ -1061,7 +1064,7 @@ static int routing_payload_valid(const char *text, int *bypass_lan_out) {
 }
 
 static int ipv4_is_permanent_bypass(const char *ip) {
-    return ipv4_is_permanent_bypass_for_policy(ip, g.server_ips, g.routing_bypass_lan);
+    return ipv4_is_permanent_bypass_for_policy(ip, g.bypass_ips, g.routing_bypass_lan);
 }
 
 static int pf_table_change(const char *operation, const char *ip) {
@@ -1205,22 +1208,14 @@ static void reap_child_briefly(pid_t pid) {
 static int read_resolve_result_timeout(int fd, resolve_result_t *out, int timeout_ms) {
     unsigned char *p = (unsigned char *)out;
     size_t got = 0;
-    long long deadline = now_ms() + timeout_ms;
+    uint64_t deadline = vc_core_now_ms() + (unsigned)timeout_ms;
 
     while (got < sizeof(*out)) {
-        long long remaining = deadline - now_ms();
-        if (remaining <= 0) return -2;
-
-        fd_set rfds;
-        FD_ZERO(&rfds);
-        FD_SET(fd, &rfds);
-
-        struct timeval tv;
-        memset(&tv, 0, sizeof(tv));
-        tv.tv_sec = (time_t)(remaining / 1000);
-        tv.tv_usec = (suseconds_t)((remaining % 1000) * 1000);
-
-        int sr = select(fd + 1, &rfds, NULL, NULL, &tv);
+        uint64_t now = vc_core_now_ms();
+        if (now >= deadline) return -2;
+        uint64_t remaining = deadline - now;
+        struct pollfd socket = {.fd=fd, .events=POLLIN};
+        int sr = poll(&socket, 1, remaining > INT_MAX ? INT_MAX : (int)remaining);
         if (sr < 0) {
             if (errno == EINTR) continue;
             return -1;
@@ -1736,7 +1731,7 @@ static int spawn_core(const char *uri, const char *server_ips, const char *xray_
         return -1;
     }
 
-    char *argv[12];
+    char *argv[14];
     size_t argc = 0;
     argv[argc++] = (char *)core_bin;
     argv[argc++] = "--connection-fd";
@@ -1747,6 +1742,10 @@ static int spawn_core(const char *uri, const char *server_ips, const char *xray_
     argv[argc++] = g.routing;
     argv[argc++] = "--route-control-socket";
     argv[argc++] = VC_DAEMON_SOCKET_PATH;
+    if (g.download_ips[0]) {
+        argv[argc++] = "--download-server-ips";
+        argv[argc++] = g.download_ips;
+    }
     if (xray_version && *xray_version) {
         argv[argc++] = "--xray-version";
         argv[argc++] = (char *)xray_version;
@@ -1757,6 +1756,39 @@ static int spawn_core(const char *uri, const char *server_ips, const char *xray_
                               NULL, pid_out, NULL);
     secure_zero(connection_data, sizeof(connection_data));
     return result;
+}
+
+static uint64_t core_prepare_now(void *context) {
+    (void)context;
+    return vc_core_now_ms();
+}
+
+static int core_inspection_child(void *context) {
+    (void)context;
+    close_inherited_descriptors();
+    return drop_helper_privileges();
+}
+
+static int inspect_connection(void *context, const char *uri, uint64_t until, char *output, size_t capacity) {
+    (void)context;
+    const char *binary=find_vless_core_bin();
+    if (!binary) return -1;
+    int flags=g.protect_logs ? O_WRONLY : O_WRONLY|O_CREAT|O_APPEND|O_NOFOLLOW;
+    int log_fd=open(g.protect_logs ? "/dev/null" : "/var/log/vless-core.log",flags,0600);
+    if (log_fd < 0) return -1;
+    if (!g.protect_logs) (void)fchmod(log_fd,0600);
+    int result=vc_core_inspect_run(binary,uri,kSafeHelperEnvironment,log_fd,until,core_inspection_child,NULL,output,capacity);
+    close(log_fd);
+    return result;
+}
+
+static int resolve_connection(void *context, const char *host, uint64_t until, char *ips, size_t capacity) {
+    (void)context;
+    uint64_t now=vc_core_now_ms();
+    if (now >= until) return -2;
+    uint64_t remaining=until-now;
+    char first[64];
+    return resolve_host_ipv4_all_bounded(host,first,sizeof(first),ips,capacity,remaining > INT_MAX ? INT_MAX : (int)remaining);
 }
 
 static int write_redsocks_conf(int socks_port, int redir_port, const char *redirector) {
@@ -2734,7 +2766,7 @@ static int try_connect_pf(int socks_port) {
     }
     diagnostic_event("DNS helper started");
 
-    const char *pf_server_ips = (g.server_ips[0] != '\0') ? g.server_ips : g.server_ip;
+    const char *pf_server_ips = g.bypass_ips;
     int pf_rc = apply_pf_rules(pf_server_ips, redir_port, dns_port);
     if (pf_rc != 0) {
         if (clear_pf_rules() != 0) {
@@ -2806,36 +2838,24 @@ static int connect_all(const char *uri, const char *xray_version, int requested_
         return -1;
     }
 
-    char host[256];
-    if (parse_server_host(uri, host, sizeof(host)) != 0) {
-        snprintf(msg, msg_cap, "ERR invalid config URI (cannot parse host)");
-        diagnostic_event("Connection failed: invalid configuration address");
+    g.server_ip[0]=g.server_ips[0]=g.download_ips[0]=g.bypass_ips[0]=0;
+    VCCoreAddresses addresses;
+    char preparation_error[256];
+    const VCCorePrepareOperations operations={core_prepare_now,inspect_connection,resolve_connection,NULL};
+    if (vc_core_prepare(uri,&operations,&addresses,preparation_error,sizeof(preparation_error))) {
+        snprintf(msg,msg_cap,"ERR %s",preparation_error);
+        log_error("connection preparation failed: %s",preparation_error);
+        diagnostic_event("Connection failed: configuration or server address preparation failed");
         finish_failed_protected_connect();
         return -1;
     }
-
-    long long resolve_start_ms = now_ms();
-    int resolve_rc = resolve_host_ipv4_all_bounded(host, g.server_ip, sizeof(g.server_ip), g.server_ips, sizeof(g.server_ips),
-                                                   kConnectResolveTimeoutMs);
-    if (resolve_rc == -2) {
-        snprintf(msg, msg_cap, "ERR server DNS timeout after %dms", kConnectResolveTimeoutMs);
-        log_error("resolve server host %s timed out after %dms", host, kConnectResolveTimeoutMs);
-        diagnostic_event("Connection failed: server DNS timed out");
-        finish_failed_protected_connect();
-        return -1;
-    }
-    if (resolve_rc != 0) {
-        snprintf(msg, msg_cap, "ERR failed to resolve server host");
-        diagnostic_event("Connection failed: server DNS resolution failed");
-        finish_failed_protected_connect();
-        return -1;
-    }
-
-    log_msg("resolved server host %s -> %s in %lldms", host, g.server_ips, now_ms() - resolve_start_ms);
-    diagnostic_event("Server address resolved");
-    log_msg("VPN session starting server=%s local_socks=%d", host, port);
-    core_log_event("I", "VPN session starting | server=%s | local_socks=%d",
-                   host, port);
+    memcpy(g.server_ips,addresses.primary,sizeof(g.server_ips));
+    memcpy(g.download_ips,addresses.download,sizeof(g.download_ips));
+    memcpy(g.bypass_ips,addresses.bypass,sizeof(g.bypass_ips));
+    size_t first_length=strcspn(g.server_ips,", ");
+    memcpy(g.server_ip,g.server_ips,first_length); g.server_ip[first_length]=0;
+    diagnostic_event("Configuration validated and server addresses resolved");
+    log_msg("VPN session starting primary=%s download=%s local_socks=%d",g.server_ips,g.download_ips[0] ? g.download_ips : "none",port);
 
     if (spawn_core(uri, g.server_ips, xray_version, port, &g.core_pid) != 0) {
         snprintf(msg, msg_cap, "ERR failed to start vless-core binary");

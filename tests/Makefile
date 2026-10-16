@@ -25,6 +25,7 @@ HOST_TESTS += $(HOST_BUILD_DIR)/test_helper_monitor
 HOST_TESTS += $(HOST_BUILD_DIR)/test_dns_relay
 HOST_TESTS += $(HOST_BUILD_DIR)/test_ping
 HOST_TESTS += $(HOST_BUILD_DIR)/test_proxy_probe
+HOST_TESTS += $(HOST_BUILD_DIR)/test_core_config
 CORE_PARSE_SRC := uri utils xhttp_config xhttp_download xhttp_payload buffer_budget websocket grpc http_headers json core_log
 CORE_PARSE_OBJ := $(addprefix $(HOST_BUILD_DIR)/core-parser/,$(addsuffix .o,$(CORE_PARSE_SRC)))
 include $(ROOT)/common/zbar_sources.mk
@@ -46,6 +47,8 @@ test: requirements $(HOST_TESTS)
 	$(HOST_BUILD_DIR)/test_dns_relay
 	$(HOST_BUILD_DIR)/test_ping
 	$(HOST_BUILD_DIR)/test_proxy_probe
+	$(HOST_BUILD_DIR)/test_core_config
+	VC_HOST_BUILD_DIR="$(HOST_BUILD_DIR)" VC_TEST_SANITIZE="$(SANITIZE)" python3 $(ROOT)/tests/test_core_bridge.py
 	python3 $(ROOT)/tests/test_app_structure.py
 	python3 $(ROOT)/tests/test_package.py
 	python3 $(ROOT)/tests/test_preflight.py
@@ -130,6 +133,10 @@ $(HOST_BUILD_DIR)/test_qr: test_qr.c check.h $(HOST_ZBAR_OBJECTS) | requirements
 $(HOST_BUILD_DIR)/integrations/karing/%.o: ../integrations/karing/%.m | requirements
 	mkdir -p $(dir $@)
 	$(HOST_CC) $(HOST_CPPFLAGS) $(HOST_OBJCFLAGS) $(HOST_CFLAGS) -MMD -MP -c $< -o $@
+
+$(HOST_BUILD_DIR)/test_core_config: test_core_config.c ../daemon/core_config.c ../daemon/core_config.h ../common/daemon_policy.c ../common/daemon_policy.h check.h | requirements
+	mkdir -p $(dir $@)
+	$(HOST_CC) $(HOST_CFLAGS) test_core_config.c ../daemon/core_config.c ../common/daemon_policy.c -o $@ $(SANITIZE)
 
 $(HOST_BUILD_DIR)/core-parser/%.o: ../../vless-core-cli/src/%.c | requirements
 	mkdir -p $(dir $@)

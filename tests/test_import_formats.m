@@ -61,10 +61,24 @@ static void extendedProfiles(void) {
     uri = [logic vlessURIFromHappJSONConfig:profile(@"xhttp", @{@"path": @"/explicit", @"downloadSettings": download, @"extra": @{@"path": @"/ignored", @"noGRPCHeader": @(YES)}}, plain)];
     extra = [NSJSONSerialization JSONObjectWithData:[[logic queryValueForURLString:uri key:@"extra"] dataUsingEncoding:NSUTF8StringEncoding] options:0 error:NULL];
     CHECK("happ/xray-extra-semantics", [[logic queryValueForURLString:uri key:@"path"] isEqual:@"/explicit"] && ![extra objectForKey:@"downloadSettings"] && [[extra objectForKey:@"noGRPCHeader"] boolValue]);
+    uri = [logic vlessURIFromHappJSONConfig:profile(@"xhttp", @{@"extra": @{@"headers": @{@"Host": @"legacy.test", @"X-Test": @"Value"}}}, plain)];
+    config = parsed(uri);
+    CHECK("happ/xhttp-legacy-host-preserved", !strcmp(config.xhttp_host, "legacy.test") && strstr(config.xhttp_headers, "Value"));
+    NSDictionary *good = profile(@"tcp", @{}, plain), *bad = profile(@"grpc", @{@"idle_timeout": @-1}, plain);
+    NSData *batch = [NSJSONSerialization dataWithJSONObject:@{@"configs": @[bad, good]} options:0 error:NULL];
+    CHECK("happ/invalid-entry-does-not-remove-valid-entry", [[logic extractConfigURIsFromHappJSONData:batch] count] == 1);
     NSString *longPath = [@"/" stringByPaddingToLength:4096 withString:@"a" startingAtIndex:0];
     CHECK("happ/oversized-result-rejected", [logic vlessURIFromHappJSONConfig:profile(@"ws", @{@"path": longPath}, plain)] == nil);
 }
-int main(void) {
+int main(int argc, char **argv) {
+    if (argc == 2 && !strcmp(argv[1], "--convert")) {
+        NSAutoreleasePool *pool = [[NSAutoreleasePool alloc] init];
+        NSData *data = [[NSFileHandle fileHandleWithStandardInput] readDataToEndOfFile];
+        NSArray *uris = [VCProfiles() extractConfigURIsFromHappJSONData:data];
+        for (NSString *uri in uris) printf("%s\n", [uri UTF8String]);
+        int result = [uris count] ? 0 : 1;
+        [pool drain]; return result;
+    }
     NSAutoreleasePool *pool = [[NSAutoreleasePool alloc] init];
     NSString *fixtures = [NSString stringWithContentsOfFile:@"happ_fixtures.txt" encoding:NSUTF8StringEncoding error:NULL];
     CHECK("happ/golden-fixtures-present", [fixtures length] > 0);
