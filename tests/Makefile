@@ -25,6 +25,8 @@ HOST_TESTS += $(HOST_BUILD_DIR)/test_helper_monitor
 HOST_TESTS += $(HOST_BUILD_DIR)/test_dns_relay
 HOST_TESTS += $(HOST_BUILD_DIR)/test_ping
 HOST_TESTS += $(HOST_BUILD_DIR)/test_proxy_probe
+CORE_PARSE_SRC := uri utils xhttp_config xhttp_download xhttp_payload buffer_budget websocket grpc http_headers json core_log
+CORE_PARSE_OBJ := $(addprefix $(HOST_BUILD_DIR)/core-parser/,$(addsuffix .o,$(CORE_PARSE_SRC)))
 include $(ROOT)/common/zbar_sources.mk
 HOST_ZBAR_OBJECTS := $(patsubst $(ZBAR_DIR)/%.c,$(HOST_BUILD_DIR)/zbar/%.o,$(ZBAR_SRC))
 HOST_ZBAR_HEADERS := $(shell find $(ROOT)/$(ZBAR_DIR) -name '*.h')
@@ -129,7 +131,11 @@ $(HOST_BUILD_DIR)/integrations/karing/%.o: ../integrations/karing/%.m | requirem
 	mkdir -p $(dir $@)
 	$(HOST_CC) $(HOST_CPPFLAGS) $(HOST_OBJCFLAGS) $(HOST_CFLAGS) -MMD -MP -c $< -o $@
 
-$(HOST_BUILD_DIR)/test_import_formats: $(HOST_BUILD_DIR)/test_import_formats.o $(filter-out $(HOST_BUILD_DIR)/test_app_logic.o,$(APP_OBJECTS)) $(HOST_BUILD_DIR)/integrations/karing/karing_backup.o
+$(HOST_BUILD_DIR)/core-parser/%.o: ../../vless-core-cli/src/%.c | requirements
+	mkdir -p $(dir $@)
+	$(HOST_CC) $(HOST_CFLAGS) -I$(ROOT)/../vless-core-cli/include -MMD -MP -c $< -o $@
+
+$(HOST_BUILD_DIR)/test_import_formats: $(HOST_BUILD_DIR)/test_import_formats.o $(filter-out $(HOST_BUILD_DIR)/test_app_logic.o,$(APP_OBJECTS)) $(HOST_BUILD_DIR)/integrations/karing/karing_backup.o $(CORE_PARSE_OBJ)
 	$(HOST_CC) $(SANITIZE) $^ -o $@ $(HOST_LIBS)
 
 sanitizers:
@@ -138,5 +144,5 @@ sanitizers:
 asan:
 	ASAN_OPTIONS=detect_leaks=0 $(MAKE) test HOST_BUILD_DIR=$(HOST_BUILD_DIR)-asan SANITIZE='-fsanitize=address -fno-omit-frame-pointer'
 
--include $(APP_OBJECTS:.o=.d) $(HOST_BUILD_DIR)/test_ping.d $(HOST_BUILD_DIR)/test_proxy_probe.d $(HOST_BUILD_DIR)/app/proxy_probe.d $(HOST_BUILD_DIR)/test_import_formats.d $(HOST_BUILD_DIR)/integrations/karing/karing_backup.d
+-include $(APP_OBJECTS:.o=.d) $(CORE_PARSE_OBJ:.o=.d) $(HOST_BUILD_DIR)/test_ping.d $(HOST_BUILD_DIR)/test_proxy_probe.d $(HOST_BUILD_DIR)/app/proxy_probe.d $(HOST_BUILD_DIR)/test_import_formats.d $(HOST_BUILD_DIR)/integrations/karing/karing_backup.d
 .PHONY: test requirements sanitizers asan

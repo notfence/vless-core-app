@@ -3,6 +3,67 @@
 #import "../integrations/karing/karing_backup.h"
 #include "../integrations/happ/happ_crypto.h"
 #include "check.h"
+#include "../../vless-core-cli/include/uri.h"
+
+static vless_config_t parsed(NSString *uri) {
+    vless_config_t config; char error[256];
+    CHECK("happ/converted-profile-accepted-by-core", uri && parse_core_uri([uri UTF8String], &config, error, sizeof(error)) == 0);
+    return config;
+}
+
+static NSDictionary *profile(NSString *network, NSDictionary *transport, NSDictionary *user) {
+    return @{@"outbounds": @[@{@"protocol": @"vless", @"settings": @{@"vnext": @[@{@"address": @"example.test", @"port": @443, @"users": @[user]}]},
+        @"streamSettings": @{@"network": network, @"security": @"tls", @"tlsSettings": @{@"serverName": @"edge.test"},
+        @"wsSettings": transport, @"grpcSettings": transport, @"xhttpSettings": transport}}]};
+}
+
+static void extendedProfiles(void) {
+    VCProfileLogic *logic = VCProfiles();
+    NSString *encryption = @"mlkem768x25519plus.native.0rtt.AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8";
+    NSDictionary *user = @{@"id": @"11111111-2222-4333-8444-555555555555", @"encryption": encryption, @"flow": @"xtls-rprx-vision"};
+    for (NSString *network in @[@"tcp", @"ws", @"grpc", @"xhttp"]) {
+        NSString *uri = [logic vlessURIFromHappJSONConfig:profile(network, @{}, user)];
+        CHECK("happ/encryption-retains-case-and-mode", uri && [[logic queryValueForURLString:uri key:@"encryption"] isEqual:encryption]);
+        CHECK("happ/encrypted-flow-is-retained", [[logic queryValueForURLString:uri key:@"flow"] isEqual:@"xtls-rprx-vision"]);
+        vless_config_t config = parsed(uri);
+        CHECK("happ/core-encryption-and-flow", config.encryption_enabled && config.encryption_zero_rtt && !strcmp(config.flow, "xtls-rprx-vision") && config.encryption_relays[0].key_len == 32);
+        for (unsigned i = 0; i < 32; i++) CHECK("happ/core-relay-key-bytes", config.encryption_relays[0].key[i] == i);
+    }
+    NSDictionary *plain = @{@"id": [user objectForKey:@"id"]};
+    NSString *uri = [logic vlessURIFromHappJSONConfig:profile(@"ws", @{@"host": @"preferred.test", @"headers": @{@"Host": @"legacy.test", @"X-Vless-Core": @"Value"}, @"path": @"/socket?ed=64", @"maxEarlyData": @128, @"heartbeatPeriod": @3}, plain)];
+    CHECK("happ/ws-independent-host", [[logic queryValueForURLString:uri key:@"host"] isEqual:@"preferred.test"]);
+    NSDictionary *headers = [NSJSONSerialization JSONObjectWithData:[[logic queryValueForURLString:uri key:@"headers"] dataUsingEncoding:NSUTF8StringEncoding] options:0 error:NULL];
+    CHECK("happ/ws-user-headers-without-host", [headers isEqual:@{@"X-Vless-Core": @"Value"}]);
+    CHECK("happ/ws-early-data-and-heartbeat", [[logic queryValueForURLString:uri key:@"ed"] isEqual:@"128"] && [[logic queryValueForURLString:uri key:@"heartbeatPeriod"] isEqual:@"3"]);
+    vless_config_t config = parsed(uri);
+    CHECK("happ/core-ws-early-data", config.ws_early_data == 128 && config.ws_heartbeat_period == 3);
+    CHECK("happ/core-ws-path-and-host", !strcmp(config.xhttp_path, "/socket") && !strcmp(config.xhttp_host, "preferred.test"));
+    CHECK("happ/core-ws-headers", strstr(config.ws_headers, "Value") && !strstr(config.ws_headers, "legacy.test"));
+    NSDictionary *grpc = @{@"serviceName": @"vless-core", @"authority": @"edge.test", @"multi_mode": @(YES), @"idle_timeout": @5,
+        @"healthCheckTimeout": @20, @"permit_without_stream": @(NO), @"initial_windows_size": @65536, @"user_agent": @"vless-core"};
+    uri = [logic vlessURIFromHappJSONConfig:profile(@"grpc", grpc, plain)];
+    for (NSString *key in @[@"idleTimeout", @"healthCheckTimeout", @"permitWithoutStream", @"initialWindowsSize", @"userAgent"])
+        CHECK("happ/grpc-settings-retained", [logic queryValueForURLString:uri key:key] != nil);
+    CHECK("happ/grpc-false-is-not-lost", [[logic queryValueForURLString:uri key:@"permitWithoutStream"] isEqual:@"0"]);
+    config = parsed(uri);
+    CHECK("happ/core-grpc-settings", !strcmp(config.xhttp_mode, "multi") && config.grpc_idle_timeout == 5 && config.grpc_health_timeout == 20 && !config.grpc_permit_without_stream && config.grpc_initial_window == 65536 && !strcmp(config.grpc_user_agent, "vless-core"));
+    CHECK("happ/grpc-alias-conflict-rejected", [logic vlessURIFromHappJSONConfig:profile(@"grpc", @{@"idle_timeout": @5, @"idleTimeout": @6}, plain)] == nil);
+    for (NSDictionary *bad in @[@{@"ed": @16385}, @{@"heartbeatPeriod": @-1}, @{@"headers": @{@"X-Test": @"bad\r\ninjection"}}, @{@"ed": @1, @"maxEarlyData": @2}])
+        CHECK("happ/ws-invalid-settings-rejected", [logic vlessURIFromHappJSONConfig:profile(@"ws", bad, plain)] == nil);
+    for (NSDictionary *bad in @[@{@"initial_windows_size": @262145}, @{@"multiMode": @"false"}, @{@"idleTimeout": @1.5}])
+        CHECK("happ/grpc-invalid-settings-rejected", [logic vlessURIFromHappJSONConfig:profile(@"grpc", bad, plain)] == nil);
+    NSDictionary *download = @{@"network": @"xhttp", @"address": @"download.test", @"port": @443};
+    uri = [logic vlessURIFromHappJSONConfig:profile(@"xhttp", @{@"path": @"/vless-core", @"downloadSettings": download, @"xmux": @{@"maxConnections": @2}}, plain)];
+    NSDictionary *extra = [NSJSONSerialization JSONObjectWithData:[[logic queryValueForURLString:uri key:@"extra"] dataUsingEncoding:NSUTF8StringEncoding] options:0 error:NULL];
+    CHECK("happ/xhttp-top-level-settings-retained", [[extra objectForKey:@"downloadSettings"] isEqual:download] && [[extra objectForKey:@"xmux"] isEqual:@{@"maxConnections": @2}]);
+    config = parsed(uri);
+    CHECK("happ/core-download-and-xmux", config.xhttp_download_settings[0] && config.xmux.present && config.xmux.max_connections.min == 2 && config.xmux.max_connections.max == 2);
+    uri = [logic vlessURIFromHappJSONConfig:profile(@"xhttp", @{@"path": @"/explicit", @"downloadSettings": download, @"extra": @{@"path": @"/ignored", @"noGRPCHeader": @(YES)}}, plain)];
+    extra = [NSJSONSerialization JSONObjectWithData:[[logic queryValueForURLString:uri key:@"extra"] dataUsingEncoding:NSUTF8StringEncoding] options:0 error:NULL];
+    CHECK("happ/xray-extra-semantics", [[logic queryValueForURLString:uri key:@"path"] isEqual:@"/explicit"] && ![extra objectForKey:@"downloadSettings"] && [[extra objectForKey:@"noGRPCHeader"] boolValue]);
+    NSString *longPath = [@"/" stringByPaddingToLength:4096 withString:@"a" startingAtIndex:0];
+    CHECK("happ/oversized-result-rejected", [logic vlessURIFromHappJSONConfig:profile(@"ws", @{@"path": longPath}, plain)] == nil);
+}
 int main(void) {
     NSAutoreleasePool *pool = [[NSAutoreleasePool alloc] init];
     NSString *fixtures = [NSString stringWithContentsOfFile:@"happ_fixtures.txt" encoding:NSUTF8StringEncoding error:NULL];
@@ -56,5 +117,6 @@ int main(void) {
         [stream setObject:@"tcp" forKey:@"network"];
         CHECK("happ/raw-network-matches-tcp", [rawURI isEqual:[VCProfiles() vlessURIFromHappJSONConfig:rawConfig]]);
     }
+    extendedProfiles();
     FINISH("import formats"); [pool drain]; return 0;
 }
