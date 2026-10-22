@@ -14,11 +14,11 @@
 #include <time.h>
 #include <unistd.h>
 
-typedef struct { uint64_t now, inspect_time, resolve_time; unsigned inspections, resolutions; int inspect_result, resolve_result; const char *report,*primary,*download; } fixture_t;
+typedef struct { uint64_t now, inspect_time, resolve_time; unsigned inspections, resolutions; int inspect_result, resolve_result; const char *report,*primary,*download,*uri; } fixture_t;
 static uint64_t now(void *context) { return ((fixture_t *)context)->now; }
 static int inspect(void *context, const char *uri, uint64_t until, char *output, size_t capacity) {
     fixture_t *fixture=context; fixture->inspections++;
-    CHECK("prepare/inspection-budget",until == fixture->now+2000 && !strcmp(uri,"private-vless-core"));
+    CHECK("prepare/inspection-budget",until == fixture->now+2000 && !strcmp(uri,fixture->uri ? fixture->uri : "private-vless-core"));
     fixture->now+=fixture->inspect_time;
     snprintf(output,capacity,"%s",fixture->report);
     return fixture->inspect_result;
@@ -64,6 +64,14 @@ static void preparation(void) {
     CHECK("prepare/combined-capacity-not-truncated",vc_core_prepare("private-vless-core",&ops,&addresses,error,sizeof(error)) < 0 && strstr(error,"511") && !addresses.bypass[0]);
     fixture=initial();
     CHECK("prepare/recovery-after-errors",vc_core_prepare("private-vless-core",&ops,&addresses,error,sizeof(error)) == 0);
+    const char *uris[]={"vless://private@primary.test:443","socks5://primary.test:1080","trojan://private@primary.test:443","vmess://private-encoded-envelope","ss://private-encoded-envelope"};
+    for (unsigned i=0;i<sizeof(uris)/sizeof(*uris);i++) {
+        fixture=initial(); fixture.uri=uris[i];
+        CHECK("prepare/new-protocols-inspected-once",vc_core_prepare(uris[i],&ops,&addresses,error,sizeof(error)) == 0 && fixture.inspections == 1 && fixture.resolutions == 2);
+        CHECK("prepare/new-protocols-independent-addresses",!strcmp(addresses.primary,"192.0.2.1, 192.0.2.2") && !strcmp(addresses.download,"192.0.2.2, 198.51.100.1") && strstr(addresses.bypass,"198.51.100.1"));
+        fixture=initial(); fixture.uri=uris[i]; fixture.inspect_result=-1;
+        CHECK("prepare/invalid-protocol-never-resolves",vc_core_prepare(uris[i],&ops,&addresses,error,sizeof(error)) < 0 && !fixture.resolutions && !addresses.primary[0] && !addresses.download[0] && !addresses.bypass[0]);
+    }
 }
 
 static int descriptor_count(void) { int count=0; for (int fd=0;fd<256;fd++) if (fcntl(fd,F_GETFD) >= 0) count++; return count; }
@@ -105,6 +113,6 @@ int main(int argc, char **argv) {
         if (!result) fputs(output,stdout);
         return result ? 1 : 0;
     }
-    if (argc > 1) return child_fixture();
+    if (argc > 1) return argc == 4 && !strcmp(argv[1],"--inspect-config") && !strcmp(argv[2],"--uri-fd") && !strcmp(argv[3],"0") ? child_fixture() : 1;
     preparation(); processes(argv[0]); FINISH("core connection preparation"); return 0;
 }

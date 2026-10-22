@@ -29,7 +29,9 @@ int main(void) {
     char host[128], list[128] = ""; int bypass = 0;
     CHECK("daemon/host-vless", parse_server_host("vless://uuid@example.test:443?type=tcp", host, sizeof(host)) == 0 && !strcmp(host, "example.test"));
     CHECK("daemon/host-socks-auth-ipv6", parse_server_host("socks5://u:p@[2001:db8::1]:1080", host, sizeof(host)) == 0 && !strcmp(host, "2001:db8::1"));
-    CHECK("daemon/unsupported-scheme", !is_supported_config_uri("trojan://x@test"));
+    for (const char **scheme=(const char *[]){"vless://", "socks5://", "trojan://", "vmess://", "ss://", NULL}; *scheme; scheme++)
+        CHECK("daemon/current-core-schemes",is_supported_config_uri(*scheme));
+    CHECK("daemon/unsupported-scheme", !is_supported_config_uri("http://example.test"));
     CHECK("daemon/ip-list-add", !ip_list_append(list, sizeof(list), "203.0.113.1"));
     CHECK("daemon/ip-list-dedup", !ip_list_append(list, sizeof(list), "203.0.113.1") && !strcmp(list, "203.0.113.1"));
     CHECK("daemon/ip-list-overflow", ip_list_append(list, 3, "203.0.113.2") == -1);

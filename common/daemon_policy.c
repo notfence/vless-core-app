@@ -31,7 +31,8 @@ int contains_ci(const char *haystack, const char *needle) {
 }
 
 int is_supported_config_uri(const char *uri) {
-    return starts_with_ci(uri, "vless://") || starts_with_ci(uri, "socks5://");
+    return starts_with_ci(uri, "vless://") || starts_with_ci(uri, "socks5://") ||
+           starts_with_ci(uri, "trojan://") || starts_with_ci(uri, "vmess://") || starts_with_ci(uri, "ss://");
 }
 
 int xray_version_valid(const char *value) {

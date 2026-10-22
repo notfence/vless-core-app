@@ -3274,7 +3274,7 @@ static void handle_client(int cfd, control_client_t client_type) {
             if (xray_version && !xray_version_valid(xray_version)) {
                 snprintf(reply, sizeof(reply), "ERR invalid Xray version\n");
             } else if (!is_supported_config_uri(uri)) {
-                snprintf(reply, sizeof(reply), "ERR uri must start with vless:// or socks5://\n");
+                snprintf(reply, sizeof(reply), "ERR unsupported configuration URI scheme\n");
             } else {
                 connect_all(uri, xray_version, port, protect_logs, reply, sizeof(reply));
                 strncat(reply, "\n", sizeof(reply) - strlen(reply) - 1);
