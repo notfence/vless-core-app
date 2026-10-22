@@ -11,6 +11,18 @@ static vless_config_t parsed(NSString *uri) {
     return config;
 }
 
+static void parserDependencies(void) {
+    NSArray *links = @[@"vless://11111111-2222-4333-8444-555555555555@127.0.0.1:443",
+        @"socks5://127.0.0.1", @"trojan://parser-test@127.0.0.1:443",
+        @"vmess://11111111-2222-4333-8444-555555555555@127.0.0.1:443?scy=auto",
+        @"ss://aes-128-gcm:parser-test@127.0.0.1:443"];
+    for (NSUInteger i = 0; i < [links count]; i++) {
+        vless_config_t config = parsed([links objectAtIndex:i]);
+        CHECK("core-parser/all-current-protocols-linked", config.protocol == (core_protocol_t)i);
+        memset(&config, 0, sizeof(config));
+    }
+}
+
 static NSDictionary *profile(NSString *network, NSDictionary *transport, NSDictionary *user) {
     return @{@"outbounds": @[@{@"protocol": @"vless", @"settings": @{@"vnext": @[@{@"address": @"example.test", @"port": @443, @"users": @[user]}]},
         @"streamSettings": @{@"network": network, @"security": @"tls", @"tlsSettings": @{@"serverName": @"edge.test"},
@@ -131,6 +143,7 @@ int main(int argc, char **argv) {
         [stream setObject:@"tcp" forKey:@"network"];
         CHECK("happ/raw-network-matches-tcp", [rawURI isEqual:[VCProfiles() vlessURIFromHappJSONConfig:rawConfig]]);
     }
+    parserDependencies();
     extendedProfiles();
     FINISH("import formats"); [pool drain]; return 0;
 }

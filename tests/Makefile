@@ -27,6 +27,7 @@ HOST_TESTS += $(HOST_BUILD_DIR)/test_ping
 HOST_TESTS += $(HOST_BUILD_DIR)/test_proxy_probe
 HOST_TESTS += $(HOST_BUILD_DIR)/test_core_config
 CORE_PARSE_SRC := uri utils xhttp_config xhttp_download xhttp_payload buffer_budget websocket grpc http_headers json core_log
+CORE_PARSE_SRC += vmess_uri shadowsocks_uri shadowsocks_crypto blake3 trojan core_random deadline socket_util relay_memory connection_trace resolver
 CORE_PARSE_OBJ := $(addprefix $(HOST_BUILD_DIR)/core-parser/,$(addsuffix .o,$(CORE_PARSE_SRC)))
 include $(ROOT)/common/zbar_sources.mk
 HOST_ZBAR_OBJECTS := $(patsubst $(ZBAR_DIR)/%.c,$(HOST_BUILD_DIR)/zbar/%.o,$(ZBAR_SRC))
