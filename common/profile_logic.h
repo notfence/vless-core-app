@@ -16,6 +16,7 @@
 - (void)prepareMetadataForConfigurations:(NSArray *)configs subscriptions:(NSArray *)subscriptions;
 - (BOOL)parseServerHost:(NSString **)hostOut port:(uint16_t *)portOut fromURI:(NSString *)uri;
 - (NSString *)URIFromKaringServer:(NSDictionary *)server error:(NSString **)error;
+- (NSString *)URIFromHappJSONConfig:(NSDictionary *)config;
 - (NSDictionary *)importReportFromHappJSONData:(NSData *)data;
 - (NSDictionary *)subscriptionImportReportFromData:(NSData *)data;
 - (BOOL)appendTransportSettings:(NSDictionary *)stream query:(NSMutableArray *)query;

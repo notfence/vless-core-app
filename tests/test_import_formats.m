@@ -4,6 +4,7 @@
 #include "../integrations/happ/happ_crypto.h"
 #include "check.h"
 #include "../../vless-core-cli/include/uri.h"
+#include <openssl/evp.h>
 
 @interface VCProfileLogic (VCConverterTests)
 - (NSString *)URIFromKaringServer:(NSDictionary *)server error:(NSString **)error;
@@ -119,6 +120,36 @@ static void converterParity(void) {
     NSDictionary *report=[p importReportFromHappJSONData:[NSJSONSerialization dataWithJSONObject:@[bad,good] options:0 error:NULL]];
     CHECK("converters/partial-import-reported",[[report objectForKey:@"uris"] count] == 1 && [[report objectForKey:@"skipped"] unsignedIntegerValue] == 1 && [[report objectForKey:@"issues"] count] == 1);
 }
+
+static void trojanProfiles(void) {
+    VCProfileLogic *p=VCProfiles(); unichar zero=0;
+    NSString *password=[[@" A+:%@é" stringByAppendingString:[NSString stringWithCharacters:&zero length:1]] stringByAppendingString:@"Z "];
+    NSData *bytes=[password dataUsingEncoding:NSUTF8StringEncoding]; unsigned length=0; unsigned char expected[28];
+    CHECK("trojan/expected-password-bytes",EVP_Digest([bytes bytes],[bytes length],expected,&length,EVP_sha224(),NULL) && length == 28);
+    for (NSString *transport in @[@"tcp",@"ws",@"grpc",@"xhttp"]) for (NSString *security in @[@"none",@"tls",@"reality"]) {
+        NSMutableDictionary *stream=[NSMutableDictionary dictionaryWithObjectsAndKeys:transport,@"network",security,@"security",@{@"serverName":@"edge.test",@"fingerprint":@"firefox"},@"tlsSettings",@{@"serverName":@"edge.test",@"publicKey":@"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",@"fingerprint":@"firefox"},@"realitySettings",nil];
+        NSDictionary *target=@{@"address":@"example.test",@"port":@443,@"password":password};
+        for (NSDictionary *settings in @[target,@{@"servers":@[target]}]) {
+            NSDictionary *profile=@{@"outbounds":@[@{@"protocol":@"trojan",@"settings":settings,@"streamSettings":stream}]};
+            NSString *uri=[p URIFromHappJSONConfig:profile];
+            if ([transport isEqual:@"ws"] && [security isEqual:@"reality"]) { CHECK("trojan/ws-reality-rejected",!uri); continue; }
+            vless_config_t config=parsed(uri);
+            CHECK("trojan/happ-password-unchanged",config.protocol == CORE_PROTOCOL_TROJAN && !memcmp(config.trojan_hash,expected,28));
+            CHECK("trojan/happ-security-preserved",!strcmp(config.security,[security UTF8String]));
+            CHECK("trojan/metadata-does-not-contain-password",![[[p metadataForURI:uri] description] containsString:@"A+:%"]);
+        }
+    }
+    NSDictionary *server=@{@"type":@"trojan",@"server":@"example.test",@"server_port":@443,@"password":password};
+    NSString *uri=[p URIFromKaringServer:server error:NULL]; vless_config_t config=parsed(uri);
+    CHECK("trojan/karing-no-trim-or-double-decode",!memcmp(config.trojan_hash,expected,28) && !strcmp(config.security,"none"));
+    CHECK("trojan/default-tls",[[p securityTypeFromURI:@"trojan://a+b%00%FF@example.test:443"] isEqual:@"tls"]);
+    for (NSString *suffix in @[@"?flow=xtls-rprx-vision",@"?encryption=mlkem768x25519plus.native.0rtt.secret",@"?type=ws&security=reality",@"?fp=safari",@"?security=",@"?security=none&security=tls"])
+        CHECK("trojan/unsupported-options-rejected",[p unsupportedConfigReasonForURI:[@"trojan://private@example.test:443" stringByAppendingString:suffix]] != nil);
+    for (NSString *credential in @[@"",@"a%",@"a%0",@"a%GG"])
+        CHECK("trojan/invalid-password-envelope",[p unsupportedConfigReasonForURI:[NSString stringWithFormat:@"trojan://%@@example.test:443",credential]] != nil);
+    NSString *direct=@"trojan://a+b%3A%40%25@example.test:443#Fixture";
+    CHECK("trojan/text-and-subscription-original",[[p parseSubscriptionData:[direct dataUsingEncoding:NSUTF8StringEncoding]] isEqual:@[direct]] && [[p extractImportLinksFromText:direct] isEqual:@[direct]]);
+}
 int main(int argc, char **argv) {
     if (argc == 2 && (!strcmp(argv[1], "--convert") || !strcmp(argv[1],"--convert-karing"))) {
         NSAutoreleasePool *pool = [[NSAutoreleasePool alloc] init];
@@ -187,5 +218,6 @@ int main(int argc, char **argv) {
     parserDependencies();
     extendedProfiles();
     converterParity();
+    trojanProfiles();
     FINISH("import formats"); [pool drain]; return 0;
 }

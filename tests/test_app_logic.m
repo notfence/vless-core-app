@@ -146,7 +146,7 @@ static void importTests(void) {
     }
     CHECK("import/socks-credentials-ipv6", [p isSupportedConfigTupleForURI:@"socks5://user:pass@[2001:db8::1]:1080#vless-core"]);
     CHECK("import/socks-zero-port", ![p isSupportedConfigTupleForURI:@"socks5://proxy.test:0"]);
-    CHECK("import/foreign-protocol", ![p isSupportedConfigTupleForURI:@"trojan://secret@example.test:443"]);
+    CHECK("import/trojan-supported", [p isSupportedConfigTupleForURI:@"trojan://secret@example.test:443"]);
     NSString *feed = [NSString stringWithFormat:@"%@?type=tcp\n%@?type=tcp\nsocks5://proxy.test:1080\n", base, base];
     CHECK("import/text-deduplication", [[p parseSubscriptionData:[feed dataUsingEncoding:NSUTF8StringEncoding]] count] == 2);
     NSString *b64 = [[feed dataUsingEncoding:NSUTF8StringEncoding] base64EncodedStringWithOptions:0];

@@ -25,7 +25,7 @@
 - (void)buildSections {
     NSArray *gettingStarted = [NSArray arrayWithObjects:
         [self question:@"How do I import?"
-                 answer:@"Tap + and choose Import from Clipboard, Import from File, Scan QR Code, or Manual Input. You can import vless:// and socks5:// configurations, HTTP/HTTPS subscription URLs, happ:// links, and Karing backup ZIP files or LAN Send QR codes."],
+                 answer:@"Tap + and choose Import from Clipboard, Import from File, Scan QR Code, or Manual Input. You can import vless://, trojan:// and socks5:// configurations, HTTP/HTTPS subscription URLs, happ:// links, and Karing backup ZIP files or LAN Send QR codes."],
         [self question:@"How do I delete or reorder items?"
                  answer:@"Swipe a standalone configuration or subscription from right to left to delete it. To change the order, tap the list button beside Configurations or Subscriptions, drag the rows, then tap the checkmark to finish."],
         [self question:@"Do I need to respring after installation?"
@@ -36,7 +36,7 @@
         [self question:@"Where are the subscription details?"
                  answer:@"Tap the info button beside a subscription. The details page shows its source, provider description, configuration count, traffic, and expiry when the provider supplies that data. You can also update or delete that subscription there."],
         [self question:@"Why wasn't my subscription added?"
-                 answer:@"The URL must return at least one parseable VLESS or SOCKS5 entry. Import can fail when the provider is unavailable, returns an empty or HTML response, has a certificate problem, or uses an unsupported format. The import alert shows a more specific reason when one is available."],
+                 answer:@"The URL must return at least one parseable supported proxy entry. Import can fail when the provider is unavailable, returns an empty or HTML response, has a certificate problem, or uses an unsupported format. The import alert shows a more specific reason when one is available."],
         [self question:@"What does auto-update do?"
                  answer:@"When enabled, subscriptions refresh once after a fresh app launch. It does not interrupt an active VPN connection. Use the refresh button to update all subscriptions manually, or open a subscription's details and choose Update Now to refresh only that one."],
         nil];
@@ -51,6 +51,7 @@
                          @"• VLESS gRPC with no security, TLS, or Reality; single-stream and multi modes\n"
                          @"• VLESS WebSocket with TLS or no security\n"
                          @"• SOCKS5\n"
+                         @"• Trojan over TCP, WebSocket, gRPC and XHTTP; TLS or no outer TLS, and Reality except with WebSocket\n"
                          @"Supported fingerprints are chrome, firefox, edge, random, randomized, and qq."],
         [self question:@"Why is the protocol text red?"
                  answer:@"Red text means the transport, security type, mode, flow, or fingerprint is not supported. The app keeps the entry visible so you can identify it, but blocks the connection to avoid a broken tunnel. Press Connect to see the unsupported option."],
