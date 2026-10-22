@@ -238,6 +238,7 @@
     }
 
     [self saveData];
+    [self showProfileImportWarnings:@[updated]];
     VCRecordAppEvent(@"subscription",
                      existingIndex >= 0 ? @"Subscription replaced" : @"Subscription added",
                      [NSString stringWithFormat:@"configs=%lu subscriptions=%lu",
@@ -491,6 +492,7 @@
 
             if (addedCount > 0 || savedPlainHTTPApproval) {
                 [self saveData];
+                [self showProfileImportWarnings:importedSubs];
             }
             if (addedCount > 0) {
                 [self selectSubscriptionAtIndex:lastAddedIndex];
@@ -871,6 +873,14 @@
         [self showStatus:@"Import text is empty" ok:NO];
         return;
     }
+    if ([text hasPrefix:@"{"] || [text hasPrefix:@"["]) {
+        NSDictionary *report=[VCProfiles() importReportFromHappJSONData:[text dataUsingEncoding:NSUTF8StringEncoding]];
+        NSArray *uris=[report objectForKey:@"uris"];
+        if ([uris count]) [self importTextEntry:[uris componentsJoinedByString:@"\n"]];
+        else [self showStatus:@"JSON contains no supported configurations" ok:NO];
+        [self showProfileImportWarnings:@[report]];
+        return;
+    }
 
     NSString *karingError = nil;
     NSDictionary *karingDescriptor = VCKaringLANDownloadDescriptor(text, &karingError);
@@ -1078,7 +1088,21 @@
     [self showStatus:@"Unsupported import format (use vless://, socks5://, happ://, karing://sync-download/, or an HTTP(S) subscription)" ok:NO];
 }
 
+- (void)showProfileImportWarnings:(NSArray *)reports {
+    NSUInteger skipped=0; NSMutableArray *issues=[NSMutableArray array];
+    for (NSDictionary *report in reports) {
+        skipped+=[[report objectForKey:@"import_skipped"] ?: [report objectForKey:@"skipped"] unsignedIntegerValue];
+        NSArray *reasons=[report objectForKey:@"import_issues"] ?: [report objectForKey:@"issues"];
+        for (NSString *reason in reasons) if ([issues count] < 5 && ![issues containsObject:reason]) [issues addObject:reason];
+    }
+    if (!skipped) return;
+    NSString *message=[NSString stringWithFormat:@"Skipped %lu configuration(s).\n%@",(unsigned long)skipped,[issues componentsJoinedByString:@"\n"]];
+    UIAlertView *alert=[[[UIAlertView alloc] initWithTitle:@"Import warnings" message:message delegate:nil cancelButtonTitle:@"OK" otherButtonTitles:nil] autorelease];
+    [alert show];
+}
+
 - (void)importKaringSubscriptionEntries:(NSArray *)entries {
+    [self showProfileImportWarnings:entries];
     if (![entries isKindOfClass:[NSArray class]] || [entries count] == 0) {
         VCRecordAppEvent(@"import", @"Karing backup contained no entries", nil);
         [self showStatus:@"The Karing backup has no supported subscriptions" ok:NO];
@@ -1113,6 +1137,7 @@
                 [NSMutableDictionary dictionaryWithDictionary:
                  [self subscriptionDictionaryForURL:url allowInsecureFetch:NO]];
             [subscription setObject:supportedItems forKey:@"items"];
+            for (NSString *key in @[@"import_skipped",@"import_issues"]) if ([value objectForKey:key]) [subscription setObject:[value objectForKey:key] forKey:key];
             [cachedSubscriptions setObject:subscription forKey:url];
         }
     }

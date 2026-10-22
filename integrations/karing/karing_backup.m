@@ -1,4 +1,5 @@
 #import "karing_backup.h"
+#import "../../common/profile_logic.h"
 
 #include <arpa/inet.h>
 #include <stdint.h>
@@ -185,164 +186,19 @@ static NSString *VCTrimmedString(id value) {
             [NSCharacterSet whitespaceAndNewlineCharacterSet]];
 }
 
-static NSString *VCPercentEncode(NSString *value) {
-    NSData *data = [value dataUsingEncoding:NSUTF8StringEncoding];
-    const uint8_t *bytes = (const uint8_t *)[data bytes];
-    NSMutableString *encoded = [NSMutableString string];
-    for (NSUInteger i = 0; i < [data length]; i++) {
-        uint8_t c = bytes[i];
-        BOOL unreserved = (c >= 'A' && c <= 'Z') ||
-                          (c >= 'a' && c <= 'z') ||
-                          (c >= '0' && c <= '9') ||
-                          c == '-' || c == '.' || c == '_' || c == '~';
-        if (unreserved) {
-            [encoded appendFormat:@"%c", c];
-        } else {
-            [encoded appendFormat:@"%%%02X", c];
-        }
-    }
-    return encoded;
-}
 
-static NSString *VCStringValue(id value) {
-    if ([value isKindOfClass:[NSString class]]) return VCTrimmedString(value);
-    if ([value respondsToSelector:@selector(stringValue)]) return [value stringValue];
-    return @"";
-}
-
-static NSDictionary *VCDictionaryValue(id value) {
-    return [value isKindOfClass:[NSDictionary class]] ? value : nil;
-}
-
-static NSString *VCFirstHeaderValue(id value) {
-    if ([value isKindOfClass:[NSArray class]] && [value count] > 0) {
-        return VCStringValue([value objectAtIndex:0]);
-    }
-    return VCStringValue(value);
-}
-
-static void VCAddQueryPart(NSMutableArray *parts, NSString *key, NSString *value) {
-    if ([value length] == 0) return;
-    [parts addObject:[NSString stringWithFormat:@"%@=%@", key, VCPercentEncode(value)]];
-}
-
-static NSString *VCVLESSURIFromKaringServer(NSDictionary *server) {
-    if (![[VCStringValue([server objectForKey:@"type"]) lowercaseString] isEqualToString:@"vless"]) return nil;
-
-    NSString *address = VCStringValue([server objectForKey:@"server"]);
-    NSInteger port = [[server objectForKey:@"server_port"] integerValue];
-    NSString *uuid = VCStringValue([server objectForKey:@"uuid"]);
-    if ([address length] == 0 || port < 1 || port > 65535 || [uuid length] == 0) return nil;
-
-    NSMutableArray *query = [NSMutableArray arrayWithObject:@"encryption=none"];
-    VCAddQueryPart(query, @"flow", VCStringValue([server objectForKey:@"flow"]));
-
-    NSDictionary *tls = VCDictionaryValue([server objectForKey:@"tls"]);
-    NSDictionary *reality = VCDictionaryValue([tls objectForKey:@"reality"]);
-    NSString *publicKey = VCStringValue([reality objectForKey:@"public_key"]);
-    BOOL tlsEnabled = tls && (![tls objectForKey:@"enabled"] || [[tls objectForKey:@"enabled"] boolValue]);
-    NSString *security = ([publicKey length] > 0) ? @"reality" : (tlsEnabled ? @"tls" : @"none");
-    VCAddQueryPart(query, @"security", security);
-    if (tlsEnabled || [publicKey length] > 0) {
-        VCAddQueryPart(query, @"sni", VCStringValue([tls objectForKey:@"server_name"]));
-        if ([[tls objectForKey:@"insecure"] boolValue]) VCAddQueryPart(query, @"allowInsecure", @"1");
-
-        NSDictionary *utls = VCDictionaryValue([tls objectForKey:@"utls"]);
-        VCAddQueryPart(query, @"fp", VCStringValue([utls objectForKey:@"fingerprint"]));
-        id alpnValue = [tls objectForKey:@"alpn"];
-        if ([alpnValue isKindOfClass:[NSArray class]]) {
-            VCAddQueryPart(query, @"alpn", [alpnValue componentsJoinedByString:@","]);
-        } else {
-            VCAddQueryPart(query, @"alpn", VCStringValue(alpnValue));
-        }
-    }
-    if ([publicKey length] > 0) {
-        VCAddQueryPart(query, @"pbk", publicKey);
-        VCAddQueryPart(query, @"sid", VCStringValue([reality objectForKey:@"short_id"]));
-    }
-
-    NSDictionary *transport = VCDictionaryValue([server objectForKey:@"transport"]);
-    NSString *transportType = [VCStringValue([transport objectForKey:@"type"]) lowercaseString];
-    if ([transportType length] == 0) transportType = @"tcp";
-    if ([transportType isEqualToString:@"tcp"]) {
-        VCAddQueryPart(query, @"type", @"tcp");
-    } else if ([transportType isEqualToString:@"ws"]) {
-        VCAddQueryPart(query, @"type", @"ws");
-        VCAddQueryPart(query, @"path", VCStringValue([transport objectForKey:@"path"]));
-        NSDictionary *headers = VCDictionaryValue([transport objectForKey:@"headers"]);
-        NSString *host = VCFirstHeaderValue([headers objectForKey:@"Host"]);
-        if ([host length] == 0) host = VCFirstHeaderValue([headers objectForKey:@"host"]);
-        VCAddQueryPart(query, @"host", host);
-    } else if ([transportType isEqualToString:@"grpc"]) {
-        VCAddQueryPart(query, @"type", @"grpc");
-        NSString *serviceName = VCStringValue([transport objectForKey:@"service_name"]);
-        if ([serviceName length] == 0) serviceName = VCStringValue([transport objectForKey:@"serviceName"]);
-        VCAddQueryPart(query, @"serviceName", serviceName);
-        VCAddQueryPart(query, @"authority", VCStringValue([transport objectForKey:@"authority"]));
-        if ([[transport objectForKey:@"multi_mode"] boolValue] ||
-            [[transport objectForKey:@"multiMode"] boolValue]) {
-            VCAddQueryPart(query, @"mode", @"multi");
-        }
-    } else if ([transportType isEqualToString:@"xhttp"] ||
-               [transportType isEqualToString:@"splithttp"]) {
-        VCAddQueryPart(query, @"type", @"xhttp");
-        VCAddQueryPart(query, @"path", VCStringValue([transport objectForKey:@"path"]));
-        VCAddQueryPart(query, @"host", VCFirstHeaderValue([transport objectForKey:@"host"]));
-        VCAddQueryPart(query, @"mode", VCStringValue([transport objectForKey:@"mode"]));
-    } else {
-        return nil;
-    }
-
-    NSString *authority = address;
-    if ([address rangeOfString:@":"].location != NSNotFound && ![address hasPrefix:@"["]) {
-        authority = [NSString stringWithFormat:@"[%@]", address];
-    }
-    NSString *tag = VCStringValue([server objectForKey:@"tag"]);
-    NSString *fragment = ([tag length] > 0)
-        ? [NSString stringWithFormat:@"#%@", VCPercentEncode(tag)]
-        : @"";
-    return [NSString stringWithFormat:@"vless://%@@%@:%ld?%@%@",
-            VCPercentEncode(uuid),
-            authority,
-            (long)port,
-            [query componentsJoinedByString:@"&"],
-            fragment];
-}
-
-static NSString *VCSOCKSURIFromKaringServer(NSDictionary *server) {
-    NSString *type = [VCStringValue([server objectForKey:@"type"]) lowercaseString];
-    if (![type isEqualToString:@"socks"] && ![type isEqualToString:@"socks5"]) return nil;
-
-    NSString *address = VCStringValue([server objectForKey:@"server"]);
-    NSInteger port = [[server objectForKey:@"server_port"] integerValue];
-    if ([address length] == 0 || port < 1 || port > 65535) return nil;
-
-    NSString *authority = address;
-    if ([address rangeOfString:@":"].location != NSNotFound && ![address hasPrefix:@"["]) {
-        authority = [NSString stringWithFormat:@"[%@]", address];
-    }
-    NSString *user = VCStringValue([server objectForKey:@"username"]);
-    NSString *password = VCStringValue([server objectForKey:@"password"]);
-    NSString *credentials = ([user length] > 0 || [password length] > 0)
-        ? [NSString stringWithFormat:@"%@:%@@", VCPercentEncode(user), VCPercentEncode(password)]
-        : @"";
-    NSString *tag = VCStringValue([server objectForKey:@"tag"]);
-    NSString *fragment = ([tag length] > 0)
-        ? [NSString stringWithFormat:@"#%@", VCPercentEncode(tag)]
-        : @"";
-    return [NSString stringWithFormat:@"socks5://%@%@:%ld%@",
-            credentials, authority, (long)port, fragment];
-}
-
-static NSArray *VCConfigURIsFromKaringGroup(NSDictionary *item) {
+static NSArray *VCConfigURIsFromKaringGroup(NSDictionary *item, NSMutableArray *issues, NSUInteger *skipped) {
     id serversValue = [item objectForKey:@"servers"];
     if (![serversValue isKindOfClass:[NSArray class]]) return [NSArray array];
 
     NSMutableArray *uris = [NSMutableArray array];
     for (id value in (NSArray *)serversValue) {
-        if (![value isKindOfClass:[NSDictionary class]]) continue;
-        NSString *uri = VCVLESSURIFromKaringServer(value);
-        if ([uri length] == 0) uri = VCSOCKSURIFromKaringServer(value);
+        NSString *error=nil;
+        NSString *uri = [VCProfiles() URIFromKaringServer:value error:&error];
+        if (![uri length]) {
+            (*skipped)++;
+            if ([issues count] < 16) [issues addObject:error ?: @"servers[]: invalid profile"];
+        }
         if ([uri length] > 0 && ![uris containsObject:uri]) [uris addObject:uri];
     }
     return uris;
@@ -384,7 +240,9 @@ NSArray *VCKaringSubscriptionsFromBackupData(NSData *data, NSString **errorText)
         if ([seenURLs containsObject:url]) continue;
 
         NSMutableDictionary *entry = [NSMutableDictionary dictionaryWithObject:url forKey:@"url"];
-        NSArray *configs = VCConfigURIsFromKaringGroup(item);
+        NSMutableArray *issues=[NSMutableArray array]; NSUInteger skipped=0;
+        NSArray *configs = VCConfigURIsFromKaringGroup(item,issues,&skipped);
+        if (skipped) { [entry setObject:@(skipped) forKey:@"import_skipped"]; [entry setObject:issues forKey:@"import_issues"]; }
         if ([configs count] > 0) [entry setObject:configs forKey:@"items"];
         [subscriptions addObject:entry];
         [seenURLs addObject:url];

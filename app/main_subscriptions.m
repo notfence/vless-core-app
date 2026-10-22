@@ -260,6 +260,7 @@
 
     NSArray *uris = [updated objectForKey:@"items"];
     [_subscriptions replaceObjectAtIndex:idx withObject:updated];
+    [self showProfileImportWarnings:@[updated]];
     if (_selectedSubIndex == idx) {
         if (![uris isKindOfClass:[NSArray class]] || (NSInteger)[uris count] <= 0) {
             _selectedSubItemIndex = -1;
@@ -458,6 +459,7 @@
 
             [_subscriptions removeAllObjects];
             [_subscriptions addObjectsFromArray:updatedSubs];
+            [self showProfileImportWarnings:updatedSubs];
 
             [self normalizeSelection];
             [self reloadMainTableDataAfterExternalChange];
@@ -532,6 +534,7 @@
         if ([updated isKindOfClass:[NSDictionary class]]) {
             NSArray *uris = [updated objectForKey:@"items"];
             [_subscriptions replaceObjectAtIndex:i withObject:updated];
+            [self showProfileImportWarnings:@[updated]];
             if (_selectedSubIndex == i) {
                 if (![uris isKindOfClass:[NSArray class]] || (NSInteger)[uris count] <= 0) {
                     _selectedSubItemIndex = -1;
@@ -675,6 +678,7 @@
 
             if (updated && unchanged) {
                 [_subscriptions replaceObjectAtIndex:index withObject:updated];
+                [self showProfileImportWarnings:@[updated]];
                 [self normalizeSelection];
                 [self saveData];
                 [self reloadMainTableDataAfterExternalChange];

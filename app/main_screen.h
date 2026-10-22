@@ -257,6 +257,7 @@
 @end
 
 @interface MainVC (VCMainImport) <UIActionSheetDelegate, UIAlertViewDelegate, QRScanVCDelegate, VCImportBrowserDelegate>
+- (void)showProfileImportWarnings:(NSArray *)reports;
 - (NSArray *)extractConfigURIsFromText:(NSString *)text;
 - (NSArray *)extractImportLinksFromText:(NSString *)text;
 - (NSString *)happJSONStringValue:(id)value;

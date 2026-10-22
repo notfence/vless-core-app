@@ -83,6 +83,29 @@ static BOOL VCProfileHost(NSString *host) {
     return YES;
 }
 
+static BOOL VCProfileUnsignedScalar(id value, unsigned maximum, unsigned *result) {
+    if ([value isKindOfClass:[NSNumber class]]) return !VCProfileBoolean(value) && VCProfileUnsigned(value,maximum,result);
+    if (![value isKindOfClass:[NSString class]] || ![value length]) return NO;
+    unsigned number=0;
+    for (NSUInteger i=0;i<[value length];i++) {
+        unsigned digit=(unsigned)([value characterAtIndex:i]-'0');
+        if (digit > 9 || digit > maximum || number > (maximum-digit)/10) return NO;
+        number=number*10+digit;
+    }
+    *result=number; return YES;
+}
+
+static BOOL VCProfileCopyAliases(NSDictionary *source, NSMutableDictionary *destination, NSString *key, NSArray *aliases) {
+    BOOL valid=YES; id value=VCProfileAlias(source,aliases,&valid);
+    if (valid && value) [destination setObject:value forKey:key];
+    return valid;
+}
+
+static NSString *VCProfileForbidden(NSDictionary *source, NSArray *fields, NSString *scope) {
+    for (NSString *field in fields) if ([source objectForKey:field]) return [scope stringByAppendingString:field];
+    return nil;
+}
+
 static BOOL VCProfilePort(NSString *text, uint16_t *output) {
     if (![text length]) return NO;
     unsigned value=0;
@@ -485,7 +508,8 @@ static BOOL VCProfileEndpoint(NSString *endpoint, uint16_t defaultPort, NSString
         metadataFromMeta = [self subscriptionMetadataFromData:data];
     }
 
-    NSArray *uris = [self parseSubscriptionData:data];
+    NSDictionary *importReport=[self subscriptionImportReportFromData:data];
+    NSArray *uris = [importReport objectForKey:@"uris"];
     if ([uris count] == 0) {
         if (errorTextOut) {
             if (SubscriptionDataLooksLikeHTML(data)) {
@@ -498,6 +522,11 @@ static BOOL VCProfileEndpoint(NSString *endpoint, uint16_t defaultPort, NSString
     }
 
     NSMutableDictionary *updated = [NSMutableDictionary dictionaryWithDictionary:sub];
+    [updated removeObjectForKey:@"import_skipped"]; [updated removeObjectForKey:@"import_issues"];
+    if ([[importReport objectForKey:@"skipped"] unsignedIntegerValue]) {
+        [updated setObject:[importReport objectForKey:@"skipped"] forKey:@"import_skipped"];
+        [updated setObject:[importReport objectForKey:@"issues"] forKey:@"import_issues"];
+    }
     [updated setObject:uris forKey:@"items"];
     [updated removeObjectForKey:kSubscriptionUserInfoKey];
     if ([userInfoFromMeta count] > 0) {
@@ -808,59 +837,50 @@ static BOOL VCProfileEndpoint(NSString *endpoint, uint16_t defaultPort, NSString
     return out;
 }
 
-- (NSArray *)extractConfigURIsFromHappJSONData:(NSData *)data {
-    if (!data || [data length] == 0) return [NSArray array];
-
-    NSError *error = nil;
-    id root = [NSJSONSerialization JSONObjectWithData:data options:0 error:&error];
-    if (!root || error) return [NSArray array];
-
-    NSArray *configs = [self happJSONArrayValue:root];
+- (NSDictionary *)importReportFromHappJSONData:(NSData *)data {
+    NSMutableArray *uris=[NSMutableArray array],*issues=[NSMutableArray array];
+    NSUInteger skipped=0;
+    id root=data ? [NSJSONSerialization JSONObjectWithData:data options:0 error:NULL] : nil;
+    NSArray *configs=[self happJSONArrayValue:root];
     if (!configs && [root isKindOfClass:[NSDictionary class]]) {
-        NSDictionary *dictionary = (NSDictionary *)root;
-        configs = [self happJSONArrayValue:[dictionary objectForKey:@"configs"]];
-        if (!configs && [dictionary objectForKey:@"outbounds"]) {
-            configs = [NSArray arrayWithObject:dictionary];
-        }
+        configs=[self happJSONArrayValue:[root objectForKey:@"configs"]];
+        if (!configs && [root objectForKey:@"outbounds"]) configs=@[root];
     }
-    if (![configs isKindOfClass:[NSArray class]]) return [NSArray array];
-
-    NSMutableArray *uris = [NSMutableArray array];
     for (id value in configs) {
-        NSString *uri = [self vlessURIFromHappJSONConfig:[self happJSONDictionaryValue:value]];
-        if ([uri length] == 0 || [uris containsObject:uri]) continue;
-        if ([self isSupportedConfigTupleForURI:uri]) [uris addObject:uri];
+        NSString *uri=[self vlessURIFromHappJSONConfig:[self happJSONDictionaryValue:value]];
+        if (![uri length]) {
+            skipped++;
+            if ([issues count] < 16) [issues addObject:@"configs[]: invalid or unsupported profile settings"];
+        } else if (![uris containsObject:uri]) [uris addObject:uri];
     }
-    return uris;
+    return @{@"uris":uris,@"skipped":@(skipped),@"issues":issues};
+}
+
+- (NSArray *)extractConfigURIsFromHappJSONData:(NSData *)data {
+    return [[self importReportFromHappJSONData:data] objectForKey:@"uris"];
+}
+
+- (NSDictionary *)subscriptionImportReportFromData:(NSData *)data {
+    if (!data || ![data length]) return @{@"uris":@[],@"skipped":@0,@"issues":@[]};
+    NSString *raw=[[[NSString alloc] initWithData:data encoding:NSUTF8StringEncoding] autorelease];
+    if (!raw) raw=[[[NSString alloc] initWithData:data encoding:NSISOLatin1StringEncoding] autorelease];
+    NSString *trim=[self safeTrim:raw];
+    if ([trim hasPrefix:@"{"] || [trim hasPrefix:@"["]) return [self importReportFromHappJSONData:data];
+    NSArray *uris=[self extractConfigURIsFromText:raw];
+    if (![uris count]) {
+        NSString *base64=[[raw componentsSeparatedByCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]] componentsJoinedByString:@""];
+        NSData *decoded=DecodeBase64String(base64);
+        NSString *text=[[[NSString alloc] initWithData:decoded encoding:NSUTF8StringEncoding] autorelease];
+        if (!text) text=[[[NSString alloc] initWithData:decoded encoding:NSISOLatin1StringEncoding] autorelease];
+        NSString *trimmed=[self safeTrim:text];
+        if ([trimmed hasPrefix:@"{"] || [trimmed hasPrefix:@"["]) return [self importReportFromHappJSONData:decoded];
+        uris=[self extractConfigURIsFromText:text];
+    }
+    return @{@"uris":[self sanitizeSubscriptionURIs:uris],@"skipped":@0,@"issues":@[]};
 }
 
 - (NSArray *)parseSubscriptionData:(NSData *)data {
-    if (!data || [data length] == 0) return [NSArray array];
-
-    NSString *raw = [[[NSString alloc] initWithData:data encoding:NSUTF8StringEncoding] autorelease];
-    if (!raw) raw = [[[NSString alloc] initWithData:data encoding:NSISOLatin1StringEncoding] autorelease];
-
-    NSArray *uris = [NSArray array];
-    if (raw) {
-        uris = [self extractConfigURIsFromText:raw];
-        if ([uris count] > 0) return [self sanitizeSubscriptionURIs:uris];
-
-        uris = [self extractConfigURIsFromHappJSONData:data];
-        if ([uris count] > 0) return [self sanitizeSubscriptionURIs:uris];
-
-        NSString *b64 = [[raw componentsSeparatedByCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]] componentsJoinedByString:@""];
-        NSData *decoded = DecodeBase64String(b64);
-        if (decoded && [decoded length] > 0) {
-            NSString *decodedText = [[[NSString alloc] initWithData:decoded encoding:NSUTF8StringEncoding] autorelease];
-            if (!decodedText) decodedText = [[[NSString alloc] initWithData:decoded encoding:NSISOLatin1StringEncoding] autorelease];
-            if (decodedText) {
-                uris = [self extractConfigURIsFromText:decodedText];
-                if ([uris count] > 0) return [self sanitizeSubscriptionURIs:uris];
-            }
-        }
-    }
-
-    return [NSArray array];
+    return [[self subscriptionImportReportFromData:data] objectForKey:@"uris"];
 }
 
 - (NSArray *)sanitizeSubscriptionURIs:(NSArray *)uris {
@@ -984,20 +1004,26 @@ static BOOL VCProfileEndpoint(NSString *endpoint, uint16_t defaultPort, NSString
         if (!proxy && [protocol isEqualToString:@"vless"]) proxy = candidate;
     }
     if (!proxy) return nil;
+    NSDictionary *mux=[self happJSONDictionaryValue:[proxy objectForKey:@"mux"]];
+    if (([proxy objectForKey:@"mux"] && !mux) || ([mux objectForKey:@"enabled"] && !VCProfileBoolean([mux objectForKey:@"enabled"]))) return nil;
+    if ([[mux objectForKey:@"enabled"] boolValue] || [proxy objectForKey:@"proxySettings"]) return nil;
 
     NSDictionary *settings = [self happJSONDictionaryValue:[proxy objectForKey:@"settings"]];
     NSArray *vnext = [self happJSONArrayValue:[settings objectForKey:@"vnext"]];
     NSDictionary *server = ([vnext count] > 0) ? [self happJSONDictionaryValue:[vnext objectAtIndex:0]] : nil;
     NSArray *users = [self happJSONArrayValue:[server objectForKey:@"users"]];
     NSDictionary *user = ([users count] > 0) ? [self happJSONDictionaryValue:[users objectAtIndex:0]] : nil;
+    if ([vnext count] != 1 || [users count] != 1) return nil;
 
-    NSString *address = [self safeTrim:[self happJSONStringValue:[server objectForKey:@"address"]]];
-    NSString *portText = [self safeTrim:[self happJSONStringValue:[server objectForKey:@"port"]]];
+    NSString *address = [self happJSONStringValue:[server objectForKey:@"address"]];
+    unsigned parsedPort=0;
+    if (!VCProfileUnsignedScalar([server objectForKey:@"port"],65535,&parsedPort) || !parsedPort) return nil;
+    NSString *portText = [NSString stringWithFormat:@"%u",parsedPort];
     NSString *uuid = [self safeTrim:[self happJSONStringValue:[user objectForKey:@"id"]]];
-    if (!VCProfileText([server objectForKey:@"address"]) || !VCProfileText([user objectForKey:@"id"])) return nil;
+    if (!VCProfileText([server objectForKey:@"address"]) || !VCProfileHost(address) || !VCProfileText([user objectForKey:@"id"])) return nil;
     id encryptionValue = [user objectForKey:@"encryption"];
     if (encryptionValue && !VCProfileText(encryptionValue)) return nil;
-    NSString *encryption = [self safeTrim:encryptionValue];
+    NSString *encryption = encryptionValue;
     if ([address length] == 0 || [portText length] == 0 || [uuid length] == 0) return nil;
     for (NSUInteger i = 0; i < [portText length]; i++) if ([portText characterAtIndex:i] < '0' || [portText characterAtIndex:i] > '9') return nil;
     if ([portText length] > 5) return nil;
@@ -1005,180 +1031,13 @@ static BOOL VCProfileEndpoint(NSString *endpoint, uint16_t defaultPort, NSString
     if (port <= 0 || port > 65535) return nil;
     if ([encryption length] == 0) encryption = @"none";
 
-    NSDictionary *stream = [self happJSONDictionaryValue:[proxy objectForKey:@"streamSettings"]];
-    if ([proxy objectForKey:@"streamSettings"] && !stream) return nil;
-    NSString *network = [[self safeTrim:[self happJSONStringValue:[stream objectForKey:@"network"]]] lowercaseString];
-    NSString *security = [[self safeTrim:[self happJSONStringValue:[stream objectForKey:@"security"]]] lowercaseString];
-    if ([network isEqualToString:@"splithttp"]) network = @"xhttp";
-    if ([network length] == 0 || [network isEqualToString:@"raw"]) network = @"tcp";
-    if ([security length] == 0) security = @"none";
-
-    BOOL tcpSupported = [network isEqualToString:@"tcp"] &&
-                        ([security isEqualToString:@"none"] || [security isEqualToString:@"tls"] || [security isEqualToString:@"reality"]);
-    BOOL xhttpSupported = [network isEqualToString:@"xhttp"] &&
-                          ([security isEqualToString:@"none"] || [security isEqualToString:@"tls"] || [security isEqualToString:@"reality"]);
-    BOOL wsSupported = [network isEqualToString:@"ws"] &&
-                       ([security isEqualToString:@"tls"] || [security isEqualToString:@"none"]);
-    BOOL grpcSupported = [network isEqualToString:@"grpc"] &&
-                         ([security isEqualToString:@"none"] || [security isEqualToString:@"tls"] || [security isEqualToString:@"reality"]);
-    if (!tcpSupported && !xhttpSupported && !wsSupported && !grpcSupported) return nil;
-
     NSMutableArray *query = [NSMutableArray array];
     [self addHappURIQueryValue:encryption key:@"encryption" toParts:query];
-    [self addHappURIQueryValue:network key:@"type" toParts:query];
-    [self addHappURIQueryValue:security key:@"security" toParts:query];
-
-    NSString *flow = [self safeTrim:[self happJSONStringValue:[user objectForKey:@"flow"]]];
-    if ([user objectForKey:@"flow"] && !VCProfileText([user objectForKey:@"flow"])) return nil;
-    if ([flow length] > 0) {
-        if (tcpSupported && [security isEqualToString:@"none"] && [encryption isEqualToString:@"none"]) return nil;
-        if (![flow isEqualToString:@"xtls-rprx-vision"]) return nil;
-        [self addHappURIQueryValue:flow key:@"flow" toParts:query];
-    }
-
-    NSDictionary *securitySettings = nil;
-    if ([security isEqualToString:@"reality"]) {
-        securitySettings = [self happJSONDictionaryValue:[stream objectForKey:@"realitySettings"]];
-    } else if ([security isEqualToString:@"tls"]) {
-        securitySettings = [self happJSONDictionaryValue:[stream objectForKey:@"tlsSettings"]];
-    }
-    NSString *securityField = [security isEqualToString:@"tls"] ? @"tlsSettings" : [security isEqualToString:@"reality"] ? @"realitySettings" : nil;
-    if (securityField && [stream objectForKey:securityField] && !securitySettings) return nil;
-
-    NSString *sni = [self safeTrim:[self happJSONStringValue:[securitySettings objectForKey:@"serverName"]]];
-    NSString *fingerprint = [self safeTrim:[self happJSONStringValue:[securitySettings objectForKey:@"fingerprint"]]];
-    for (NSString *field in @[@"serverName", @"fingerprint", @"shortId", @"spiderX"]) if ([securitySettings objectForKey:field] && !VCProfileText([securitySettings objectForKey:field])) return nil;
-    [self addHappURIQueryValue:sni key:@"sni" toParts:query];
-    [self addHappURIQueryValue:fingerprint key:@"fp" toParts:query];
-
-    NSArray *alpnValues = [self happJSONArrayValue:[securitySettings objectForKey:@"alpn"]];
-    if ([securitySettings objectForKey:@"alpn"] && !alpnValues) return nil;
-    NSMutableArray *cleanALPN = [NSMutableArray array];
-    for (id value in alpnValues) {
-        if (!VCProfileText(value)) return nil;
-        NSString *alpn = [self safeTrim:[self happJSONStringValue:value]];
-        if ([alpn length] > 0) [cleanALPN addObject:alpn];
-    }
-    if ([cleanALPN count] > 0) {
-        [self addHappURIQueryValue:[cleanALPN componentsJoinedByString:@","] key:@"alpn" toParts:query];
-    }
-
-    id allowInsecure = [securitySettings objectForKey:@"allowInsecure"];
-    if (allowInsecure && !VCProfileBoolean(allowInsecure)) return nil;
-    if ([allowInsecure respondsToSelector:@selector(boolValue)] && [allowInsecure boolValue]) {
-        [query addObject:@"allowInsecure=1"];
-    }
-
-    if ([security isEqualToString:@"reality"]) {
-        BOOL valid = YES;
-        id rawKey = VCProfileAlias(securitySettings, @[@"publicKey", @"password"], &valid);
-        if (!valid || !VCProfileText(rawKey)) return nil;
-        NSString *publicKey = [self safeTrim:rawKey];
-        NSString *shortID = [self safeTrim:[self happJSONStringValue:[securitySettings objectForKey:@"shortId"]]];
-        NSString *spiderX = [self safeTrim:[self happJSONStringValue:[securitySettings objectForKey:@"spiderX"]]];
-        if ([publicKey length] == 0) return nil;
-        [self addHappURIQueryValue:publicKey key:@"pbk" toParts:query];
-        [self addHappURIQueryValue:shortID key:@"sid" toParts:query];
-        [self addHappURIQueryValue:spiderX key:@"spx" toParts:query];
-    }
-
-    if (xhttpSupported) {
-        BOOL valid = YES;
-        id raw = VCProfileAlias(stream, @[@"xhttpSettings", @"splithttpSettings"], &valid);
-        if (!valid || (raw && ![raw isKindOfClass:[NSDictionary class]])) return nil;
-        NSDictionary *xhttp = raw;
-        NSString *path = [self safeTrim:[self happJSONStringValue:[xhttp objectForKey:@"path"]]];
-        NSString *host = [self safeTrim:[self happJSONStringValue:[xhttp objectForKey:@"host"]]];
-        NSString *mode = [self safeTrim:[self happJSONStringValue:[xhttp objectForKey:@"mode"]]];
-        id rawExtra = [xhttp objectForKey:@"extra"];
-        if (rawExtra && ![rawExtra isKindOfClass:[NSDictionary class]]) return nil;
-        NSMutableDictionary *extra = [[(rawExtra ? rawExtra : (xhttp ? xhttp : @{})) mutableCopy] autorelease];
-        for (NSString *field in @[@"host", @"path", @"mode", @"extra"]) [extra removeObjectForKey:field];
-        for (NSString *field in @[@"host", @"path", @"mode"]) if ([xhttp objectForKey:field] && !VCProfileText([xhttp objectForKey:field])) return nil;
-        if ([extra objectForKey:@"headers"] && !VCProfileHeaders([extra objectForKey:@"headers"])) return nil;
-        if ([extra objectForKey:@"headers"]) {
-            NSMutableDictionary *headers = [[[extra objectForKey:@"headers"] mutableCopy] autorelease];
-            NSString *headerHost = nil;
-            for (NSString *key in [headers allKeys]) if ([[key lowercaseString] isEqual:@"host"]) {
-                if (headerHost && ![headerHost isEqual:[headers objectForKey:key]]) return nil;
-                headerHost = [headers objectForKey:key];
-                [headers removeObjectForKey:key];
-            }
-            if (![host length]) host = headerHost;
-            [extra setObject:headers forKey:@"headers"];
-        }
-        for (NSString *field in @[@"downloadSettings", @"xmux"]) if ([extra objectForKey:field] && ![[extra objectForKey:field] isKindOfClass:[NSDictionary class]]) return nil;
-        for (NSString *field in @[@"noGRPCHeader", @"noSSEHeader", @"xPaddingObfsMode"]) if ([extra objectForKey:field] && !VCProfileBoolean([extra objectForKey:field])) return nil;
-        [self addHappURIQueryValue:([path length] > 0 ? path : @"/") key:@"path" toParts:query];
-        [self addHappURIQueryValue:host key:@"host" toParts:query];
-        [self addHappURIQueryValue:mode key:@"mode" toParts:query];
-        [self addHappURIQueryValue:[self happJSONStringFromDictionary:extra] key:@"extra" toParts:query];
-    } else if (wsSupported) {
-        id rawWS = [stream objectForKey:@"wsSettings"];
-        if (rawWS && ![rawWS isKindOfClass:[NSDictionary class]]) return nil;
-        NSDictionary *ws = rawWS;
-        NSString *path = [self safeTrim:[self happJSONStringValue:[ws objectForKey:@"path"]]];
-        id rawHeaders = [ws objectForKey:@"headers"];
-        if (rawHeaders && !VCProfileHeaders(rawHeaders)) return nil;
-        for (NSString *key in rawHeaders) if ([[key lowercaseString] hasPrefix:@"sec-websocket-"]) return nil;
-        NSMutableDictionary *headers = rawHeaders ? [[rawHeaders mutableCopy] autorelease] : [NSMutableDictionary dictionary];
-        NSString *host = [self safeTrim:[self happJSONStringValue:[ws objectForKey:@"host"]]];
-        NSString *headerHost = nil;
-        for (NSString *key in [headers allKeys]) if ([[key lowercaseString] isEqual:@"host"]) {
-            if (headerHost && ![headerHost isEqual:[headers objectForKey:key]]) return nil;
-            headerHost = [headers objectForKey:key];
-            [headers removeObjectForKey:key];
-        }
-        if (![host length]) host = headerHost;
-        for (NSString *field in @[@"host", @"path"]) if ([ws objectForKey:field] && !VCProfileText([ws objectForKey:field])) return nil;
-        [self addHappURIQueryValue:([path length] > 0 ? path : @"/") key:@"path" toParts:query];
-        [self addHappURIQueryValue:host key:@"host" toParts:query];
-        if ([headers count]) [self addHappURIQueryValue:[self happJSONStringFromDictionary:headers] key:@"headers" toParts:query];
-        BOOL valid = YES;
-        id early = VCProfileAlias(ws, @[@"ed", @"maxEarlyData"], &valid);
-        unsigned number = 0;
-        if (!valid || (early && !VCProfileUnsigned(early, 16384, &number))) return nil;
-        if (early) [self addHappURIQueryValue:[NSString stringWithFormat:@"%u", number] key:@"ed" toParts:query];
-        id heartbeat = [ws objectForKey:@"heartbeatPeriod"];
-        if (heartbeat && !VCProfileUnsigned(heartbeat, INT_MAX, &number)) return nil;
-        if (heartbeat) [self addHappURIQueryValue:[NSString stringWithFormat:@"%u", number] key:@"heartbeatPeriod" toParts:query];
-        VCProfileUnknown(ws, @[@"host", @"path", @"headers", @"ed", @"maxEarlyData", @"heartbeatPeriod"], @"wsSettings.");
-    } else if (grpcSupported) {
-        id rawGRPC = [stream objectForKey:@"grpcSettings"];
-        if (rawGRPC && ![rawGRPC isKindOfClass:[NSDictionary class]]) return nil;
-        NSDictionary *grpc = rawGRPC;
-        BOOL valid = YES;
-        id multiMode = VCProfileAlias(grpc, @[@"multiMode", @"multi_mode"], &valid);
-        if (!valid || (multiMode && !VCProfileBoolean(multiMode))) return nil;
-        if ([multiMode boolValue]) {
-            [self addHappURIQueryValue:@"multi" key:@"mode" toParts:query];
-        }
-
-        id rawService = VCProfileAlias(grpc, @[@"serviceName", @"service_name"], &valid);
-        if (!valid || (rawService && !VCProfileText(rawService))) return nil;
-        NSString *serviceName = [self safeTrim:rawService];
-        NSString *authority = [self safeTrim:[self happJSONStringValue:[grpc objectForKey:@"authority"]]];
-        if ([grpc objectForKey:@"authority"] && !VCProfileText([grpc objectForKey:@"authority"])) return nil;
-        [self addHappURIQueryValue:serviceName key:@"serviceName" toParts:query];
-        [self addHappURIQueryValue:authority key:@"authority" toParts:query];
-        NSArray *fields = @[@"idleTimeout", @"healthCheckTimeout", @"permitWithoutStream", @"initialWindowsSize", @"userAgent"];
-        NSArray *aliases = @[@"idle_timeout", @"health_check_timeout", @"permit_without_stream", @"initial_windows_size", @"user_agent"];
-        for (NSUInteger i = 0; i < [fields count]; i++) {
-            NSString *key = [fields objectAtIndex:i];
-            id value = VCProfileAlias(grpc, @[key, [aliases objectAtIndex:i]], &valid);
-            if (!valid) return nil;
-            if (!value) continue;
-            NSString *text = nil;
-            unsigned number;
-            if (i == 2) { if (!VCProfileBoolean(value)) return nil; text = [value boolValue] ? @"1" : @"0"; }
-            else if (i == 4) { if (!VCProfileText(value) || ![value length]) return nil; text = value; }
-            else { if (!VCProfileUnsigned(value, i == 3 ? 262144 : INT_MAX, &number)) return nil; if (i == 3 && !number) continue; text = [NSString stringWithFormat:@"%u", number]; }
-            [self addHappURIQueryValue:text key:key toParts:query];
-        }
-        NSMutableArray *known = [NSMutableArray arrayWithArray:fields]; [known addObjectsFromArray:aliases];
-        [known addObjectsFromArray:@[@"serviceName", @"service_name", @"authority", @"multiMode", @"multi_mode"]];
-        VCProfileUnknown(grpc, known, @"grpcSettings.");
-    }
+    id flow = [user objectForKey:@"flow"];
+    if (flow && (!VCProfileText(flow) || ([flow length] && ![flow isEqual:@"xtls-rprx-vision"]))) return nil;
+    [self addHappURIQueryValue:flow key:@"flow" toParts:query];
+    id stream = [proxy objectForKey:@"streamSettings"];
+    if (![self appendTransportSettings:stream query:query]) return nil;
 
     NSString *authorityHost = address;
     if ([address rangeOfString:@":"].location != NSNotFound && ![address hasPrefix:@"["]) {
@@ -1194,11 +1053,279 @@ static BOOL VCProfileEndpoint(NSString *endpoint, uint16_t defaultPort, NSString
                                       (long)port,
                                       [query componentsJoinedByString:@"&"],
                                       fragment];
-    return [self configURIQueryValidationReason:result] ? nil : result;
+    return [self unsupportedConfigReasonForURI:result] ? nil : result;
 }
 
 - (NSDictionary *)happJSONDictionaryValue:(id)value {
     return [value isKindOfClass:[NSDictionary class]] ? (NSDictionary *)value : nil;
+}
+
+- (BOOL)appendTransportSettings:(NSDictionary *)stream query:(NSMutableArray *)query {
+    if (stream && ![stream isKindOfClass:[NSDictionary class]]) return NO;
+    for (NSString *field in @[@"network",@"security"]) if ([stream objectForKey:field] && !VCProfileText([stream objectForKey:field])) return NO;
+    for (NSString *field in @[@"sockopt",@"tcpSettings",@"rawSettings"]) {
+        id value=[stream objectForKey:field];
+        if (value && (![value isKindOfClass:[NSDictionary class]] || [value count])) return NO;
+    }
+    NSString *network = [[self safeTrim:[self happJSONStringValue:[stream objectForKey:@"network"]]] lowercaseString];
+    NSString *security = [[self safeTrim:[self happJSONStringValue:[stream objectForKey:@"security"]]] lowercaseString];
+    if ([network isEqualToString:@"splithttp"]) network = @"xhttp";
+    if ([network length] == 0 || [network isEqualToString:@"raw"]) network = @"tcp";
+    if ([security length] == 0) security = @"none";
+
+    BOOL tcpSupported = [network isEqualToString:@"tcp"] &&
+                        ([security isEqualToString:@"none"] || [security isEqualToString:@"tls"] || [security isEqualToString:@"reality"]);
+    BOOL xhttpSupported = [network isEqualToString:@"xhttp"] &&
+                          ([security isEqualToString:@"none"] || [security isEqualToString:@"tls"] || [security isEqualToString:@"reality"]);
+    BOOL wsSupported = [network isEqualToString:@"ws"] &&
+                       ([security isEqualToString:@"tls"] || [security isEqualToString:@"none"]);
+    BOOL grpcSupported = [network isEqualToString:@"grpc"] &&
+                         ([security isEqualToString:@"none"] || [security isEqualToString:@"tls"] || [security isEqualToString:@"reality"]);
+    if (!tcpSupported && !xhttpSupported && !wsSupported && !grpcSupported) return NO;
+
+    [self addHappURIQueryValue:network key:@"type" toParts:query];
+    [self addHappURIQueryValue:security key:@"security" toParts:query];
+    NSDictionary *securitySettings = nil;
+    if ([security isEqualToString:@"reality"]) {
+        securitySettings = [self happJSONDictionaryValue:[stream objectForKey:@"realitySettings"]];
+    } else if ([security isEqualToString:@"tls"]) {
+        securitySettings = [self happJSONDictionaryValue:[stream objectForKey:@"tlsSettings"]];
+    }
+    NSString *securityField = [security isEqualToString:@"tls"] ? @"tlsSettings" : [security isEqualToString:@"reality"] ? @"realitySettings" : nil;
+    if (securityField && [stream objectForKey:securityField] && !securitySettings) return NO;
+    if (VCProfileForbidden(securitySettings,@[@"certificates",@"pinnedPeerCertificateChainSha256",@"pinnedPeerCertificatePublicKeySha256",@"verifyPeerCertInNames",@"disableSystemRoot",@"minVersion",@"maxVersion",@"cipherSuites",@"echConfigList",@"echForceQuery"],@"security.")) return NO;
+    VCProfileUnknown(securitySettings,@[@"serverName",@"fingerprint",@"alpn",@"allowInsecure",@"publicKey",@"password",@"shortId",@"spiderX"],securityField ? [securityField stringByAppendingString:@"."] : @"security.");
+
+    NSString *sni = [self safeTrim:[self happJSONStringValue:[securitySettings objectForKey:@"serverName"]]];
+    NSString *fingerprint = [self safeTrim:[self happJSONStringValue:[securitySettings objectForKey:@"fingerprint"]]];
+    for (NSString *field in @[@"serverName", @"fingerprint", @"shortId", @"spiderX"]) if ([securitySettings objectForKey:field] && !VCProfileText([securitySettings objectForKey:field])) return NO;
+    [self addHappURIQueryValue:sni key:@"sni" toParts:query];
+    [self addHappURIQueryValue:fingerprint key:@"fp" toParts:query];
+
+    NSArray *alpnValues = [self happJSONArrayValue:[securitySettings objectForKey:@"alpn"]];
+    if ([securitySettings objectForKey:@"alpn"] && !alpnValues) return NO;
+    NSMutableArray *cleanALPN = [NSMutableArray array];
+    for (id value in alpnValues) {
+        if (!VCProfileText(value)) return NO;
+        NSString *alpn = [self safeTrim:[self happJSONStringValue:value]];
+        if ([alpn length] > 0) [cleanALPN addObject:alpn];
+    }
+    if ([cleanALPN count] > 0) {
+        [self addHappURIQueryValue:[cleanALPN componentsJoinedByString:@","] key:@"alpn" toParts:query];
+    }
+
+    id allowInsecure = [securitySettings objectForKey:@"allowInsecure"];
+    if (allowInsecure && !VCProfileBoolean(allowInsecure)) return NO;
+    if ([allowInsecure respondsToSelector:@selector(boolValue)] && [allowInsecure boolValue]) {
+        [query addObject:@"allowInsecure=1"];
+    }
+
+    if ([security isEqualToString:@"reality"]) {
+        BOOL valid = YES;
+        id rawKey = VCProfileAlias(securitySettings, @[@"publicKey", @"password"], &valid);
+        if (!valid || !VCProfileText(rawKey)) return NO;
+        NSString *publicKey = [self safeTrim:rawKey];
+        NSString *shortID = [self safeTrim:[self happJSONStringValue:[securitySettings objectForKey:@"shortId"]]];
+        NSString *spiderX = [self safeTrim:[self happJSONStringValue:[securitySettings objectForKey:@"spiderX"]]];
+        if ([publicKey length] == 0) return NO;
+        [self addHappURIQueryValue:publicKey key:@"pbk" toParts:query];
+        [self addHappURIQueryValue:shortID key:@"sid" toParts:query];
+        [self addHappURIQueryValue:spiderX key:@"spx" toParts:query];
+    }
+
+    if (xhttpSupported) {
+        BOOL valid = YES;
+        id raw = VCProfileAlias(stream, @[@"xhttpSettings", @"splithttpSettings"], &valid);
+        if (!valid || (raw && ![raw isKindOfClass:[NSDictionary class]])) return NO;
+        NSDictionary *xhttp = raw;
+        NSString *path = [self safeTrim:[self happJSONStringValue:[xhttp objectForKey:@"path"]]];
+        NSString *host = [self safeTrim:[self happJSONStringValue:[xhttp objectForKey:@"host"]]];
+        NSString *mode = [self safeTrim:[self happJSONStringValue:[xhttp objectForKey:@"mode"]]];
+        id rawExtra = [xhttp objectForKey:@"extra"];
+        if (rawExtra && ![rawExtra isKindOfClass:[NSDictionary class]]) return NO;
+        NSMutableDictionary *extra = [[(rawExtra ? rawExtra : (xhttp ? xhttp : @{})) mutableCopy] autorelease];
+        for (NSString *field in @[@"host", @"path", @"mode", @"extra"]) [extra removeObjectForKey:field];
+        for (NSString *field in @[@"host", @"path", @"mode"]) if ([xhttp objectForKey:field] && !VCProfileText([xhttp objectForKey:field])) return NO;
+        if ([extra objectForKey:@"headers"] && !VCProfileHeaders([extra objectForKey:@"headers"])) return NO;
+        if ([extra objectForKey:@"headers"]) {
+            NSMutableDictionary *headers = [[[extra objectForKey:@"headers"] mutableCopy] autorelease];
+            NSString *headerHost = nil;
+            for (NSString *key in [headers allKeys]) if ([[key lowercaseString] isEqual:@"host"]) {
+                if (headerHost && ![headerHost isEqual:[headers objectForKey:key]]) return NO;
+                headerHost = [headers objectForKey:key];
+                [headers removeObjectForKey:key];
+            }
+            if (![host length]) host = headerHost;
+            [extra setObject:headers forKey:@"headers"];
+        }
+        for (NSString *field in @[@"downloadSettings", @"xmux"]) if ([extra objectForKey:field] && ![[extra objectForKey:field] isKindOfClass:[NSDictionary class]]) return NO;
+        for (NSString *field in @[@"noGRPCHeader", @"noSSEHeader", @"xPaddingObfsMode"]) if ([extra objectForKey:field] && !VCProfileBoolean([extra objectForKey:field])) return NO;
+        [self addHappURIQueryValue:([path length] > 0 ? path : @"/") key:@"path" toParts:query];
+        [self addHappURIQueryValue:host key:@"host" toParts:query];
+        [self addHappURIQueryValue:mode key:@"mode" toParts:query];
+        [self addHappURIQueryValue:[self happJSONStringFromDictionary:extra] key:@"extra" toParts:query];
+    } else if (wsSupported) {
+        id rawWS = [stream objectForKey:@"wsSettings"];
+        if (rawWS && ![rawWS isKindOfClass:[NSDictionary class]]) return NO;
+        NSDictionary *ws = rawWS;
+        NSString *path = [self safeTrim:[self happJSONStringValue:[ws objectForKey:@"path"]]];
+        id rawHeaders = [ws objectForKey:@"headers"];
+        if (rawHeaders && !VCProfileHeaders(rawHeaders)) return NO;
+        for (NSString *key in rawHeaders) if ([[key lowercaseString] hasPrefix:@"sec-websocket-"]) return NO;
+        NSMutableDictionary *headers = rawHeaders ? [[rawHeaders mutableCopy] autorelease] : [NSMutableDictionary dictionary];
+        NSString *host = [self safeTrim:[self happJSONStringValue:[ws objectForKey:@"host"]]];
+        NSString *headerHost = nil;
+        for (NSString *key in [headers allKeys]) if ([[key lowercaseString] isEqual:@"host"]) {
+            if (headerHost && ![headerHost isEqual:[headers objectForKey:key]]) return NO;
+            headerHost = [headers objectForKey:key];
+            [headers removeObjectForKey:key];
+        }
+        if (![host length]) host = headerHost;
+        for (NSString *field in @[@"host", @"path"]) if ([ws objectForKey:field] && !VCProfileText([ws objectForKey:field])) return NO;
+        [self addHappURIQueryValue:([path length] > 0 ? path : @"/") key:@"path" toParts:query];
+        [self addHappURIQueryValue:host key:@"host" toParts:query];
+        if ([headers count]) [self addHappURIQueryValue:[self happJSONStringFromDictionary:headers] key:@"headers" toParts:query];
+        BOOL valid = YES;
+        id early = VCProfileAlias(ws, @[@"ed", @"maxEarlyData"], &valid);
+        unsigned number = 0;
+        if (!valid || (early && !VCProfileUnsigned(early, 16384, &number))) return NO;
+        if (early) [self addHappURIQueryValue:[NSString stringWithFormat:@"%u", number] key:@"ed" toParts:query];
+        id heartbeat = [ws objectForKey:@"heartbeatPeriod"];
+        if (heartbeat && !VCProfileUnsigned(heartbeat, INT_MAX, &number)) return NO;
+        if (heartbeat) [self addHappURIQueryValue:[NSString stringWithFormat:@"%u", number] key:@"heartbeatPeriod" toParts:query];
+        VCProfileUnknown(ws, @[@"host", @"path", @"headers", @"ed", @"maxEarlyData", @"heartbeatPeriod"], @"wsSettings.");
+    } else if (grpcSupported) {
+        id rawGRPC = [stream objectForKey:@"grpcSettings"];
+        if (rawGRPC && ![rawGRPC isKindOfClass:[NSDictionary class]]) return NO;
+        NSDictionary *grpc = rawGRPC;
+        BOOL valid = YES;
+        id multiMode = VCProfileAlias(grpc, @[@"multiMode", @"multi_mode"], &valid);
+        if (!valid || (multiMode && !VCProfileBoolean(multiMode))) return NO;
+        if ([multiMode boolValue]) {
+            [self addHappURIQueryValue:@"multi" key:@"mode" toParts:query];
+        }
+
+        id rawService = VCProfileAlias(grpc, @[@"serviceName", @"service_name"], &valid);
+        if (!valid || (rawService && !VCProfileText(rawService))) return NO;
+        NSString *serviceName = [self safeTrim:rawService];
+        NSString *authority = [self safeTrim:[self happJSONStringValue:[grpc objectForKey:@"authority"]]];
+        if ([grpc objectForKey:@"authority"] && !VCProfileText([grpc objectForKey:@"authority"])) return NO;
+        [self addHappURIQueryValue:serviceName key:@"serviceName" toParts:query];
+        [self addHappURIQueryValue:authority key:@"authority" toParts:query];
+        NSArray *fields = @[@"idleTimeout", @"healthCheckTimeout", @"permitWithoutStream", @"initialWindowsSize", @"userAgent"];
+        NSArray *aliases = @[@"idle_timeout", @"health_check_timeout", @"permit_without_stream", @"initial_windows_size", @"user_agent"];
+        for (NSUInteger i = 0; i < [fields count]; i++) {
+            NSString *key = [fields objectAtIndex:i];
+            id value = VCProfileAlias(grpc, @[key, [aliases objectAtIndex:i]], &valid);
+            if (!valid) return NO;
+            if (!value) continue;
+            NSString *text = nil;
+            unsigned number;
+            if (i == 2) { if (!VCProfileBoolean(value)) return NO; text = [value boolValue] ? @"1" : @"0"; }
+            else if (i == 4) { if (!VCProfileText(value) || ![value length]) return NO; text = value; }
+            else { if (!VCProfileUnsigned(value, i == 3 ? 262144 : INT_MAX, &number)) return NO; if (i == 3 && !number) continue; text = [NSString stringWithFormat:@"%u", number]; }
+            [self addHappURIQueryValue:text key:key toParts:query];
+        }
+        NSMutableArray *known = [NSMutableArray arrayWithArray:fields]; [known addObjectsFromArray:aliases];
+        [known addObjectsFromArray:@[@"serviceName", @"service_name", @"authority", @"multiMode", @"multi_mode"]];
+        VCProfileUnknown(grpc, known, @"grpcSettings.");
+    }
+    return YES;
+}
+
+- (NSString *)URIFromKaringServer:(NSDictionary *)server error:(NSString **)error {
+    if (error) *error=@"invalid or unsupported Karing profile";
+    if (![server isKindOfClass:[NSDictionary class]]) return nil;
+    NSString *protocol=[[server objectForKey:@"type"] isKindOfClass:[NSString class]] ? [[server objectForKey:@"type"] lowercaseString] : nil;
+    if (![protocol isEqual:@"vless"] && ![protocol isEqual:@"socks"] && ![protocol isEqual:@"socks5"]) return nil;
+    unsigned port=0;
+    if (!VCProfileText([server objectForKey:@"server"]) || !VCProfileUnsignedScalar([server objectForKey:@"server_port"],65535,&port) || !port) return nil;
+    if ([protocol isEqual:@"socks"] || [protocol isEqual:@"socks5"]) {
+        id username=[server objectForKey:@"username"] ?: @"",password=[server objectForKey:@"password"] ?: @"";
+        if (![username isKindOfClass:[NSString class]] || ![password isKindOfClass:[NSString class]]) return nil;
+        NSString *host=[server objectForKey:@"server"];
+        if ([host rangeOfString:@":"].location != NSNotFound) host=[NSString stringWithFormat:@"[%@]",host];
+        NSString *credentials=[username length] || [password length] ? [NSString stringWithFormat:@"%@:%@@",[self percentEncodedHappURIValue:username],[self percentEncodedHappURIValue:password]] : @"";
+        NSString *title=[server objectForKey:@"tag"];
+        if (title && !VCProfileText(title)) return nil;
+        NSString *uri=[NSString stringWithFormat:@"socks5://%@%@:%u%@",credentials,host,port,[title length] ? [@"#" stringByAppendingString:[self percentEncodedHappURIValue:title]] : @""];
+        if ([self unsupportedConfigReasonForURI:uri]) return nil;
+        if (error) *error=nil;
+        return uri;
+    }
+    NSMutableDictionary *user=[NSMutableDictionary dictionary];
+    for (NSString *field in @[@"uuid",@"encryption",@"flow"]) {
+        id value=[server objectForKey:field];
+        if (value) [user setObject:value forKey:[field isEqual:@"uuid"] ? @"id" : field];
+    }
+    id rawTLS=[server objectForKey:@"tls"],rawTransport=[server objectForKey:@"transport"];
+    if ((rawTLS && ![rawTLS isKindOfClass:[NSDictionary class]]) || (rawTransport && ![rawTransport isKindOfClass:[NSDictionary class]])) return nil;
+    NSDictionary *tls=rawTLS,*transport=rawTransport;
+    NSString *forbidden=VCProfileForbidden(tls,@[@"certificate",@"certificate_path",@"certificate_public_key_sha256",@"disable_sni",@"min_version",@"max_version",@"cipher_suites",@"ech",@"fragment",@"record_fragment"],@"tls.");
+    if (forbidden) { if (error) *error=[@"unsupported field " stringByAppendingString:forbidden]; return nil; }
+    for (NSString *field in @[@"enabled",@"insecure"]) if ([tls objectForKey:field] && !VCProfileBoolean([tls objectForKey:field])) return nil;
+    NSDictionary *reality=[self happJSONDictionaryValue:[tls objectForKey:@"reality"]];
+    NSDictionary *utls=[self happJSONDictionaryValue:[tls objectForKey:@"utls"]];
+    if (([tls objectForKey:@"reality"] && !reality) || ([tls objectForKey:@"utls"] && !utls)) return nil;
+    for (NSDictionary *settings in @[reality ?: @{},utls ?: @{}]) if ([settings objectForKey:@"enabled"] && !VCProfileBoolean([settings objectForKey:@"enabled"])) return nil;
+    if ([utls objectForKey:@"enabled"] && ![[utls objectForKey:@"enabled"] boolValue]) return nil;
+    BOOL tlsEnabled=tls && (![tls objectForKey:@"enabled"] || [[tls objectForKey:@"enabled"] boolValue]);
+    BOOL useReality=reality && (![reality objectForKey:@"enabled"] || [[reality objectForKey:@"enabled"] boolValue]);
+    if (useReality && !tlsEnabled) return nil;
+    NSMutableDictionary *security=[NSMutableDictionary dictionary];
+    if (!VCProfileCopyAliases(tls,security,@"serverName",@[@"server_name",@"serverName"])) return nil;
+    if ([tls objectForKey:@"insecure"]) [security setObject:[tls objectForKey:@"insecure"] forKey:@"allowInsecure"];
+    if ([utls objectForKey:@"fingerprint"]) [security setObject:[utls objectForKey:@"fingerprint"] forKey:@"fingerprint"];
+    if ([tls objectForKey:@"alpn"]) {
+        id alpn=[tls objectForKey:@"alpn"];
+        if ([alpn isKindOfClass:[NSString class]]) alpn=[alpn componentsSeparatedByString:@","];
+        [security setObject:alpn forKey:@"alpn"];
+    }
+    if (useReality) {
+        if (!VCProfileCopyAliases(reality,security,@"publicKey",@[@"public_key",@"publicKey"]) ||
+            !VCProfileCopyAliases(reality,security,@"shortId",@[@"short_id",@"shortId"]) ||
+            !VCProfileCopyAliases(reality,security,@"spiderX",@[@"spider_x",@"spiderX"])) return nil;
+    }
+    id rawType=[transport objectForKey:@"type"];
+    if (rawType && !VCProfileText(rawType)) return nil;
+    NSString *network=[rawType lowercaseString] ?: @"tcp";
+    if ([network isEqual:@"raw"]) network=@"tcp";
+    if ([network isEqual:@"splithttp"]) network=@"xhttp";
+    if ([network isEqual:@"websocket"]) network=@"ws";
+    NSMutableDictionary *settings=transport ? [[transport mutableCopy] autorelease] : [NSMutableDictionary dictionary];
+    [settings removeObjectForKey:@"type"];
+    NSArray *pairs=@[@[@"maxEarlyData",@"max_early_data",@"maxEarlyData",@"ed"],@[@"heartbeatPeriod",@"heartbeat_period",@"heartbeatPeriod"],@[@"serviceName",@"service_name",@"serviceName"],@[@"multiMode",@"multi_mode",@"multiMode"],@[@"idleTimeout",@"idle_timeout",@"idleTimeout"],@[@"healthCheckTimeout",@"health_check_timeout",@"healthCheckTimeout"],@[@"permitWithoutStream",@"permit_without_stream",@"permitWithoutStream"],@[@"initialWindowsSize",@"initial_windows_size",@"initialWindowsSize"],@[@"userAgent",@"user_agent",@"userAgent"]];
+    for (NSArray *pair in pairs) {
+        NSArray *aliases=[pair subarrayWithRange:NSMakeRange(1,[pair count]-1)];
+        for (NSString *alias in aliases) [settings removeObjectForKey:alias];
+        if (!VCProfileCopyAliases(transport,settings,[pair objectAtIndex:0],aliases)) return nil;
+    }
+    id earlyHeader=[settings objectForKey:@"early_data_header_name"];
+    if (earlyHeader && ![earlyHeader isEqual:@"Sec-WebSocket-Protocol"]) return nil;
+    [settings removeObjectForKey:@"early_data_header_name"];
+    id rawHeaders=[settings objectForKey:@"headers"];
+    if (rawHeaders && ![rawHeaders isKindOfClass:[NSDictionary class]]) return nil;
+    if (rawHeaders) {
+        NSMutableDictionary *headers=[NSMutableDictionary dictionary];
+        for (id key in rawHeaders) {
+            id value=[rawHeaders objectForKey:key];
+            if ([value isKindOfClass:[NSArray class]]) { if ([value count] != 1) return nil; value=[value objectAtIndex:0]; }
+            if (!VCProfileText(key) || !VCProfileText(value)) return nil;
+            [headers setObject:value forKey:key];
+        }
+        [settings setObject:headers forKey:@"headers"];
+    }
+    NSMutableDictionary *stream=[NSMutableDictionary dictionaryWithObjectsAndKeys:network,@"network",useReality ? @"reality" : tlsEnabled ? @"tls" : @"none",@"security",nil];
+    [stream setObject:security forKey:useReality ? @"realitySettings" : @"tlsSettings"];
+    NSString *settingsKey=[@{@"tcp":@"tcpSettings",@"ws":@"wsSettings",@"grpc":@"grpcSettings",@"xhttp":@"xhttpSettings"} objectForKey:network];
+    if (!settingsKey) return nil;
+    if ([network isEqual:@"tcp"] && [settings count]) return nil;
+    [stream setObject:settings forKey:settingsKey];
+    NSDictionary *outbound=@{@"protocol":protocol,@"settings":@{@"vnext":@[@{@"address":[server objectForKey:@"server"],@"port":@(port),@"users":@[user]}]},@"streamSettings":stream};
+    NSDictionary *config=@{@"remarks":[server objectForKey:@"tag"] ?: @"",@"outbounds":@[outbound]};
+    NSString *uri=[self vlessURIFromHappJSONConfig:config];
+    if (uri && error) *error=nil;
+    return uri;
 }
 
 - (BOOL)isSupportedConfigTupleForURI:(NSString *)uri {

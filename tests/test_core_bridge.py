@@ -65,16 +65,32 @@ with tempfile.TemporaryDirectory(prefix="vless-app-bridge-", dir=private_parent)
             if result.returncode or len(result.stdout.splitlines()) != 1:
                 raise AssertionError(f"HAPP conversion failed for {transport}: {result.stderr}")
             uri = result.stdout.strip()
+            karing = {"type": "vless", "server": "127.0.0.1", "server_port": endpoint,
+                      "uuid": f.UUID, "encryption": encryption, "flow": flow,
+                      "transport": {"type": transport},
+                      "tls": {"enabled": security != "none", "server_name": "vless-core.test",
+                              "utls": {"fingerprint": "firefox"}}}
+            if security == "reality":
+                karing["tls"]["reality"] = {"enabled": True, "public_key": f.PUBLIC_KEY, "short_id": "01020304"}
+            if transport != "tcp":
+                karing["transport"].update(stream[{"ws": "wsSettings", "grpc": "grpcSettings", "xhttp": "xhttpSettings"}[transport]])
+            converted = subprocess.run([str(BUILD / "test_import_formats"), "--convert-karing"], input=json.dumps(karing),
+                                       text=True, capture_output=True, timeout=5)
+            if converted.returncode or len(converted.stdout.splitlines()) != 1:
+                raise AssertionError(f"Karing conversion failed for {transport}: {converted.stderr}")
+            karing_uri = converted.stdout.strip()
             inspected = subprocess.run([str(BUILD / "test_core_config"), "--real", str(CORE_BUILD / "vless-core-test")],
                                        input=uri, text=True, capture_output=True, timeout=5)
             if inspected.returncode or "PRIMARY\t127.0.0.1\t" not in inspected.stdout:
                 raise AssertionError(f"inspection failed for {transport}: {inspected.stderr}")
             if transport == "xhttp" and "DOWNLOAD\tdownload.invalid\t" not in inspected.stdout:
                 raise AssertionError("download metadata was lost")
-            with f.cli(uri, extra=pins, environment={"VLESS_CA_BUNDLE": str(cert)}) as client:
-                for index in range(3):
-                    with f.socks_connect(client.port, target.port) as connection:
-                        f.exchange(connection, bytes(range(256)) * 4096 + bytes([index]))
+            for source, connection_uri in (("HAPP", uri), ("Karing", karing_uri)):
+                with f.cli(connection_uri, extra=pins, environment={"VLESS_CA_BUNDLE": str(cert)}) as client:
+                    for index in range(3):
+                        with f.socks_connect(client.port, target.port) as connection:
+                            f.exchange(connection, bytes(range(256)) * 4096 + bytes([index]))
+                print(f"PASS {source}/core/Xray: {transport}/{security}")
             if transport == "xhttp" and (not upload.client_data or not download.client_data):
                 raise AssertionError("independent XHTTP channel was not used")
             print(f"PASS HAPP/core/Xray: {transport}/{security}")

@@ -5,6 +5,11 @@
 #include "check.h"
 #include "../../vless-core-cli/include/uri.h"
 
+@interface VCProfileLogic (VCConverterTests)
+- (NSString *)URIFromKaringServer:(NSDictionary *)server error:(NSString **)error;
+- (NSDictionary *)importReportFromHappJSONData:(NSData *)data;
+@end
+
 static vless_config_t parsed(NSString *uri) {
     vless_config_t config; char error[256];
     CHECK("happ/converted-profile-accepted-by-core", uri && parse_core_uri([uri UTF8String], &config, error, sizeof(error)) == 0);
@@ -82,11 +87,47 @@ static void extendedProfiles(void) {
     NSString *longPath = [@"/" stringByPaddingToLength:4096 withString:@"a" startingAtIndex:0];
     CHECK("happ/oversized-result-rejected", [logic vlessURIFromHappJSONConfig:profile(@"ws", @{@"path": longPath}, plain)] == nil);
 }
+
+static void converterParity(void) {
+    VCProfileLogic *p=VCProfiles();
+    CHECK("converters/shared-karing-converter",[p respondsToSelector:@selector(URIFromKaringServer:error:)]);
+    NSString *encryption=@"mlkem768x25519plus.native.0rtt.AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8";
+    NSDictionary *server=@{@"type":@"vless",@"server":@"example.test",@"server_port":@443,@"uuid":@"11111111-2222-4333-8444-555555555555",@"encryption":encryption,@"flow":@"xtls-rprx-vision",@"tls":@{@"enabled":@(YES),@"server_name":@"edge.test",@"utls":@{@"fingerprint":@"firefox"}},@"transport":@{@"type":@"ws",@"path":@"/socket",@"headers":@{@"Host":@"ws.test",@"X-Fixture":@"Value"},@"max_early_data":@128,@"heartbeat_period":@2}};
+    NSString *error=nil,*uri=[p URIFromKaringServer:server error:&error];
+    CHECK("converters/karing-valid",uri && !error);
+    vless_config_t config=parsed(uri);
+    CHECK("converters/karing-encryption-not-none",config.encryption_enabled && config.encryption_zero_rtt && !strcmp(config.flow,"xtls-rprx-vision"));
+    CHECK("converters/karing-ws-preserved",config.ws_early_data == 128 && config.ws_heartbeat_period == 2 && strstr(config.ws_headers,"Value") && !strcmp(config.xhttp_host,"ws.test"));
+    NSMutableDictionary *variant=[[server mutableCopy] autorelease];
+    [variant setObject:@{@"type":@"grpc",@"service_name":@"service",@"multi_mode":@(NO),@"idle_timeout":@0,@"health_check_timeout":@10,@"permit_without_stream":@(NO),@"initial_windows_size":@65536,@"user_agent":@"fixture"} forKey:@"transport"];
+    uri=[p URIFromKaringServer:variant error:&error]; config=parsed(uri);
+    CHECK("converters/karing-grpc-preserved",config.grpc_idle_timeout == 0 && config.grpc_health_timeout == 10 && !config.grpc_permit_without_stream && config.grpc_initial_window == 65536 && !strcmp(config.grpc_user_agent,"fixture"));
+    NSDictionary *xmux=@{@"maxConcurrency":@"",@"maxConnections":@3,@"cMaxReuseTimes":@0,@"hMaxRequestTimes":@"600-900",@"hMaxReusableSecs":@"1800-3000",@"hKeepAlivePeriod":@0};
+    NSDictionary *down=@{@"address":@"download.test",@"port":@8443,@"network":@"xhttp",@"xhttpSettings":@{@"path":@"/download",@"xmux":xmux}};
+    [variant setObject:@{@"type":@"xhttp",@"path":@"/upload",@"mode":@"stream-up",@"extra":@{@"xmux":xmux,@"downloadSettings":down}} forKey:@"transport"];
+    uri=[p URIFromKaringServer:variant error:&error]; config=parsed(uri);
+    CHECK("converters/karing-xmux-and-download",config.xmux.present && config.xmux.max_connections.min == 3 && config.xmux.max_concurrency.max == 0 && strstr(config.xhttp_download_settings,"download.test"));
+    [variant setObject:@{@"enabled":@(YES),@"certificate_public_key_sha256":@[@"secret-pin"]} forKey:@"tls"];
+    CHECK("converters/unsupported-trust-not-ignored",[p URIFromKaringServer:variant error:&error] == nil && error && ![error containsString:@"secret-pin"]);
+    NSDictionary *bad=profile(@"ws",@{@"headers":@{@"X-Fixture":@"bad\r\nInjected"}},@{@"id":@"11111111-2222-4333-8444-555555555555"});
+    NSDictionary *good=profile(@"tcp",@{},@{@"id":@"11111111-2222-4333-8444-555555555555"});
+    for (id mux in @[@[],@{@"enabled":@[]},@{@"enabled":@"false"}]) {
+        NSMutableDictionary *outbound=[[[[good objectForKey:@"outbounds"] objectAtIndex:0] mutableCopy] autorelease];
+        [outbound setObject:mux forKey:@"mux"];
+        CHECK("converters/mux-types-rejected",[p URIFromHappJSONConfig:@{@"outbounds":@[outbound]}] == nil);
+    }
+    NSDictionary *report=[p importReportFromHappJSONData:[NSJSONSerialization dataWithJSONObject:@[bad,good] options:0 error:NULL]];
+    CHECK("converters/partial-import-reported",[[report objectForKey:@"uris"] count] == 1 && [[report objectForKey:@"skipped"] unsignedIntegerValue] == 1 && [[report objectForKey:@"issues"] count] == 1);
+}
 int main(int argc, char **argv) {
-    if (argc == 2 && !strcmp(argv[1], "--convert")) {
+    if (argc == 2 && (!strcmp(argv[1], "--convert") || !strcmp(argv[1],"--convert-karing"))) {
         NSAutoreleasePool *pool = [[NSAutoreleasePool alloc] init];
         NSData *data = [[NSFileHandle fileHandleWithStandardInput] readDataToEndOfFile];
-        NSArray *uris = [VCProfiles() extractConfigURIsFromHappJSONData:data];
+        NSArray *uris=nil;
+        if (!strcmp(argv[1],"--convert-karing")) {
+            NSString *uri=[VCProfiles() URIFromKaringServer:[NSJSONSerialization JSONObjectWithData:data options:0 error:NULL] error:NULL];
+            uris=uri ? @[uri] : @[];
+        } else uris=[VCProfiles() extractConfigURIsFromHappJSONData:data];
         for (NSString *uri in uris) printf("%s\n", [uri UTF8String]);
         int result = [uris count] ? 0 : 1;
         [pool drain]; return result;
@@ -145,5 +186,6 @@ int main(int argc, char **argv) {
     }
     parserDependencies();
     extendedProfiles();
+    converterParity();
     FINISH("import formats"); [pool drain]; return 0;
 }
