@@ -70,7 +70,153 @@ static void VCProfileUnknown(NSDictionary *object, NSArray *known, NSString *sco
     }
 }
 
+static BOOL VCProfileHost(NSString *host) {
+    NSData *data = [host dataUsingEncoding:NSUTF8StringEncoding];
+    if (![data length] || [data length] > 255) return NO;
+    const unsigned char *bytes = [data bytes];
+    for (NSUInteger i=0;i<[data length];i++)
+        if (bytes[i] <= 0x20 || bytes[i] == 0x7f || strchr("/?#@[]\\",bytes[i])) return NO;
+    if ([host rangeOfString:@":"].location != NSNotFound) {
+        struct in6_addr address;
+        return inet_pton(AF_INET6,[host UTF8String],&address) == 1;
+    }
+    return YES;
+}
+
+static BOOL VCProfilePort(NSString *text, uint16_t *output) {
+    if (![text length]) return NO;
+    unsigned value=0;
+    for (NSUInteger i=0;i<[text length];i++) {
+        unsigned digit=(unsigned)([text characterAtIndex:i]-'0');
+        if (digit > 9 || value > (65535U-digit)/10U) return NO;
+        value=value*10+digit;
+    }
+    if (!value) return NO;
+    *output=(uint16_t)value; return YES;
+}
+
+static BOOL VCProfileEndpoint(NSString *endpoint, uint16_t defaultPort, NSString **hostOut, uint16_t *portOut) {
+    NSString *host=nil,*portText=nil;
+    if ([endpoint hasPrefix:@"["]) {
+        NSRange end=[endpoint rangeOfString:@"]"];
+        if (end.location == NSNotFound || end.location < 2) return NO;
+        host=[endpoint substringWithRange:NSMakeRange(1,end.location-1)];
+        struct in6_addr address;
+        if (inet_pton(AF_INET6,[host UTF8String],&address) != 1) return NO;
+        if (end.location+1 < [endpoint length]) {
+            if ([endpoint characterAtIndex:end.location+1] != ':') return NO;
+            portText=[endpoint substringFromIndex:end.location+2];
+        }
+    } else {
+        NSRange colon=[endpoint rangeOfString:@":" options:NSBackwardsSearch];
+        if (colon.location == NSNotFound) host=endpoint;
+        else {
+            host=[endpoint substringToIndex:colon.location]; portText=[endpoint substringFromIndex:colon.location+1];
+            if ([host rangeOfString:@":"].location != NSNotFound) return NO;
+        }
+    }
+    uint16_t port=defaultPort;
+    if (!VCProfileHost(host) || (portText ? !VCProfilePort(portText,&port) : !port)) return NO;
+    if (hostOut) *hostOut=host;
+    if (portOut) *portOut=port;
+    return YES;
+}
+
 @implementation VCProfileLogic
+
+- (void)dealloc {
+    [_profileMetadata release];
+    [super dealloc];
+}
+
+- (BOOL)isConfigurationURI:(NSString *)uri {
+    return [@[@"vless",@"socks5"] containsObject:[self schemeFromURIString:uri]] && [uri rangeOfString:@"://"].location != NSNotFound;
+}
+
+- (NSDictionary *)uncachedMetadataForURI:(NSString *)uri {
+    NSString *scheme=[self schemeFromURIString:uri];
+    NSMutableDictionary *result=[NSMutableDictionary dictionaryWithObject:scheme forKey:@"protocol"];
+    NSString *reason=[self configURIQueryValidationReason:uri];
+    if (!reason && ![scheme isEqual:@"vless"] && ![scheme isEqual:@"socks5"]) reason=@"unsupported protocol";
+    NSRange prefix=[uri rangeOfString:@"://"];
+    NSString *host=nil; uint16_t port=0;
+    if (!reason && prefix.location != NSNotFound) {
+        NSString *authority=[uri substringFromIndex:prefix.location+3];
+        NSRange end=[authority rangeOfCharacterFromSet:[NSCharacterSet characterSetWithCharactersInString:@"/?#"]];
+        if (end.location != NSNotFound) authority=[authority substringToIndex:end.location];
+        NSRange at=[authority rangeOfString:@"@" options:NSBackwardsSearch];
+        if (at.location != NSNotFound) authority=[authority substringFromIndex:at.location+1];
+        else if (![scheme isEqual:@"socks5"]) reason=@"missing configuration credentials";
+        if (!reason && !VCProfileEndpoint(authority,[scheme isEqual:@"socks5"] ? 1080 : 0,&host,&port)) reason=@"invalid server address or port";
+    } else if (!reason) reason=@"invalid configuration URI";
+    if (host) { [result setObject:host forKey:@"host"]; [result setObject:@(port) forKey:@"port"]; }
+    NSString *transport=[[self queryValueForURLString:uri key:@"type"] lowercaseString];
+    if (![transport length] || [transport isEqual:@"raw"] || [scheme isEqual:@"socks5"]) transport=@"tcp";
+    if ([transport isEqual:@"websocket"]) transport=@"ws";
+    if ([transport isEqual:@"splithttp"]) transport=@"xhttp";
+    NSString *security=[[self queryValueForURLString:uri key:@"security"] lowercaseString];
+    if (![security length]) security=@"none";
+    if (!reason && ![@[@"tcp",@"ws",@"grpc",@"xhttp"] containsObject:transport]) reason=@"unsupported transport";
+    if (!reason && ![@[@"none",@"tls",@"reality"] containsObject:security]) reason=@"unsupported security";
+    if (!reason && [scheme isEqual:@"socks5"] && ![security isEqual:@"none"]) reason=@"SOCKS5 supports only security=none";
+    if (!reason && [transport isEqual:@"ws"] && [security isEqual:@"reality"]) reason=@"WebSocket does not support REALITY";
+    NSString *flow=[self queryValueForURLString:uri key:@"flow"];
+    if (!reason && [flow length] && ![flow isEqual:@"xtls-rprx-vision"]) reason=@"unsupported flow";
+    NSString *encryption=[self queryValueForURLString:uri key:@"encryption"];
+    if (!reason && [flow length] && [transport isEqual:@"tcp"] && [security isEqual:@"none"] && (![encryption length] || [encryption isEqual:@"none"])) reason=@"Vision requires TLS, REALITY or VLESS Encryption";
+    NSString *fp=[[self queryValueForURLString:uri key:@"fp"] lowercaseString];
+    if (![fp length]) fp=@"chrome";
+    if (!reason && ![security isEqual:@"none"] && ![self isSupportedRealityFingerprint:fp]) reason=@"unsupported fp";
+    NSString *mode=[[self queryValueForURLString:uri key:@"mode"] lowercaseString];
+    if (!reason && [mode length] && [transport isEqual:@"xhttp"] && ![@[@"auto",@"packet-up",@"stream-up",@"stream-one"] containsObject:mode]) reason=@"unsupported XHTTP mode";
+    if (!reason && [mode length] && [transport isEqual:@"grpc"] && ![@[@"auto",@"gun",@"multi"] containsObject:mode]) reason=@"unsupported gRPC mode";
+    if (!reason && [transport isEqual:@"ws"]) {
+        NSString *wsHost=[self queryValueForURLString:uri key:@"host"];
+        if (![wsHost length] && ![security isEqual:@"none"]) wsHost=[self queryValueForURLString:uri key:@"sni"];
+        if (![wsHost length]) wsHost=host;
+        if (!VCProfileHost(wsHost) && !VCProfileEndpoint(wsHost,443,NULL,NULL)) reason=@"invalid WebSocket host";
+    }
+    [result setObject:transport forKey:@"transport"]; [result setObject:[scheme isEqual:@"socks5"] ? @"plain" : security forKey:@"security"];
+    NSRange fragment=[uri rangeOfString:@"#"];
+    if (fragment.location != NSNotFound) {
+        NSString *title=[uri substringFromIndex:fragment.location+1];
+        title=[self safeTrim:[title stringByReplacingPercentEscapesUsingEncoding:NSUTF8StringEncoding]];
+        if ([title length]) [result setObject:title forKey:@"title"];
+    }
+    if (reason) [result setObject:reason forKey:@"reason"];
+    return [[result copy] autorelease];
+}
+
+- (NSDictionary *)metadataForURI:(NSString *)uri {
+    if (![uri isKindOfClass:[NSString class]]) return @{@"reason":@"invalid configuration URI",@"protocol":@"unknown"};
+    @synchronized(self) {
+        NSDictionary *cached=[_profileMetadata objectForKey:uri];
+        if (cached) return [[cached retain] autorelease];
+    }
+    return [self uncachedMetadataForURI:uri];
+}
+
+- (void)prepareMetadataForConfigurations:(NSArray *)configs subscriptions:(NSArray *)subscriptions {
+    NSMutableSet *uris=[NSMutableSet set];
+    for (id config in configs) if ([config isKindOfClass:[NSDictionary class]] && [[config objectForKey:@"uri"] isKindOfClass:[NSString class]]) [uris addObject:[config objectForKey:@"uri"]];
+    for (id sub in subscriptions) if ([sub isKindOfClass:[NSDictionary class]] && [[sub objectForKey:@"items"] isKindOfClass:[NSArray class]])
+        for (id uri in [sub objectForKey:@"items"]) if ([uri isKindOfClass:[NSString class]]) [uris addObject:uri];
+    NSMutableDictionary *metadata=[NSMutableDictionary dictionaryWithCapacity:[uris count]];
+    for (NSString *uri in uris) {
+        NSAutoreleasePool *pool=[[NSAutoreleasePool alloc] init];
+        [metadata setObject:[self metadataForURI:uri] forKey:uri];
+        [pool drain];
+    }
+    @synchronized(self) { [_profileMetadata release]; _profileMetadata=[metadata copy]; }
+}
+
+- (BOOL)parseServerHost:(NSString **)hostOut port:(uint16_t *)portOut fromURI:(NSString *)uri {
+    NSDictionary *metadata=[self metadataForURI:uri];
+    if ([metadata objectForKey:@"reason"] || ![metadata objectForKey:@"host"]) return NO;
+    if (hostOut) *hostOut=[metadata objectForKey:@"host"];
+    if (portOut) *portOut=(uint16_t)[[metadata objectForKey:@"port"] unsignedIntValue];
+    return YES;
+}
 
 - (NSString *)decodedURLComponent:(NSString *)component {
     if (![component isKindOfClass:[NSString class]] || [component length] == 0) return @"";
@@ -405,56 +551,7 @@ static void VCProfileUnknown(NSDictionary *object, NSArray *known, NSString *sco
 }
 
 - (BOOL)parseSOCKS5Host:(NSString **)hostOut port:(uint16_t *)portOut fromURI:(NSString *)uri {
-    NSString *trim = [self safeTrim:uri];
-    NSString *lower = [trim lowercaseString];
-    if (![lower hasPrefix:@"socks5://"]) return NO;
-
-    NSString *authority = [trim substringFromIndex:9];
-    NSCharacterSet *endSet = [NSCharacterSet characterSetWithCharactersInString:@"/?#"];
-    NSRange end = [authority rangeOfCharacterFromSet:endSet];
-    if (end.location != NSNotFound) {
-        authority = [authority substringToIndex:end.location];
-    }
-    authority = [self safeTrim:authority];
-    if ([authority length] == 0) return NO;
-
-    NSRange at = [authority rangeOfString:@"@" options:NSBackwardsSearch];
-    if (at.location != NSNotFound && at.location + 1 < [authority length]) {
-        authority = [authority substringFromIndex:(at.location + 1)];
-    }
-    authority = [self safeTrim:authority];
-    if ([authority length] == 0) return NO;
-
-    NSString *host = nil;
-    uint16_t port = 1080;
-    if ([authority hasPrefix:@"["]) {
-        NSRange rb = [authority rangeOfString:@"]"];
-        if (rb.location == NSNotFound || rb.location <= 1) return NO;
-        host = [authority substringWithRange:NSMakeRange(1, rb.location - 1)];
-        if (rb.location + 1 < [authority length] && [authority characterAtIndex:(rb.location + 1)] == ':') {
-            NSString *rawPort = [authority substringFromIndex:(rb.location + 2)];
-            NSInteger p = [rawPort integerValue];
-            if (p <= 0 || p > 65535) return NO;
-            port = (uint16_t)p;
-        }
-    } else {
-        NSRange colon = [authority rangeOfString:@":" options:NSBackwardsSearch];
-        if (colon.location != NSNotFound) {
-            host = [authority substringToIndex:colon.location];
-            NSString *rawPort = [authority substringFromIndex:(colon.location + 1)];
-            NSInteger p = [rawPort integerValue];
-            if (p <= 0 || p > 65535) return NO;
-            port = (uint16_t)p;
-        } else {
-            host = authority;
-        }
-    }
-
-    host = [self safeTrim:host];
-    if ([host length] == 0) return NO;
-    if (hostOut) *hostOut = host;
-    if (portOut) *portOut = port;
-    return YES;
+    return [[self schemeFromURIString:uri] isEqual:@"socks5"] && [self parseServerHost:hostOut port:portOut fromURI:uri];
 }
 
 - (NSString *)strictDecodedConfigQueryComponent:(NSString *)component {
@@ -511,6 +608,9 @@ static void VCProfileUnknown(NSDictionary *object, NSArray *known, NSString *sco
     if ([key isEqualToString:@"scmaxeachpostbytes"] || [key isEqualToString:@"sc_max_each_post_bytes"]) {
         return @"scmaxeachpostbytes";
     }
+    if ([key isEqual:@"sessionidplacement"]) return @"sessionplacement";
+    if ([key isEqual:@"sessionidkey"]) return @"sessionkey";
+    if ([key isEqual:@"maxearlydata"]) return @"ed";
     return key;
 }
 
@@ -600,7 +700,6 @@ static void VCProfileUnknown(NSDictionary *object, NSArray *known, NSString *sco
         if (![decodedKey isEqualToString:wanted]) continue;
 
         NSString *decodedValue = [self strictDecodedConfigQueryComponent:rawValue];
-        decodedValue = [self safeTrim:decodedValue];
         if ([decodedValue length] > 0) return decodedValue;
     }
 
@@ -608,168 +707,11 @@ static void VCProfileUnknown(NSDictionary *object, NSArray *known, NSString *sco
 }
 
 - (BOOL)parseVLESSHost:(NSString **)hostOut port:(uint16_t *)portOut fromURI:(NSString *)uri {
-    if (![uri isKindOfClass:[NSString class]] || [uri length] == 0) return NO;
-    NSRange at = [uri rangeOfString:@"@"];
-    if (at.location == NSNotFound) return NO;
-
-    NSUInteger hostStart = at.location + 1;
-    NSUInteger i = hostStart;
-    while (i < [uri length]) {
-        unichar c = [uri characterAtIndex:i];
-        if (c == ':' || c == '?' || c == '/' || c == '#') break;
-        i++;
-    }
-    if (i <= hostStart) return NO;
-
-    NSString *host = [uri substringWithRange:NSMakeRange(hostStart, i - hostStart)];
-    uint16_t port = 443;
-    if (i < [uri length] && [uri characterAtIndex:i] == ':') {
-        NSUInteger pStart = i + 1;
-        NSUInteger j = pStart;
-        while (j < [uri length]) {
-            unichar c = [uri characterAtIndex:j];
-            if (c < '0' || c > '9') break;
-            j++;
-        }
-        if (j > pStart) {
-            NSInteger p = [[uri substringWithRange:NSMakeRange(pStart, j - pStart)] integerValue];
-            if (p > 0 && p <= 65535) port = (uint16_t)p;
-        }
-    }
-
-    if (hostOut) *hostOut = host;
-    if (portOut) *portOut = port;
-    return YES;
+    return [[self schemeFromURIString:uri] isEqual:@"vless"] && [self parseServerHost:hostOut port:portOut fromURI:uri];
 }
 
 - (NSString *)unsupportedConfigReasonForURI:(NSString *)uri {
-    NSString *queryReason = [self configURIQueryValidationReason:uri];
-    if ([queryReason length] > 0) return queryReason;
-
-    NSString *scheme = [[self schemeFromURIString:uri] lowercaseString];
-    NSString *transport = [[self transportTypeFromURI:uri] lowercaseString];
-    NSString *security = [[self securityTypeFromURI:uri] lowercaseString];
-
-    if ([scheme isEqualToString:@"socks5"]) {
-        NSString *requestedSecurity = [[self queryValueForURLString:uri key:@"security"] lowercaseString];
-        if ([requestedSecurity length] && ![requestedSecurity isEqualToString:@"none"]) return @"SOCKS5 supports only security=none";
-        NSString *host = nil;
-        uint16_t port = 0;
-        if (![self parseSOCKS5Host:&host port:&port fromURI:uri] || [host length] == 0 || port == 0) {
-            return @"invalid socks5 endpoint";
-        }
-        return nil;
-    }
-
-    if (![scheme isEqualToString:@"vless"]) {
-        return @"protocol must be vless or socks5";
-    }
-
-    NSString *flowValue = [self realityFlowFromURI:uri];
-    if ([flowValue length] && ![flowValue isEqualToString:@"xtls-rprx-vision"]) return @"unsupported flow";
-    if (([security isEqualToString:@"tls"] || [security isEqualToString:@"reality"]) &&
-        ![self isSupportedRealityFingerprint:[self realityFingerprintFromURI:uri]]) return @"unsupported fp";
-
-    if ([transport isEqualToString:@"tcp"] && [security isEqualToString:@"none"]) {
-        NSString *flow = [self realityFlowFromURI:uri];
-        NSString *encryption = [self queryValueForURLString:uri key:@"encryption"];
-        if ([flow length] > 0 && (![encryption length] || [encryption isEqualToString:@"none"])) {
-            return [NSString stringWithFormat:@"unsupported flow=%@ without security", flow];
-        }
-        return nil;
-    }
-
-    // Supported tuple #1: [vless/tcp/reality] and [vless/tcp/tls]
-    BOOL vision = [transport isEqualToString:@"tcp"] &&
-                  ([security isEqualToString:@"reality"] || [security isEqualToString:@"tls"]);
-    if (vision) {
-        NSString *flow = [self realityFlowFromURI:uri];
-        if ([flow length] > 0 && ![flow isEqualToString:@"xtls-rprx-vision"]) {
-            return [NSString stringWithFormat:@"unsupported flow=%@", flow];
-        }
-
-        NSString *fp = [self realityFingerprintFromURI:uri];
-        if (![self isSupportedRealityFingerprint:fp]) {
-            return [NSString stringWithFormat:@"unsupported fp=%@", fp];
-        }
-
-        return nil;
-    }
-
-    BOOL xhttpTransport = [transport isEqualToString:@"xhttp"] ||
-                          [transport isEqualToString:@"splithttp"];
-
-    if (xhttpTransport && [security isEqualToString:@"none"]) {
-        NSString *mode = [[[self queryValueForURLString:uri key:@"mode"] lowercaseString]
-                          stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
-        if ([mode length] > 0 &&
-            ![mode isEqualToString:@"auto"] &&
-            ![mode isEqualToString:@"packet-up"] &&
-            ![mode isEqualToString:@"stream-one"] &&
-            ![mode isEqualToString:@"stream-up"]) {
-            return [NSString stringWithFormat:@"unsupported xhttp/none mode=%@", mode];
-        }
-        return nil;
-    }
-
-    // Supported tuple #2: [vless/xhttp/tls]
-    if (xhttpTransport && [security isEqualToString:@"tls"]) {
-        NSString *mode = [[[self queryValueForURLString:uri key:@"mode"] lowercaseString]
-                          stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
-        if ([mode length] > 0 &&
-            ![mode isEqualToString:@"auto"] &&
-            ![mode isEqualToString:@"packet-up"] &&
-            ![mode isEqualToString:@"stream-one"] &&
-            ![mode isEqualToString:@"stream-up"]) {
-            return [NSString stringWithFormat:@"unsupported xhttp/tls mode=%@", mode];
-        }
-        return nil;
-    }
-
-    // Supported tuple #3: [vless/xhttp/reality]
-    if (xhttpTransport && [security isEqualToString:@"reality"]) {
-        NSString *mode = [[[self queryValueForURLString:uri key:@"mode"] lowercaseString]
-                          stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
-        if ([mode length] > 0 &&
-            ![mode isEqualToString:@"auto"] &&
-            ![mode isEqualToString:@"packet-up"] &&
-            ![mode isEqualToString:@"stream-one"] &&
-            ![mode isEqualToString:@"stream-up"]) {
-            return [NSString stringWithFormat:@"unsupported xhttp/reality mode=%@", mode];
-        }
-
-        NSString *fp = [self realityFingerprintFromURI:uri];
-        if (![self isSupportedRealityFingerprint:fp]) {
-            return [NSString stringWithFormat:@"unsupported fp=%@", fp];
-        }
-        return nil;
-    }
-
-    BOOL grpcTransport = [transport isEqualToString:@"grpc"];
-    if (grpcTransport &&
-        ([security isEqualToString:@"none"] || [security isEqualToString:@"tls"] || [security isEqualToString:@"reality"])) {
-        NSString *mode = [[[self queryValueForURLString:uri key:@"mode"] lowercaseString]
-                          stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
-        if ([mode length] > 0 && ![mode isEqualToString:@"auto"] &&
-            ![mode isEqualToString:@"gun"] && ![mode isEqualToString:@"multi"]) {
-            return [NSString stringWithFormat:@"unsupported grpc mode=%@", mode];
-        }
-        if ([security isEqualToString:@"reality"]) {
-            NSString *fp = [self realityFingerprintFromURI:uri];
-            if (![self isSupportedRealityFingerprint:fp]) {
-                return [NSString stringWithFormat:@"unsupported fp=%@", fp];
-            }
-        }
-        return nil;
-    }
-
-    // Supported tuple #4: [vless/ws/tls] and [vless/ws/none]
-    if (([transport isEqualToString:@"ws"] || [transport isEqualToString:@"websocket"]) &&
-        ([security isEqualToString:@"tls"] || [security isEqualToString:@"none"])) {
-        return nil;
-    }
-
-    return @"supported sets are vless/tcp/none, vless/tcp/reality, vless/tcp/tls, vless/xhttp/none, vless/xhttp/tls and vless/xhttp/reality with auto, packet-up, stream-one, or stream-up mode, vless/grpc/none, vless/grpc/tls, vless/grpc/reality, vless/ws/tls, vless/ws/none, and [socks5]";
+    return [[self metadataForURI:uri] objectForKey:@"reason"];
 }
 
 - (NSArray *)extractConfigURIsFromText:(NSString *)text {
@@ -993,27 +935,11 @@ static void VCProfileUnknown(NSDictionary *object, NSArray *known, NSString *sco
 }
 
 - (NSString *)transportTypeFromURI:(NSString *)uri {
-    NSString *scheme = [self schemeFromURIString:uri];
-    if ([scheme isEqualToString:@"socks5"]) return @"tcp";
-
-    NSString *transport = [self queryValueForURLString:uri key:@"type"];
-    if ([transport length] == 0) transport = [self queryValueForURLString:uri key:@"transport"];
-    if ([transport length] == 0) transport = [self queryValueForURLString:uri key:@"network"];
-    if ([transport length] == 0) transport = [self queryValueForURLString:uri key:@"net"];
-
-    transport = [[self safeTrim:transport] lowercaseString];
-    if ([transport length] == 0 || [transport isEqualToString:@"raw"]) return @"tcp";
-    return transport;
+    return [[self metadataForURI:uri] objectForKey:@"transport"];
 }
 
 - (NSString *)securityTypeFromURI:(NSString *)uri {
-    NSString *scheme = [self schemeFromURIString:uri];
-    if ([scheme isEqualToString:@"socks5"]) return @"plain";
-
-    NSString *security = [self queryValueForURLString:uri key:@"security"];
-    security = [self safeTrim:security];
-    if ([security length] == 0) return @"none";
-    return [security lowercaseString];
+    return [[self metadataForURI:uri] objectForKey:@"security"];
 }
 
 - (NSString *)realityFlowFromURI:(NSString *)uri {

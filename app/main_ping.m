@@ -36,11 +36,7 @@
     uint16_t port = 0;
     int latencyMs = -1;
     BOOL ok = NO;
-    NSString *scheme = [self schemeFromURIString:uri];
-    BOOL isSOCKS5Config = [scheme isEqualToString:@"socks5"];
-    BOOL parsed = isSOCKS5Config
-        ? [self parseSOCKS5Host:&host port:&port fromURI:uri]
-        : [self parseVLESSHost:&host port:&port fromURI:uri];
+    BOOL parsed = [VCProfiles() parseServerHost:&host port:&port fromURI:uri];
     if (parsed) {
         int rc = -1;
 

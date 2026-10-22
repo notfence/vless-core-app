@@ -7,6 +7,13 @@
 #include "check.h"
 #include <sys/stat.h>
 #include <unistd.h>
+#include <time.h>
+#include <sys/resource.h>
+
+@interface VCProfileLogic (VCMetadataTests)
+- (NSDictionary *)metadataForURI:(NSString *)uri;
+- (void)prepareMetadataForConfigurations:(NSArray *)configs subscriptions:(NSArray *)subscriptions;
+@end
 
 @interface VCFakePingOwner : NSObject { @public NSUInteger cancellations; }
 - (void)stopAllPings;
@@ -337,8 +344,56 @@ static void listTests(void) {
     CHECK("list/empty-subscription-selection", ci == -1 && si == 2 && ii == -1);
 }
 
-int main(void) {
+static void metadataTests(void) {
+    VCProfileLogic *p = VCProfiles();
+    CHECK("profiles/metadata-interface", [p respondsToSelector:@selector(metadataForURI:)]);
+    NSString *uri = @"vless://11111111-2222-4333-8444-555555555555@[::1]:443?net=raw&security=tls#Test%20name";
+    NSDictionary *m = [p metadataForURI:uri];
+    CHECK("profiles/metadata-ipv6", [[m objectForKey:@"host"] isEqual:@"::1"] && [[m objectForKey:@"port"] intValue] == 443);
+    CHECK("profiles/metadata-canonical-transport", [[m objectForKey:@"transport"] isEqual:@"tcp"] && [[m objectForKey:@"security"] isEqual:@"tls"]);
+    CHECK("profiles/metadata-title", [[m objectForKey:@"title"] isEqual:@"Test name"]);
+    CHECK("profiles/metadata-no-credentials", ![m objectForKey:@"uuid"] && ![m objectForKey:@"password"] && ![m objectForKey:@"uri"] && ![m objectForKey:@"encryption"]);
+    [p prepareMetadataForConfigurations:@[@{@"uri":uri}] subscriptions:@[]];
+    CHECK("profiles/metadata-is-reused", [p metadataForURI:uri] == [p metadataForURI:uri]);
+    [p prepareMetadataForConfigurations:@[] subscriptions:@[@{@"items":@[uri]}]];
+    CHECK("profiles/metadata-subscription", [[p metadataForURI:uri] objectForKey:@"reason"] == nil);
+    CHECK("profiles/security-spaces-not-repaired", [p unsupportedConfigReasonForURI:@"vless://u@example.test:443?security=%20tls"] != nil);
+    CHECK("profiles/query-aliases-match-core", [p configURIQueryValidationReason:@"vless://u@example.test:443?ed=1&maxEarlyData=2"] != nil);
+    for (NSString *bad in @[@"vless://u@example.test:443junk", @"vless://u@example.test:+443", @"vless://u@example.test:0", @"vless://u@example.test:65536", @"vless://u@example.test:18446744073709551616", @"vless://u@[bad]:443", @"vless://u@bad host:443", @"vless://u@bad\\host:443", @"socks5://[::1]garbage", @"socks5://example.test:1080junk", @"vless://u@example.test:443?type=ws&host=bad%0D%0AHost:evil"])
+        CHECK("profiles/invalid-endpoint-rejected", [p unsupportedConfigReasonForURI:bad] != nil);
+    CHECK("profiles/socks-default-port", [[[p metadataForURI:@"socks5://[::1]"] objectForKey:@"port"] intValue] == 1080);
+    NSDictionary *cached=[p metadataForURI:uri];
+    [p prepareMetadataForConfigurations:@[] subscriptions:@[]];
+    CHECK("profiles/removed-entry-not-retained", [p metadataForURI:uri] != cached);
+}
+
+static int measureProfiles(NSUInteger count) {
+    VCProfileLogic *p = VCProfiles(); NSMutableArray *links = [NSMutableArray array];
+    for (NSUInteger i = 0; i < count; i++) [links addObject:[NSString stringWithFormat:@"vless://11111111-2222-4333-8444-555555555555@profile%lu.test:443?type=ws&security=tls&fp=firefox#Profile%lu",(unsigned long)i,(unsigned long)i]];
+    NSData *data = [[links componentsJoinedByString:@"\n"] dataUsingEncoding:NSUTF8StringEncoding];
+    struct timespec begin,end; clock_gettime(CLOCK_MONOTONIC,&begin);
+    NSArray *parsed = [p parseSubscriptionData:data];
+    if ([p respondsToSelector:@selector(prepareMetadataForConfigurations:subscriptions:)]) [p prepareMetadataForConfigurations:@[] subscriptions:@[@{@"items":parsed}]];
+    clock_gettime(CLOCK_MONOTONIC,&end);
+    double load = (end.tv_sec-begin.tv_sec)*1000.0+(end.tv_nsec-begin.tv_nsec)/1000000.0;
+    clock_gettime(CLOCK_MONOTONIC,&begin);
+    NSUInteger accepted=0;
+    for (NSUInteger pass=0;pass<3;pass++) for (NSString *uri in parsed) {
+        if ([p isSupportedConfigTupleForURI:uri]) accepted++;
+        [p transportTypeFromURI:uri]; [p securityTypeFromURI:uri];
+        NSString *host=nil; uint16_t port=0; [p parseVLESSHost:&host port:&port fromURI:uri];
+    }
+    clock_gettime(CLOCK_MONOTONIC,&end);
+    struct rusage usage; getrusage(RUSAGE_SELF,&usage);
+    unsigned long rss=0,peak=0; char line[256]; FILE *status=fopen("/proc/self/status","r");
+    if (status) { while (fgets(line,sizeof(line),status)) { sscanf(line,"VmRSS: %lu",&rss); sscanf(line,"VmHWM: %lu",&peak); } fclose(status); }
+    printf("{\"count\":%lu,\"accepted\":%lu,\"load_ms\":%.6f,\"render_ms\":%.6f,\"cpu_s\":%.6f,\"rss_kib\":%lu,\"peak_rss_kib\":%lu}\n",(unsigned long)count,(unsigned long)accepted,load,(end.tv_sec-begin.tv_sec)*1000.0+(end.tv_nsec-begin.tv_nsec)/1000000.0,usage.ru_utime.tv_sec+usage.ru_utime.tv_usec/1000000.0+usage.ru_stime.tv_sec+usage.ru_stime.tv_usec/1000000.0,rss,peak);
+    return accepted == count*3 ? 0 : 1;
+}
+
+int main(int argc, char **argv) {
     NSAutoreleasePool *pool = [[NSAutoreleasePool alloc] init];
-    connectionTests(); importTests(); subscriptionUpdateTests(); dataTests(); listTests(); FINISH("app logic");
+    if (argc == 3 && !strcmp(argv[1],"--measure")) { int result=measureProfiles((NSUInteger)strtoul(argv[2],NULL,10)); [pool drain]; return result; }
+    connectionTests(); importTests(); subscriptionUpdateTests(); dataTests(); listTests(); metadataTests(); FINISH("app logic");
     [pool drain]; return 0;
 }

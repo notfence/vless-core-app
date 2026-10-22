@@ -108,44 +108,13 @@
 }
 
 - (BOOL)isXHTTPTransportURI:(NSString *)uri {
-    if (![uri isKindOfClass:[NSString class]] || [uri length] == 0) return NO;
-
-    NSRange q = [uri rangeOfString:@"?"];
-    if (q.location == NSNotFound) return NO;
-
-    NSUInteger start = q.location + 1;
-    NSUInteger end = [uri length];
-    NSRange hash = [uri rangeOfString:@"#" options:0 range:NSMakeRange(start, end - start)];
-    if (hash.location != NSNotFound) {
-        end = hash.location;
-    }
-    if (end <= start) return NO;
-
-    NSString *query = [uri substringWithRange:NSMakeRange(start, end - start)];
-    NSArray *pairs = [query componentsSeparatedByString:@"&"];
-    for (NSString *pair in pairs) {
-        if (![pair isKindOfClass:[NSString class]] || [pair length] == 0) continue;
-
-        NSRange eq = [pair rangeOfString:@"="];
-        NSString *k = (eq.location == NSNotFound) ? pair : [pair substringToIndex:eq.location];
-        NSString *v = (eq.location == NSNotFound) ? @"" : [pair substringFromIndex:(eq.location + 1)];
-
-        k = [k lowercaseString];
-        NSString *decoded = [v stringByReplacingPercentEscapesUsingEncoding:NSUTF8StringEncoding];
-        if (decoded) v = decoded;
-        v = [v lowercaseString];
-
-        if ([k isEqualToString:@"type"] && ([v isEqualToString:@"xhttp"] || [v isEqualToString:@"splithttp"])) {
-            return YES;
-        }
-    }
-    return NO;
+    return [[VCProfiles() transportTypeFromURI:uri] isEqual:@"xhttp"];
 }
 
 - (NSString *)xhttpPinKeyFromURI:(NSString *)uri {
     NSString *host = nil;
     uint16_t port = 443;
-    if (![self parseVLESSHost:&host port:&port fromURI:uri]) return nil;
+    if (![VCProfiles() parseServerHost:&host port:&port fromURI:uri]) return nil;
     NSString *trimmedHost = [[self safeTrim:host] lowercaseString];
     if (![trimmedHost isKindOfClass:[NSString class]] || [trimmedHost length] == 0) return nil;
     return [NSString stringWithFormat:@"%@:%u", trimmedHost, (unsigned int)port];
@@ -217,6 +186,8 @@
     [out setObject:(ok ? @"1" : @"0") forKey:@"ok"];
     if (![uri isKindOfClass:[NSString class]]) uri = @"";
     [out setObject:uri forKey:@"uri"];
+    [out setObject:[payload objectForKey:@"generation"] forKey:@"generation"];
+    [out setObject:[payload objectForKey:@"since"] forKey:@"since"];
 
     if (!ok) {
         NSString *reason = [self xhttpTOFUPinMismatchStatusForURI:uri];
@@ -233,7 +204,9 @@
 - (void)xhttpConnectHealthCheckResultOnMain:(NSDictionary *)payload {
     BOOL ok = [[payload objectForKey:@"ok"] isEqualToString:@"1"];
     if (ok) return;
-    if (!_connected || [self isConnectionActionInProgress]) return;
+    if (!VCConnectionLossApplies(YES,_connected,[[payload objectForKey:@"generation"] unsignedIntegerValue],_connectionActionGeneration,
+                                [self isConnectionActionInProgress],[[payload objectForKey:@"since"] doubleValue],_connectedSince)) return;
+    if (![[payload objectForKey:@"uri"] isEqual:[self uriForCurrentSelection]]) return;
 
     NSString *reason = [payload objectForKey:@"reason"];
     if ([reason rangeOfString:@"TOFU pin mismatch"].location == NSNotFound) {
@@ -256,6 +229,7 @@
     if (![self isXHTTPTransportURI:uri]) return;
     NSDictionary *payload = [NSDictionary dictionaryWithObjectsAndKeys:
                              (uri ? uri : @""), @"uri",
+                             @(_connectionActionGeneration), @"generation", @(_connectedSince), @"since",
                              nil];
     [NSThread detachNewThreadSelector:@selector(xhttpConnectHealthCheckWorker:) toTarget:self withObject:payload];
 }

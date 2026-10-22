@@ -8,7 +8,13 @@
 - (NSTimeInterval)subscriptionUpdateTimestamp;
 @end
 
-@interface VCProfileLogic : NSObject
+@interface VCProfileLogic : NSObject {
+    NSDictionary *_profileMetadata;
+}
+- (NSDictionary *)metadataForURI:(NSString *)uri;
+- (BOOL)isConfigurationURI:(NSString *)uri;
+- (void)prepareMetadataForConfigurations:(NSArray *)configs subscriptions:(NSArray *)subscriptions;
+- (BOOL)parseServerHost:(NSString **)hostOut port:(uint16_t *)portOut fromURI:(NSString *)uri;
 - (NSString *)decodedURLComponent:(NSString *)component;
 - (NSString *)decodedSubscriptionTitleValue:(NSString *)rawValue;
 - (NSString *)subscriptionTitleFromMetadataText:(NSString *)text;

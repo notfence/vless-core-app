@@ -9,28 +9,11 @@ static BOOL gVCSecureStoreWritable = YES;
 }
 
 - (NSString *)decodedFragmentFromURI:(NSString *)uri {
-    NSRange hash = [uri rangeOfString:@"#" options:NSBackwardsSearch];
-    if (hash.location == NSNotFound) return nil;
-    NSString *frag = [uri substringFromIndex:(hash.location + 1)];
-    NSString *decoded = [frag stringByReplacingPercentEscapesUsingEncoding:NSUTF8StringEncoding];
-    if (decoded) frag = decoded;
-    frag = [self safeTrim:frag];
-    return [frag length] > 0 ? frag : nil;
+    return [[VCProfiles() metadataForURI:uri] objectForKey:@"title"];
 }
 
 - (NSString *)hostFromVLESSURI:(NSString *)uri {
-    NSRange at = [uri rangeOfString:@"@"];
-    if (at.location == NSNotFound) return @"vless";
-
-    NSUInteger start = at.location + 1;
-    NSUInteger i = start;
-    while (i < [uri length]) {
-        unichar c = [uri characterAtIndex:i];
-        if (c == ':' || c == '?' || c == '/' || c == '#') break;
-        i++;
-    }
-    if (i <= start) return @"vless";
-    return [uri substringWithRange:NSMakeRange(start, i - start)];
+    return [self hostFromConfigURI:uri];
 }
 
 - (NSString *)schemeFromURIString:(NSString *)uri {
@@ -42,20 +25,8 @@ static BOOL gVCSecureStoreWritable = YES;
 }
 
 - (NSString *)hostFromConfigURI:(NSString *)uri {
-    NSURL *u = [NSURL URLWithString:uri];
-    NSString *host = [self safeTrim:[u host]];
-    if ([host length] > 0) return host;
-
-    NSString *scheme = [self schemeFromURIString:uri];
-    if ([scheme isEqualToString:@"socks5"]) {
-        NSString *parsedHost = nil;
-        if ([self parseSOCKS5Host:&parsedHost port:NULL fromURI:uri] && [parsedHost length] > 0) {
-            return parsedHost;
-        }
-        return @"socks5";
-    }
-
-    return [self hostFromVLESSURI:uri];
+    NSDictionary *metadata=[VCProfiles() metadataForURI:uri];
+    return [metadata objectForKey:@"host"] ?: [metadata objectForKey:@"protocol"] ?: @"server";
 }
 
 - (NSString *)displayNameForURI:(NSString *)uri index:(NSInteger)index {
@@ -182,7 +153,7 @@ static BOOL gVCSecureStoreWritable = YES;
 }
 
 - (BOOL)isDirectConfigURI:(NSString *)s {
-    return [self isVLESSURI:s] || [self isSOCKS5URI:s];
+    return [VCProfiles() isConfigurationURI:[self safeTrim:s]];
 }
 
 - (void)saveMainState {
@@ -222,6 +193,7 @@ static BOOL gVCSecureStoreWritable = YES;
 }
 
 - (void)saveData {
+    [VCProfiles() prepareMetadataForConfigurations:_configs subscriptions:_subscriptions];
     NSUserDefaults *ud = [NSUserDefaults standardUserDefaults];
     BOOL storeSaved = gVCSecureStoreWritable &&
         VCSaveProtectedConfigurationData(_configs, _subscriptions);
@@ -267,6 +239,8 @@ static BOOL gVCSecureStoreWritable = YES;
     } else {
         _subscriptions = [[NSMutableArray alloc] init];
     }
+
+    [VCProfiles() prepareMetadataForConfigurations:_configs subscriptions:_subscriptions];
 
     if ([protectedData isKindOfClass:[NSDictionary class]] &&
         ([legacyConfigs isKindOfClass:[NSArray class]] || [legacySubscriptions isKindOfClass:[NSArray class]])) {
@@ -433,42 +407,12 @@ static BOOL gVCSecureStoreWritable = YES;
 }
 
 - (NSString *)endpointFromConfigURI:(NSString *)uri {
-    if (![uri isKindOfClass:[NSString class]] || [uri length] == 0) return @"server";
-
-    NSURL *u = [NSURL URLWithString:uri];
-    NSString *host = [self safeTrim:[u host]];
-    NSNumber *portNum = [u port];
-    NSInteger port = [portNum respondsToSelector:@selector(integerValue)] ? [portNum integerValue] : 0;
-
-    if ([host length] > 0) {
-        if (port <= 0 || port > 65535) {
-            NSString *scheme = [self schemeFromURIString:uri];
-            if ([scheme isEqualToString:@"vless"]) {
-                port = 443;
-            } else if ([scheme isEqualToString:@"socks5"]) {
-                port = 1080;
-            }
-        }
-
-        if (port > 0 && port <= 65535) {
-            return [NSString stringWithFormat:@"%@:%ld", host, (long)port];
-        }
-        return host;
-    }
-
-    NSString *parsedHost = nil;
-    uint16_t parsedPort = 443;
-    if ([self parseVLESSHost:&parsedHost port:&parsedPort fromURI:uri] && [parsedHost length] > 0) {
-        return [NSString stringWithFormat:@"%@:%u", parsedHost, (unsigned int)parsedPort];
-    }
-
-    if ([self parseSOCKS5Host:&parsedHost port:&parsedPort fromURI:uri] && [parsedHost length] > 0) {
-        return [NSString stringWithFormat:@"%@:%u", parsedHost, (unsigned int)parsedPort];
-    }
-
-    NSString *fallbackHost = [self hostFromVLESSURI:uri];
-    if ([fallbackHost length] > 0) return fallbackHost;
-    return @"server";
+    NSDictionary *metadata=[VCProfiles() metadataForURI:uri];
+    NSString *host=[metadata objectForKey:@"host"];
+    NSNumber *port=[metadata objectForKey:@"port"];
+    if (![host length]) return @"server";
+    if ([host rangeOfString:@":"].location != NSNotFound) host=[NSString stringWithFormat:@"[%@]",host];
+    return port ? [NSString stringWithFormat:@"%@:%u",host,[port unsignedIntValue]] : host;
 }
 
 - (NSString *)configSecondaryTextFromURI:(NSString *)uri {
