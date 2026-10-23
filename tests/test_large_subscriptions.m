@@ -4,8 +4,82 @@
 #include <time.h>
 #include <sys/resource.h>
 #include <unistd.h>
+#include <sys/stat.h>
 
 static NSUInteger liveTemporaries, peakTemporaries, queryReads;
+static NSCondition *storeCondition;
+static BOOL holdStore, storeEntered, failProtection, storeUsedMain;
+
+static NSString *storeCommand(NSString *command) {
+    (void)command;
+    return @"OK 0000000000000000000000000000000000000000000000000000000000000000";
+}
+
+static BOOL protectStore(NSString *path) {
+    (void)path;
+    [storeCondition lock];
+    storeEntered=YES; storeUsedMain=[NSThread isMainThread]; [storeCondition broadcast];
+    while (holdStore) [storeCondition wait];
+    BOOL result=!failProtection; [storeCondition unlock]; return result;
+}
+
+@interface VCBulkStoreObserver : NSObject { @public NSMutableArray *results; }
+- (void)finished:(NSDictionary *)result;
+@end
+@implementation VCBulkStoreObserver
+- (id)init { if ((self=[super init])) results=[[NSMutableArray alloc] init]; return self; }
+- (void)dealloc { [results release]; [super dealloc]; }
+- (void)finished:(NSDictionary *)result { CHECK("bulk/store-completion-on-main",[NSThread isMainThread]); [results addObject:result]; }
+@end
+
+static void waitForStore(VCConfigurationStoreWriter *writer, VCBulkStoreObserver *observer, NSUInteger count) {
+    NSDate *end=[NSDate dateWithTimeIntervalSinceNow:5];
+    while ((!writer.isIdle || [observer->results count] < count) && [end timeIntervalSinceNow] > 0)
+        [[NSRunLoop currentRunLoop] runMode:NSDefaultRunLoopMode beforeDate:[NSDate dateWithTimeIntervalSinceNow:.005]];
+    CHECK("bulk/store-completes",writer.isIdle && [observer->results count] == count);
+}
+
+static void storeTests(void) {
+    char path[]="/tmp/vless-bulk-store-XXXXXX";
+    CHECK("bulk/store-temp-directory",mkdtemp(path) != NULL);
+    NSString *directory=[NSString stringWithUTF8String:path],*file=[directory stringByAppendingPathComponent:@"configs.dat"];
+    VCStoragePaths paths={directory,file,nil,storeCommand,protectStore};
+    storeCondition=[[NSCondition alloc] init]; holdStore=YES; storeEntered=NO;
+    VCConfigurationStoreWriter *writer=[[VCConfigurationStoreWriter alloc] initWithPaths:&paths];
+    VCBulkStoreObserver *observer=[[VCBulkStoreObserver alloc] init];
+    CHECK("bulk/store-first-enqueue",[writer enqueueConfigurations:@[@{@"uri":@"first"}] subscriptions:@[] revision:1 target:observer selector:@selector(finished:) context:@"first"]);
+    [storeCondition lock]; NSDate *end=[NSDate dateWithTimeIntervalSinceNow:5];
+    while (!storeEntered && [end timeIntervalSinceNow] > 0) [storeCondition waitUntilDate:end];
+    BOOL entered=storeEntered; [storeCondition unlock];
+    CHECK("bulk/store-worker-starts",entered);
+    for (NSUInteger i=2;i<=101;i++) {
+        CHECK("bulk/store-latest-enqueue",[writer enqueueConfigurations:@[@{@"uri":@(i)}] subscriptions:@[] revision:i target:observer selector:@selector(finished:) context:@"latest"]);
+        CHECK("bulk/store-only-two-snapshots",writer.bufferedSnapshotCount <= 2);
+    }
+    CHECK("bulk/store-off-main",!storeUsedMain && [observer->results count] == 0);
+    NSUInteger heartbeat=0;
+    for (NSUInteger i=0;i<5;i++) { [[NSRunLoop currentRunLoop] runUntilDate:[NSDate dateWithTimeIntervalSinceNow:.001]]; heartbeat++; }
+    CHECK("bulk/main-progresses-during-blocked-store",heartbeat == 5 && !writer.isIdle);
+    [storeCondition lock]; holdStore=NO; [storeCondition broadcast]; [storeCondition unlock];
+    waitForStore(writer,observer,2);
+    CHECK("bulk/store-completion-order",[[[observer->results objectAtIndex:0] objectForKey:@"revision"] unsignedIntegerValue] == 1 && [[[observer->results objectAtIndex:1] objectForKey:@"revision"] unsignedIntegerValue] == 101);
+    BOOL exists=NO; NSDictionary *loaded=VCLoadProtectedConfigurationDataAtPaths(&exists,&paths);
+    CHECK("bulk/store-latest-data",exists && [[[[loaded objectForKey:@"configs"] objectAtIndex:0] objectForKey:@"uri"] unsignedIntegerValue] == 101);
+    NSData *previous=[NSData dataWithContentsOfFile:file];
+    failProtection=YES;
+    CHECK("bulk/store-failure-enqueue",[writer enqueueConfigurations:@[] subscriptions:@[] revision:102 target:observer selector:@selector(finished:) context:@"failure"]);
+    waitForStore(writer,observer,3);
+    CHECK("bulk/store-failure-reported",![[[observer->results lastObject] objectForKey:@"saved"] boolValue]);
+    CHECK("bulk/store-failure-preserves-file",[[NSData dataWithContentsOfFile:file] isEqual:previous]);
+    CHECK("bulk/store-stale-revision-rejected",![writer enqueueConfigurations:@[] subscriptions:@[] revision:101 target:observer selector:@selector(finished:) context:nil]);
+    failProtection=NO;
+    CHECK("bulk/store-recovers",[writer enqueueConfigurations:@[] subscriptions:@[] revision:103 target:observer selector:@selector(finished:) context:nil]);
+    waitForStore(writer,observer,4);
+    CHECK("bulk/store-recovers-successfully",[[[observer->results lastObject] objectForKey:@"saved"] boolValue] && writer.bufferedSnapshotCount == 0);
+    struct stat st; CHECK("bulk/store-keeps-private-permissions",stat([file fileSystemRepresentation],&st) == 0 && (st.st_mode & 0777) == 0600);
+    [writer release]; [observer release]; [storeCondition release]; storeCondition=nil;
+    CHECK("bulk/store-temp-cleanup",unlink([file fileSystemRepresentation]) == 0 && rmdir(path) == 0);
+}
 
 @interface VCBulkTemporary : NSObject
 @end
@@ -63,9 +137,44 @@ static int measure(NSString *path) {
     [report release]; [profiles release]; [data release]; return 0;
 }
 
+static int measureStore(NSString *source, BOOL background) {
+    NSAutoreleasePool *parsePool=[[NSAutoreleasePool alloc] init];
+    NSData *data=[NSData dataWithContentsOfFile:source];
+    NSArray *uris=[[VCProfiles() parseSubscriptionData:data] retain];
+    [parsePool drain];
+    char path[]="/tmp/vless-measure-store-XXXXXX";
+    if (!mkdtemp(path)) return 2;
+    NSString *directory=[NSString stringWithUTF8String:path],*file=[directory stringByAppendingPathComponent:@"configs.dat"];
+    VCStoragePaths paths={directory,file,nil,storeCommand,protectStore};
+    storeCondition=[[NSCondition alloc] init];
+    NSArray *subscriptions=@[@{@"url":@"https://subscription.test/fixture",@"items":uris}];
+    VCBulkStoreObserver *observer=[[VCBulkStoreObserver alloc] init];
+    VCConfigurationStoreWriter *writer=background ? [[VCConfigurationStoreWriter alloc] initWithPaths:&paths] : nil;
+    struct rusage before,after; getrusage(RUSAGE_SELF,&before);
+    double started=clockMS(),mainMS=0;
+    BOOL ok;
+    if (background) {
+        ok=[writer enqueueConfigurations:@[] subscriptions:subscriptions revision:1 target:observer selector:@selector(finished:) context:nil];
+        mainMS=clockMS()-started;
+        waitForStore(writer,observer,1);
+        ok=ok && [[[observer->results lastObject] objectForKey:@"saved"] boolValue];
+    } else { ok=VCSaveProtectedConfigurationDataAtPaths(@[],subscriptions,&paths); mainMS=clockMS()-started; }
+    double total=clockMS()-started;
+    getrusage(RUSAGE_SELF,&after);
+    BOOL exists=NO;
+    NSDictionary *loaded=VCLoadProtectedConfigurationDataAtPaths(&exists,&paths);
+    ok=ok && exists && [[loaded objectForKey:@"subscriptions"] isEqual:subscriptions];
+    unsigned long rss,peak; memory(&rss,&peak);
+    printf("{\"background\":%s,\"main_ms\":%.6f,\"store_ms\":%.6f,\"cpu_s\":%.6f,\"rss_kib\":%lu,\"peak_rss_kib\":%lu,\"accepted\":%lu}\n",background ? "true" : "false",mainMS,total,
+           (after.ru_utime.tv_sec-before.ru_utime.tv_sec)+(after.ru_utime.tv_usec-before.ru_utime.tv_usec)/1000000.0+(after.ru_stime.tv_sec-before.ru_stime.tv_sec)+(after.ru_stime.tv_usec-before.ru_stime.tv_usec)/1000000.0,rss,peak,(unsigned long)[uris count]);
+    [writer release]; [observer release]; [storeCondition release]; storeCondition=nil;
+    unlink([file fileSystemRepresentation]); rmdir(path); [uris release]; return ok ? 0 : 1;
+}
+
 int main(int argc, char **argv) {
     NSAutoreleasePool *outer=[[NSAutoreleasePool alloc] init];
     if (argc == 3 && !strcmp(argv[1],"--measure")) { int result=measure([NSString stringWithUTF8String:argv[2]]); [outer drain]; return result; }
+    if (argc == 4 && !strcmp(argv[1],"--measure-store")) { int result=measureStore([NSString stringWithUTF8String:argv[2]],!strcmp(argv[3],"background")); [outer drain]; return result; }
     VCBulkProfiles *profiles=[[VCBulkProfiles alloc] init];
     NSMutableString *text=[NSMutableString string];
     for (NSUInteger i=0;i<2000;i++) [text appendFormat:@"vless://u@profile%lu.test:443?type=ws&security=tls&fp=firefox\n",(unsigned long)i];
@@ -103,5 +212,7 @@ int main(int argc, char **argv) {
     CHECK("bulk/unchanged-metadata-reused",[reused objectForKey:one] == [entries objectForKey:one]);
     [profiles installPreparedMetadata:[profiles preparedMetadataForConfigurations:@[] subscriptions:@[] additionalMetadata:nil]];
     CHECK("bulk/removed-metadata-pruned",[profiles metadataForURI:one] != [entries objectForKey:one]);
+    CHECK("bulk/background-writer-interface",NSClassFromString(@"VCConfigurationStoreWriter") != Nil);
+    storeTests();
     [profiles release]; FINISH("large subscriptions"); [outer drain]; return 0;
 }

@@ -195,20 +195,15 @@ static BOOL gVCSecureStoreWritable = YES;
 
 - (void)saveData {
     if (_configurationLoading) return;
-    [self prepareProfileMetadata];
-    NSUserDefaults *ud = [NSUserDefaults standardUserDefaults];
-    BOOL storeSaved = gVCSecureStoreWritable &&
-        VCSaveProtectedConfigurationData(_configs, _subscriptions);
-    if (storeSaved) {
-        [ud removeObjectForKey:kDefaultsConfigsKey];
-        [ud removeObjectForKey:kDefaultsSubsKey];
+    if (!_applyingConfigurationDraft && !_configurationCommitInProgress) {
+        _configurationRevision++;
+        [self prepareProfileMetadata];
+        if (gVCSecureStoreWritable) {
+            [self keepConfigurationWriteAlive];
+            [_configurationWriter enqueueConfigurations:_configs subscriptions:_subscriptions revision:++_storeSequence target:self selector:@selector(configurationStoreFinished:) context:nil];
+        }
     }
-    VCRecordAppEvent(@"storage",
-                     storeSaved ? @"Configuration store saved" : @"Configuration store save failed",
-                     [NSString stringWithFormat:@"configs=%lu subscriptions=%lu writable=%d",
-                      (unsigned long)[_configs count],
-                      (unsigned long)[_subscriptions count],
-                      gVCSecureStoreWritable ? 1 : 0]);
+    NSUserDefaults *ud = [NSUserDefaults standardUserDefaults];
     [ud setBool:_autoUpdateSubscriptions forKey:kDefaultsAutoUpdateSubsKey];
     [ud setBool:_preserveCustomSubscriptionNames forKey:kDefaultsPreserveCustomSubscriptionNamesKey];
     [ud setBool:_stealthModeEnabled forKey:kDefaultsStealthModeKey];
@@ -221,7 +216,10 @@ static BOOL gVCSecureStoreWritable = YES;
 
 - (void)loadData {
     _configurationLoading=YES;
+    _configurationBackgroundTask=UIBackgroundTaskInvalid;
     _configurationQueue=dispatch_queue_create("com.vlesscore.configuration", DISPATCH_QUEUE_SERIAL);
+    VCStoragePaths paths=VCMainStoragePaths();
+    _configurationWriter=[[VCConfigurationStoreWriter alloc] initWithPaths:&paths];
     _configs=[[NSMutableArray alloc] init];
     _subscriptions=[[NSMutableArray alloc] init];
     _selectedConfigIndex=_selectedSubIndex=_selectedSubItemIndex=_expandedSubscription=-1;
@@ -390,6 +388,89 @@ static BOOL gVCSecureStoreWritable = YES;
         });
         [additional release]; [configs release]; [subscriptions release]; [pool drain];
     });
+}
+
+- (BOOL)configurationMutationBlocked {
+    return _configurationLoading || _configurationCommitInProgress;
+}
+
+- (void)keepConfigurationWriteAlive {
+    if (_configurationBackgroundTask != UIBackgroundTaskInvalid) return;
+    _configurationBackgroundTask=[[UIApplication sharedApplication] beginBackgroundTaskWithExpirationHandler:^{
+        if (_configurationBackgroundTask != UIBackgroundTaskInvalid) {
+            [[UIApplication sharedApplication] endBackgroundTask:_configurationBackgroundTask];
+            _configurationBackgroundTask=UIBackgroundTaskInvalid;
+        }
+    }];
+}
+
+- (void)commitConfigurations:(NSArray *)configs subscriptions:(NSArray *)subscriptions completion:(void (^)(BOOL))completion {
+    if (_configurationLoading || _configurationDraft || !gVCSecureStoreWritable) {
+        if (completion) completion(NO);
+        return;
+    }
+    _configurationDraftCompletion=completion ? Block_copy(completion) : NULL;
+    NSUInteger token=++_configurationDraftToken,revision=_configurationRevision;
+    NSArray *configSnapshot=[configs copy],*subscriptionSnapshot=[subscriptions copy];
+    _configurationDraft=[[NSDictionary alloc] initWithObjectsAndKeys:configSnapshot,@"configs",subscriptionSnapshot,@"subscriptions",nil];
+    NSDictionary *additional=nil;
+    @synchronized(self) { additional=_pendingProfileMetadata; _pendingProfileMetadata=nil; }
+    dispatch_async(_configurationQueue, ^{
+        NSAutoreleasePool *pool=[[NSAutoreleasePool alloc] init];
+        NSDictionary *metadata=[[VCProfiles() preparedMetadataForConfigurations:configSnapshot subscriptions:subscriptionSnapshot additionalMetadata:additional] retain];
+        dispatch_async(dispatch_get_main_queue(), ^{
+            if (token == _configurationDraftToken && _configurationDraft) {
+                if (revision != _configurationRevision) [self finishConfigurationDraft:NO];
+                else {
+                    NSMutableDictionary *draft=[[_configurationDraft mutableCopy] autorelease];
+                    [draft setObject:metadata forKey:@"metadata"];
+                    [_configurationDraft release]; _configurationDraft=[draft copy];
+                    _configurationCommitInProgress=YES;
+                    _plusBtn.enabled=NO; _settingsBtn.enabled=NO; _refreshBtn.enabled=NO;
+                    [self setMainReorderingSection:-1 showStatus:NO];
+                    [self keepConfigurationWriteAlive];
+                    if (![_configurationWriter enqueueConfigurations:configSnapshot subscriptions:subscriptionSnapshot revision:++_storeSequence target:self selector:@selector(configurationStoreFinished:) context:@(token)]) [self finishConfigurationDraft:NO];
+                }
+            }
+            [metadata release];
+        });
+        [additional release]; [configSnapshot release]; [subscriptionSnapshot release]; [pool drain];
+    });
+}
+
+- (void)configurationStoreFinished:(NSDictionary *)result {
+    BOOL saved=[[result objectForKey:@"saved"] boolValue];
+    id context=[result objectForKey:@"context"];
+    if ([context isKindOfClass:[NSNumber class]]) {
+        if ([context unsignedIntegerValue] == _configurationDraftToken && _configurationDraft) [self finishConfigurationDraft:saved];
+    } else if (!saved && [[result objectForKey:@"revision"] unsignedLongLongValue] == _storeSequence) [self showStatus:@"Configuration store save failed" ok:NO];
+    if (saved) {
+        NSUserDefaults *defaults=[NSUserDefaults standardUserDefaults];
+        [defaults removeObjectForKey:kDefaultsConfigsKey]; [defaults removeObjectForKey:kDefaultsSubsKey];
+    }
+    VCRecordAppEvent(@"storage",saved ? @"Configuration store saved" : @"Configuration store save failed",nil);
+    if ([[result objectForKey:@"idle"] boolValue] && _configurationWriter.isIdle && _configurationBackgroundTask != UIBackgroundTaskInvalid) {
+        [[UIApplication sharedApplication] endBackgroundTask:_configurationBackgroundTask];
+        _configurationBackgroundTask=UIBackgroundTaskInvalid;
+    }
+}
+
+- (void)finishConfigurationDraft:(BOOL)saved {
+    if (saved) {
+        [_configs release]; _configs=[[_configurationDraft objectForKey:@"configs"] mutableCopy];
+        [_subscriptions release]; _subscriptions=[[_configurationDraft objectForKey:@"subscriptions"] mutableCopy];
+        [VCProfiles() installPreparedMetadata:[_configurationDraft objectForKey:@"metadata"]];
+        _configurationRevision++; _metadataRevision++;
+    }
+    [_configurationDraft release]; _configurationDraft=nil;
+    _configurationCommitInProgress=NO;
+    _plusBtn.enabled=YES; _settingsBtn.enabled=YES; _refreshBtn.enabled=YES;
+    void (^completion)(BOOL)=_configurationDraftCompletion; _configurationDraftCompletion=NULL;
+    _applyingConfigurationDraft=saved;
+    if (completion) { completion(saved); Block_release(completion); }
+    if (saved) [self saveData];
+    else [self showStatus:@"Import was not saved; previous configurations are unchanged" ok:NO];
+    _applyingConfigurationDraft=NO;
 }
 
 - (NSArray *)subscriptionItemsAtIndex:(NSInteger)subIdx {

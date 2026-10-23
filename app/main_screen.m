@@ -328,6 +328,9 @@
     if (_configurationQueue) dispatch_release(_configurationQueue);
     [_pendingProfileMetadata release];
     [_deferredImportURL release];
+    [_configurationWriter release];
+    [_configurationDraft release];
+    if (_configurationDraftCompletion) Block_release(_configurationDraftCompletion);
     [[NSNotificationCenter defaultCenter] removeObserver:self];
     [NSObject cancelPreviousPerformRequestsWithTarget:self
                                              selector:@selector(startLaunchAutoUpdateIfNeeded)

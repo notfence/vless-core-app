@@ -229,14 +229,17 @@
     if (![updated isKindOfClass:[NSDictionary class]]) return;
 
     NSArray *uris = [updated objectForKey:@"items"];
+    NSMutableArray *draft=[NSMutableArray arrayWithArray:_subscriptions];
     NSInteger subIndex = existingIndex;
     if (existingIndex >= 0 && existingIndex < (NSInteger)[_subscriptions count]) {
-        [_subscriptions replaceObjectAtIndex:existingIndex withObject:updated];
+        [draft replaceObjectAtIndex:existingIndex withObject:updated];
     } else {
-        [_subscriptions addObject:updated];
-        subIndex = [_subscriptions count] - 1;
+        [draft addObject:updated];
+        subIndex = [draft count] - 1;
     }
 
+    [self commitConfigurations:_configs subscriptions:draft completion:^(BOOL saved) {
+    if (!saved) return;
     [self saveData];
     [self showProfileImportWarnings:@[updated]];
     VCRecordAppEvent(@"subscription",
@@ -251,6 +254,7 @@
                       verb,
                       (unsigned long)[uris count]]
                  ok:YES];
+    }];
 }
 
 - (NSString *)subscriptionImportCountText:(NSUInteger)count {
@@ -466,33 +470,46 @@
         }
 
         dispatch_async(dispatch_get_main_queue(), ^{
-            _launchAutoUpdateInProgress = NO;
-
+            NSMutableArray *draft=[NSMutableArray arrayWithArray:_subscriptions];
+            NSMutableDictionary *indices=[NSMutableDictionary dictionary];
+            for (NSUInteger i=0;i<[draft count];i++) {
+                NSString *url=[[draft objectAtIndex:i] objectForKey:@"url"];
+                if (url) [indices setObject:@(i) forKey:url];
+            }
             NSUInteger addedCount = 0;
             NSInteger lastAddedIndex = -1;
             BOOL savedPlainHTTPApproval = NO;
             for (NSDictionary *sub in importedSubs) {
                 NSString *urlString = [sub objectForKey:@"url"];
                 if (![urlString isKindOfClass:[NSString class]] || [urlString length] == 0) continue;
-                NSInteger existingIndex = [self existingSubscriptionIndexForURL:urlString];
+                NSNumber *existingNumber=[indices objectForKey:urlString];
+                NSInteger existingIndex=existingNumber ? [existingNumber integerValue] : -1;
                 if (existingIndex >= 0) {
-                    NSDictionary *existingSub = [_subscriptions objectAtIndex:existingIndex];
+                    NSDictionary *existingSub = [draft objectAtIndex:existingIndex];
                     if (SubscriptionDictionaryAllowsPlainHTTP(sub) &&
                         !SubscriptionDictionaryAllowsPlainHTTP(existingSub)) {
                         NSMutableDictionary *approved = [NSMutableDictionary dictionaryWithDictionary:existingSub];
                         [approved setObject:[NSNumber numberWithBool:YES]
                                     forKey:kSubscriptionAllowPlainHTTPKey];
-                        [_subscriptions replaceObjectAtIndex:existingIndex withObject:approved];
+                        [draft replaceObjectAtIndex:existingIndex withObject:approved];
                         savedPlainHTTPApproval = YES;
                     }
                     continue;
                 }
 
-                [_subscriptions addObject:sub];
+                [indices setObject:@([draft count]) forKey:urlString];
+                [draft addObject:sub];
                 addedCount++;
-                lastAddedIndex = [_subscriptions count] - 1;
+                lastAddedIndex = [draft count] - 1;
             }
 
+            void (^finishImport)(BOOL)=^(BOOL saved) {
+            _launchAutoUpdateInProgress=NO;
+            if (!saved) {
+                [importedSubs release]; [insecureURLs release]; [failureTexts release];
+                [failureCategories release]; [urlsToImport release]; [prefixPart release]; [fallbackSubscriptions release];
+                return;
+            }
             if (addedCount > 0 || savedPlainHTTPApproval) {
                 [self saveData];
                 [self showProfileImportWarnings:importedSubs];
@@ -567,6 +584,9 @@
             [urlsToImport release];
             [prefixPart release];
             [fallbackSubscriptions release];
+            };
+            if (addedCount > 0 || savedPlainHTTPApproval) [self commitConfigurations:_configs subscriptions:draft completion:finishImport];
+            else finishImport(YES);
         });
 
         [pool drain];
@@ -574,6 +594,7 @@
 }
 
 - (void)importDirectURI:(NSString *)uri {
+    if ([self configurationMutationBlocked]) { [self showStatus:@"Saving configurations; please wait" ok:NO]; return; }
     VCRecordAppEvent(@"import", @"Configuration import started", @"type=direct");
     NSString *normalizedURI = [self safeTrim:uri];
     if (![normalizedURI isKindOfClass:[NSString class]] || [normalizedURI length] == 0) {
@@ -607,7 +628,9 @@
                          name, @"name",
                          normalizedURI, @"uri",
                          nil];
-    [_configs addObject:cfg];
+    NSArray *draft=[_configs arrayByAddingObject:cfg];
+    [self commitConfigurations:draft subscriptions:_subscriptions completion:^(BOOL saved) {
+    if (!saved) return;
     VCRecordAppEvent(@"import", @"Configuration imported",
                      [NSString stringWithFormat:@"configs=%lu", (unsigned long)[_configs count]]);
 
@@ -619,6 +642,7 @@
     [self saveData];
     [_tableView reloadData];
     [self showStatus:@"Configuration imported" ok:YES];
+    }];
 }
 
 - (void)importSubscriptionURL:(NSString *)urlString

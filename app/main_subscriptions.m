@@ -372,6 +372,7 @@
     _pendingImportRefreshIndices = nil;
 
     NSArray *snapshot = [[NSArray alloc] initWithArray:_subscriptions copyItems:YES];
+    NSUInteger sourceRevision=_configurationRevision;
     NSMutableArray *refreshIndicesMutable = [NSMutableArray array];
     if ([requestedIndices count] > 0) {
         for (id idxObj in requestedIndices) {
@@ -440,11 +441,10 @@
         }
 
         dispatch_async(dispatch_get_main_queue(), ^{
-            [self setUpdatingSubscriptionIndex:-1];
-            _launchAutoUpdateInProgress = NO;
-            [self setSubscriptionRefreshInProgress:NO];
-
-            if (![self subscriptionsMatchSnapshotForLaunchAutoUpdate:snapshot]) {
+            if (sourceRevision != _configurationRevision || ![self subscriptionsMatchSnapshotForLaunchAutoUpdate:snapshot]) {
+                [self setUpdatingSubscriptionIndex:-1];
+                _launchAutoUpdateInProgress=NO;
+                [self setSubscriptionRefreshInProgress:NO];
                 VCRecordAppEvent(@"subscription", @"Subscription update batch discarded",
                                  @"reason=list_changed_during_update");
                 [self showStatus:@"Auto-update skipped: subscriptions changed" ok:YES];
@@ -460,8 +460,15 @@
                 return;
             }
 
-            [_subscriptions removeAllObjects];
-            [_subscriptions addObjectsFromArray:updatedSubs];
+            [self commitConfigurations:_configs subscriptions:updatedSubs completion:^(BOOL saved) {
+            [self setUpdatingSubscriptionIndex:-1];
+            _launchAutoUpdateInProgress=NO;
+            [self setSubscriptionRefreshInProgress:NO];
+            if (!saved) {
+                [failureTexts release]; [failureCategories release]; [updatedSubs release]; [refreshIndices release]; [snapshot release];
+                [_pendingImportDoneStatus release]; _pendingImportDoneStatus=nil;
+                return;
+            }
             [self showProfileImportWarnings:updatedSubs];
 
             [self normalizeSelection];
@@ -497,6 +504,7 @@
             [updatedSubs release];
             [refreshIndices release];
             [snapshot release];
+            }];
         });
 
         [pool drain];
@@ -657,6 +665,7 @@
     }
 
     NSDictionary *snapshot = [[_subscriptions objectAtIndex:index] copy];
+    NSUInteger sourceRevision=_configurationRevision;
     NSString *expectedURL = [[snapshot objectForKey:@"url"] copy];
     SubscriptionInfoVC *infoVC = [vc retain];
     _launchAutoUpdateInProgress = YES;
@@ -671,17 +680,16 @@
         NSString *copiedError = [errorText copy];
 
         dispatch_async(dispatch_get_main_queue(), ^{
-            [self setUpdatingSubscriptionIndex:-1];
-            _launchAutoUpdateInProgress = NO;
-            [self setSubscriptionRefreshInProgress:NO];
-
             BOOL stillExists = (index >= 0 && index < (NSInteger)[_subscriptions count]);
             NSString *currentURL = stillExists ? [[_subscriptions objectAtIndex:index] objectForKey:@"url"] : nil;
-            BOOL unchanged = stillExists && [expectedURL isKindOfClass:[NSString class]] &&
+            BOOL unchanged = sourceRevision == _configurationRevision && stillExists && [expectedURL isKindOfClass:[NSString class]] &&
                              [currentURL isKindOfClass:[NSString class]] && [currentURL isEqualToString:expectedURL];
 
-            if (updated && unchanged) {
-                [_subscriptions replaceObjectAtIndex:index withObject:updated];
+            void (^finishRefresh)(BOOL)=^(BOOL saved) {
+            [self setUpdatingSubscriptionIndex:-1];
+            _launchAutoUpdateInProgress=NO;
+            [self setSubscriptionRefreshInProgress:NO];
+            if (updated && unchanged && saved) {
                 [self showProfileImportWarnings:@[updated]];
                 [self normalizeSelection];
                 [self saveData];
@@ -694,6 +702,7 @@
             } else {
                 NSString *message = copiedError;
                 if (!unchanged) message = @"Subscription changed while it was updating";
+                else if (updated && !saved) message=@"Subscription was not saved; previous configurations are unchanged";
                 if (![message isKindOfClass:[NSString class]] || [message length] == 0) {
                     message = @"Subscription update failed";
                 }
@@ -706,12 +715,19 @@
             [expectedURL release];
             [snapshot release];
             [infoVC release];
+            };
+            if (updated && unchanged) {
+                NSMutableArray *draft=[NSMutableArray arrayWithArray:_subscriptions];
+                [draft replaceObjectAtIndex:index withObject:updated];
+                [self commitConfigurations:_configs subscriptions:draft completion:finishRefresh];
+            } else finishRefresh(NO);
         });
         [pool drain];
     });
 }
 
 - (void)subscriptionInfoVC:(SubscriptionInfoVC *)vc requestedRenameTo:(NSString *)name atIndex:(NSInteger)index {
+    if ([self configurationMutationBlocked]) return;
     if (index < 0 || index >= (NSInteger)[_subscriptions count]) return;
 
     NSString *trimmed = [name stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
@@ -730,6 +746,7 @@
 }
 
 - (BOOL)deleteSubscriptionAtIndex:(NSInteger)subIdx {
+    if ([self configurationMutationBlocked]) return NO;
     if (subIdx < 0 || subIdx >= (NSInteger)[_subscriptions count]) return NO;
     [_subscriptions removeObjectAtIndex:subIdx];
     VCRecordAppEvent(@"subscription", @"Subscription deleted",

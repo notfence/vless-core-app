@@ -10,6 +10,21 @@ typedef struct {
     NSString *(*sendCommand)(NSString *);
     BOOL (*protectFile)(NSString *);
 } VCStoragePaths;
+
+@interface VCConfigurationStoreWriter : NSObject {
+    VCStoragePaths _paths;
+    NSCondition *_condition;
+    NSOperationQueue *_queue;
+    NSDictionary *_pendingRequest;
+    BOOL _running;
+    BOOL _active;
+    unsigned long long _latestRevision;
+}
+- (id)initWithPaths:(const VCStoragePaths *)paths;
+- (BOOL)enqueueConfigurations:(NSArray *)configs subscriptions:(NSArray *)subscriptions revision:(unsigned long long)revision target:(id)target selector:(SEL)selector context:(id)context;
+- (NSUInteger)bufferedSnapshotCount;
+- (BOOL)isIdle;
+@end
 typedef struct {
     NSArray *configs;
     NSArray *subscriptions;

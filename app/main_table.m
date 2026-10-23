@@ -52,6 +52,7 @@
 }
 
 - (BOOL)tableView:(UITableView *)tableView canEditRowAtIndexPath:(NSIndexPath *)indexPath {
+    if ([self configurationMutationBlocked]) return NO;
     (void)tableView;
     if (_reorderingSection >= 0) {
         return indexPath.section == _reorderingSection;
@@ -121,6 +122,7 @@ targetIndexPathForMoveFromRowAtIndexPath:(NSIndexPath *)sourceIndexPath
 - (void)tableView:(UITableView *)tableView
 moveRowAtIndexPath:(NSIndexPath *)sourceIndexPath
        toIndexPath:(NSIndexPath *)destinationIndexPath {
+    if ([self configurationMutationBlocked]) return;
     (void)tableView;
     if (_reorderingSection < 0 ||
         sourceIndexPath.section != _reorderingSection ||
@@ -143,6 +145,7 @@ moveRowAtIndexPath:(NSIndexPath *)sourceIndexPath
 }
 
 - (void)tableView:(UITableView *)tableView commitEditingStyle:(UITableViewCellEditingStyle)editingStyle forRowAtIndexPath:(NSIndexPath *)indexPath {
+    if ([self configurationMutationBlocked]) return;
     if (editingStyle != UITableViewCellEditingStyleDelete) return;
 
     if (indexPath.section == 0) {

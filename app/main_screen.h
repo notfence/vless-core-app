@@ -54,6 +54,15 @@
     NSUInteger _metadataRevision;
     NSMutableDictionary *_pendingProfileMetadata;
     NSURL *_deferredImportURL;
+    VCConfigurationStoreWriter *_configurationWriter;
+    unsigned long long _storeSequence;
+    NSUInteger _configurationRevision;
+    NSUInteger _configurationDraftToken;
+    BOOL _configurationCommitInProgress;
+    BOOL _applyingConfigurationDraft;
+    NSDictionary *_configurationDraft;
+    void (^_configurationDraftCompletion)(BOOL);
+    UIBackgroundTaskIdentifier _configurationBackgroundTask;
     NSMutableDictionary *_pingDisplayByURI;
     NSString *_pingNetworkSignature;
     NSTimer *_pingNetworkTimer;
@@ -157,6 +166,11 @@
 - (void)completeConfigurationLoad:(NSDictionary *)loaded;
 - (void)prepareProfileMetadata;
 - (void)profileMetadataPrepared:(NSDictionary *)metadata;
+- (void)configurationStoreFinished:(NSDictionary *)result;
+- (void)commitConfigurations:(NSArray *)configs subscriptions:(NSArray *)subscriptions completion:(void (^)(BOOL))completion;
+- (void)finishConfigurationDraft:(BOOL)saved;
+- (BOOL)configurationMutationBlocked;
+- (void)keepConfigurationWriteAlive;
 - (NSArray *)subscriptionItemsAtIndex:(NSInteger)subIdx;
 - (NSInteger)subscriptionRowsExpandedIndex;
 - (NSInteger)subscriptionHeaderExpandedIndex;

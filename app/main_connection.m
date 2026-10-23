@@ -241,7 +241,7 @@
 }
 
 - (BOOL)isConnectionActionInProgress {
-    if (_configurationLoading) return YES;
+    if ([self configurationMutationBlocked]) return YES;
     return VCConnectionActionInProgress(_connectionActionInProgress, _reconnectInProgress, [_pendingReconnectURI length] > 0);
 }
 

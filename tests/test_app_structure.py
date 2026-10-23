@@ -59,7 +59,7 @@ def main():
         raise AssertionError('app/power-spinner-must-only-follow-network-operations-not-store-loading')
     connection = (ROOT / 'app/main_connection.m').read_text()
     action = connection.split('- (BOOL)isConnectionActionInProgress {', 1)[1].split('\n}', 1)[0]
-    if 'if (_configurationLoading) return YES;' not in action:
+    if 'if ([self configurationMutationBlocked]) return YES;' not in action:
         raise AssertionError('app/store-loading-and-commit-must-still-block-connection-actions')
     initial_status = connection.split('- (void)queryInitialStatus {', 1)[1].split('\n}', 1)[0]
     if 'generation != _connectionActionGeneration || VCConnectionActionInProgress(_connectionActionInProgress, _reconnectInProgress, [_pendingReconnectURI length] > 0)' not in initial_status or '[self isConnectionActionInProgress]' in initial_status:
@@ -68,6 +68,8 @@ def main():
     save = state.split('- (void)saveData {', 1)[1].split('\n}', 1)[0]
     if 'prepareMetadataForConfigurations:' in save:
         raise AssertionError('app/save-must-not-reparse-all-profiles-on-main')
+    if 'VCSaveProtectedConfigurationData(' in save or 'enqueueConfigurations:' not in save:
+        raise AssertionError('app/save-must-use-background-writer')
     load = state.split('- (void)loadData {', 1)[1].split('\n}', 1)[0]
     if 'dispatch_async(_configurationQueue' not in load or load.index('dispatch_async(_configurationQueue') > load.index('VCLoadProtectedConfigurationData'):
         raise AssertionError('app/configuration-load-must-run-in-background')
@@ -76,6 +78,9 @@ def main():
         raise AssertionError('app/load-completion-must-only-apply-prepared-state')
     if '(_connected ? @"Connected" : @"Ready")' not in completion:
         raise AssertionError('app/load-completion-must-preserve-already-restored-vpn-status')
+    applied = state.split('- (void)finishConfigurationDraft:', 1)[1].split('\n}', 1)[0]
+    if applied.index('if (saved)') > applied.index('[_configs release]') or 'installPreparedMetadata:' not in applied:
+        raise AssertionError('app/import-must-only-apply-after-successful-save')
     runtime = (ROOT / 'app/runtime_info.m').read_text()
     core_version = runtime.split('NSString *DetectCoreBinaryVersion(void) {', 1)[1].split('\n}', 1)[0]
     if 'return v;' not in core_version or 'substring' in core_version or 'componentsSeparated' in core_version:

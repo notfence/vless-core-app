@@ -9,6 +9,78 @@
 #include <unistd.h>
 #include <sys/stat.h>
 
+@implementation VCConfigurationStoreWriter
+
+- (id)initWithPaths:(const VCStoragePaths *)paths {
+    if ((self=[super init])) {
+        _paths=*paths;
+        _paths.directory=[paths->directory copy];
+        _paths.file=[paths->file copy];
+        _paths.database=[paths->database copy];
+        _condition=[[NSCondition alloc] init];
+        _queue=[[NSOperationQueue alloc] init];
+        [_queue setMaxConcurrentOperationCount:1];
+    }
+    return self;
+}
+
+- (void)dealloc {
+    [_queue release]; [_condition release]; [_pendingRequest release];
+    [_paths.directory release]; [_paths.file release]; [_paths.database release];
+    [super dealloc];
+}
+
+- (BOOL)enqueueConfigurations:(NSArray *)configs subscriptions:(NSArray *)subscriptions revision:(unsigned long long)revision target:(id)target selector:(SEL)selector context:(id)context {
+    NSArray *configSnapshot=[configs copy],*subscriptionSnapshot=[subscriptions copy];
+    NSDictionary *request=[[NSDictionary alloc] initWithObjectsAndKeys:configSnapshot ?: @[],@"configs",subscriptionSnapshot ?: @[],@"subscriptions",@(revision),@"revision",target,@"target",NSStringFromSelector(selector),@"selector",context ?: [NSNull null],@"context",nil];
+    [configSnapshot release]; [subscriptionSnapshot release];
+    [_condition lock];
+    if (revision <= _latestRevision) { [_condition unlock]; [request release]; return NO; }
+    _latestRevision=revision;
+    NSDictionary *previous=_pendingRequest;
+    _pendingRequest=request;
+    BOOL start=!_running; _running=YES;
+    [_condition unlock];
+    [previous release];
+    if (start) {
+        NSInvocationOperation *operation=[[NSInvocationOperation alloc] initWithTarget:self selector:@selector(drainWrites) object:nil];
+        [_queue addOperation:operation]; [operation release];
+    }
+    return YES;
+}
+
+- (void)drainWrites {
+    for (;;) {
+        NSAutoreleasePool *pool=[[NSAutoreleasePool alloc] init];
+        [_condition lock];
+        NSDictionary *request=_pendingRequest; _pendingRequest=nil;
+        _active=request != nil;
+        if (!request) _running=NO;
+        [_condition unlock];
+        if (!request) { [pool drain]; return; }
+        BOOL saved=VCSaveProtectedConfigurationDataAtPaths([request objectForKey:@"configs"],[request objectForKey:@"subscriptions"],&_paths);
+        [_condition lock];
+        _active=NO;
+        BOOL idle=_pendingRequest == nil;
+        if (idle) _running=NO;
+        [_condition unlock];
+        NSDictionary *result=@{@"saved":@(saved),@"revision":[request objectForKey:@"revision"],@"context":[request objectForKey:@"context"],@"idle":@(idle)};
+        [[request objectForKey:@"target"] performSelectorOnMainThread:NSSelectorFromString([request objectForKey:@"selector"]) withObject:result waitUntilDone:NO];
+        [request release]; [pool drain];
+        if (idle) return;
+    }
+}
+
+- (NSUInteger)bufferedSnapshotCount {
+    [_condition lock]; NSUInteger count=(_active ? 1 : 0)+(_pendingRequest ? 1 : 0); [_condition unlock]; return count;
+}
+
+- (BOOL)isIdle {
+    [_condition lock]; BOOL idle=!_running; [_condition unlock]; return idle;
+}
+
+@end
+
 VCConfigurationDataSelection VCInitialConfigurationData(NSDictionary *protectedData, BOOL secureFileExists, id legacyConfigs, id legacySubscriptions, BOOL writable) {
     NSArray *cfg = [protectedData objectForKey:@"configs"];
     NSArray *subs = [protectedData objectForKey:@"subscriptions"];
