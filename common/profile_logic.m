@@ -334,10 +334,52 @@ static NSDictionary *VCProfileSSMetadata(NSString *uri) {
     return [@[@"vless",@"socks5",@"trojan",@"vmess",@"ss"] containsObject:[self schemeFromURIString:uri]] && [uri rangeOfString:@"://"].location != NSNotFound;
 }
 
+- (NSDictionary *)queryFieldsForURI:(NSString *)uri reason:(NSString **)reason {
+    if (reason) *reason=nil;
+    if (![uri isKindOfClass:[NSString class]] || ![uri length]) {
+        if (reason) *reason=@"empty configuration URI";
+        return nil;
+    }
+    NSUInteger bytes=[uri lengthOfBytesUsingEncoding:NSUTF8StringEncoding];
+    if (!bytes || bytes > kVCMaximumConfigURIBytes) {
+        if (reason) *reason=@"configuration URI is too long";
+        return nil;
+    }
+    NSString *scheme=[self schemeFromURIString:uri];
+    BOOL strict=[@[@"vless",@"trojan",@"vmess",@"ss"] containsObject:scheme];
+    NSRange question=[uri rangeOfString:@"?"],fragment=[uri rangeOfString:@"#"];
+    NSUInteger end=fragment.location == NSNotFound ? [uri length] : fragment.location;
+    if (question.location == NSNotFound || question.location >= end || question.location+1 == end) return @{};
+    NSArray *pairs=[[uri substringWithRange:NSMakeRange(question.location+1,end-question.location-1)] componentsSeparatedByString:@"&"];
+    if (strict && [pairs count] > kVCMaximumConfigQueryParameters) {
+        if (reason) *reason=@"too many query parameters";
+        return nil;
+    }
+    NSMutableDictionary *fields=[NSMutableDictionary dictionary];
+    NSMutableSet *seen=[NSMutableSet set];
+    for (NSString *pair in pairs) {
+        NSRange equals=[pair rangeOfString:@"="];
+        NSString *error=nil;
+        if (strict && (equals.location == NSNotFound || equals.location == 0)) error=@"invalid query parameter";
+        NSString *key=[self canonicalConfigQueryKey:equals.location == NSNotFound ? pair : [pair substringToIndex:equals.location]];
+        NSString *raw=equals.location == NSNotFound ? @"" : [pair substringFromIndex:equals.location+1];
+        if (strict && ![key length]) error=error ?: @"invalid query parameter name";
+        if (strict && [seen containsObject:key ?: @""]) error=error ?: @"duplicate query parameter";
+        NSString *value=[self strictDecodedConfigQueryComponent:raw];
+        if (strict && [scheme isEqual:@"trojan"] && [key isEqual:@"security"] && ![raw length]) error=error ?: @"invalid Trojan security";
+        if (strict && !value) error=error ?: @"invalid query parameter encoding";
+        if (error) { if (reason) *reason=error; return nil; }
+        if (key) [seen addObject:key];
+        if ([key length] && [value length] && ![fields objectForKey:key]) [fields setObject:value forKey:key];
+    }
+    return fields;
+}
+
 - (NSDictionary *)uncachedMetadataForURI:(NSString *)uri {
     NSString *scheme=[self schemeFromURIString:uri];
     NSMutableDictionary *result=[NSMutableDictionary dictionaryWithObject:scheme forKey:@"protocol"];
-    NSString *reason=[self configURIQueryValidationReason:uri];
+    NSString *reason=nil;
+    NSDictionary *fields=[self queryFieldsForURI:uri reason:&reason];
     if (!reason && ![self isConfigurationURI:uri]) reason=@"unsupported protocol";
     NSRange prefix=[uri rangeOfString:@"://"];
     NSString *host=nil; uint16_t port=0;
@@ -384,29 +426,29 @@ static NSDictionary *VCProfileSSMetadata(NSString *uri) {
         if (!reason && !VCProfileEndpoint(authority,[scheme isEqual:@"socks5"] ? 1080 : 0,&host,&port)) reason=@"invalid server address or port";
     } else if (!reason) reason=@"invalid configuration URI";
     if (host) { [result setObject:host forKey:@"host"]; [result setObject:@(port) forKey:@"port"]; }
-    NSString *transport=vmess ? [vmess objectForKey:@"transport"] : [self queryValueForURLString:uri key:@"type"];
+    NSString *transport=vmess ? [vmess objectForKey:@"transport"] : [fields objectForKey:@"transport"];
     transport=VCProfileText(transport) ? [transport lowercaseString] : @"";
     if (![transport length] || [transport isEqual:@"raw"] || [scheme isEqual:@"socks5"]) transport=@"tcp";
     if ([transport isEqual:@"websocket"]) transport=@"ws";
     if ([transport isEqual:@"splithttp"]) transport=@"xhttp";
-    NSString *security=vmess ? [vmess objectForKey:@"security"] : [self queryValueForURLString:uri key:@"security"];
+    NSString *security=vmess ? [vmess objectForKey:@"security"] : [fields objectForKey:@"security"];
     security=VCProfileText(security) ? [security lowercaseString] : @"";
     if (![security length]) security=[scheme isEqual:@"trojan"] ? @"tls" : @"none";
     if (!reason && ![@[@"tcp",@"ws",@"grpc",@"xhttp"] containsObject:transport]) reason=@"unsupported transport";
     if (!reason && ![@[@"none",@"tls",@"reality"] containsObject:security]) reason=@"unsupported security";
     if (!reason && [scheme isEqual:@"socks5"] && ![security isEqual:@"none"]) reason=@"SOCKS5 supports only security=none";
     if (!reason && [transport isEqual:@"ws"] && [security isEqual:@"reality"]) reason=@"WebSocket does not support REALITY";
-    NSString *flow=vmess ? [vmess objectForKey:@"flow"] : [self queryValueForURLString:uri key:@"flow"];
+    NSString *flow=vmess ? [vmess objectForKey:@"flow"] : [fields objectForKey:@"flow"];
     if (!VCProfileText(flow)) flow=nil;
     if (!reason && [flow length] && ![flow isEqual:@"xtls-rprx-vision"]) reason=@"unsupported flow";
-    NSString *encryption=vmess ? [vmess objectForKey:@"encryption"] : [self queryValueForURLString:uri key:@"encryption"];
+    NSString *encryption=vmess ? [vmess objectForKey:@"encryption"] : [fields objectForKey:@"encryption"];
     if ([scheme isEqual:@"vmess"]) {
-        id cipher=vmess ? [vmess objectForKey:@"encryption"] : encryption ?: [self queryValueForURLString:uri key:@"scy"];
+        id cipher=vmess ? [vmess objectForKey:@"encryption"] : encryption ?: [fields objectForKey:@"scy"];
         if (!cipher) cipher=@"auto";
         if (!reason && (!VCProfileVMessCipher(cipher) || [flow length])) reason=@"unsupported VMess encryption or flow";
-        if (!reason && !vmess && encryption && [self queryValueForURLString:uri key:@"scy"] && ![encryption isEqual:[self queryValueForURLString:uri key:@"scy"]]) reason=@"conflicting VMess encryption aliases";
+        if (!reason && !vmess && encryption && [fields objectForKey:@"scy"] && ![encryption isEqual:[fields objectForKey:@"scy"]]) reason=@"conflicting VMess encryption aliases";
         for (NSString *key in @[@"aid",@"alterId"]) {
-            NSString *value=vmess ? nil : [self queryValueForURLString:uri key:key]; unsigned number;
+            NSString *value=vmess ? nil : [fields objectForKey:[self canonicalConfigQueryKey:key]]; unsigned number;
             if (value && !VCProfileUnsignedScalar(value,0,&number)) reason=@"unsupported VMess alterId";
         }
         if (VCProfileVMessCipher(cipher)) [result setObject:cipher forKey:@"method"];
@@ -414,23 +456,23 @@ static NSDictionary *VCProfileSSMetadata(NSString *uri) {
     }
     if (!reason && [scheme isEqual:@"trojan"] && ([flow length] || ([encryption length] && ![encryption isEqual:@"none"]))) reason=@"Trojan does not support flow or VLESS Encryption";
     if (!reason && [scheme isEqual:@"ss"]) {
-        if ([flow length] || ([encryption length] && ![[encryption lowercaseString] isEqual:@"none"]) || [[self queryValueForURLString:uri key:@"plugin"] length]) reason=@"unsupported Shadowsocks flow, encryption or plugin";
+        if ([flow length] || ([encryption length] && ![[encryption lowercaseString] isEqual:@"none"]) || [[fields objectForKey:@"plugin"] length]) reason=@"unsupported Shadowsocks flow, encryption or plugin";
         for (NSString *field in @[@"method",@"password",@"scy",@"aid",@"alterid",@"mux",@"uot",@"udp",@"packetencoding",@"obfs",@"headertype",@"cert",@"ca",@"pinsha256",@"pinnedpeercertificatesha256",@"pinnedpeercertificatespkisha256",@"verifycert",@"peer",@"vcn",@"pcs"])
-            if ([self queryValueForURLString:uri key:field]) { reason=@"unsupported Shadowsocks query field"; break; }
+            if ([fields objectForKey:field]) { reason=@"unsupported Shadowsocks query field"; break; }
     }
     if (!reason && [flow length] && [transport isEqual:@"tcp"] && [security isEqual:@"none"] && (![encryption length] || [encryption isEqual:@"none"])) reason=@"Vision requires TLS, REALITY or VLESS Encryption";
-    NSString *fp=vmess ? [vmess objectForKey:@"fp"] : [self queryValueForURLString:uri key:@"fp"];
+    NSString *fp=vmess ? [vmess objectForKey:@"fp"] : [fields objectForKey:@"fp"];
     fp=VCProfileText(fp) ? [fp lowercaseString] : @"";
     if (![fp length]) fp=@"chrome";
     if (!reason && ![security isEqual:@"none"] && ![self isSupportedRealityFingerprint:fp]) reason=@"unsupported fp";
-    NSString *mode=vmess ? [vmess objectForKey:@"mode"] : [self queryValueForURLString:uri key:@"mode"];
+    NSString *mode=vmess ? [vmess objectForKey:@"mode"] : [fields objectForKey:@"mode"];
     if (mode && !VCProfileText(mode)) reason=@"invalid transport mode";
     mode=VCProfileText(mode) ? [mode lowercaseString] : nil;
     if (!reason && [mode length] && [transport isEqual:@"xhttp"] && ![@[@"auto",@"packet-up",@"stream-up",@"stream-one"] containsObject:mode]) reason=@"unsupported XHTTP mode";
     if (!reason && [mode length] && [transport isEqual:@"grpc"] && ![@[@"auto",@"gun",@"multi"] containsObject:mode]) reason=@"unsupported gRPC mode";
     if (!reason && [transport isEqual:@"ws"]) {
-        NSString *wsHost=vmess ? [vmess objectForKey:@"host"] : [self queryValueForURLString:uri key:@"host"];
-        if (![wsHost length] && ![security isEqual:@"none"]) wsHost=vmess ? [vmess objectForKey:@"sni"] : [self queryValueForURLString:uri key:@"sni"];
+        NSString *wsHost=vmess ? [vmess objectForKey:@"host"] : [fields objectForKey:@"host"];
+        if (![wsHost length] && ![security isEqual:@"none"]) wsHost=vmess ? [vmess objectForKey:@"sni"] : [fields objectForKey:@"sni"];
         if (![wsHost length]) wsHost=host;
         if (!VCProfileHost(wsHost) && !VCProfileEndpoint(wsHost,443,NULL,NULL)) reason=@"invalid WebSocket host";
     }
@@ -744,6 +786,10 @@ static NSDictionary *VCProfileSSMetadata(NSString *uri) {
     }
 
     NSDictionary *importReport=[self subscriptionImportReportFromData:data];
+    if ([importReport objectForKey:@"error"]) {
+        if (errorTextOut) *errorTextOut=[importReport objectForKey:@"error"];
+        return nil;
+    }
     NSArray *uris = [importReport objectForKey:@"uris"];
     if ([uris count] == 0) {
         if (errorTextOut) {
@@ -879,56 +925,9 @@ static NSDictionary *VCProfileSSMetadata(NSString *uri) {
 }
 
 - (NSString *)configURIQueryValidationReason:(NSString *)uri {
-    if (![uri isKindOfClass:[NSString class]] || [uri length] == 0) {
-        return @"empty configuration URI";
-    }
-
-    NSData *uriBytes = [uri dataUsingEncoding:NSUTF8StringEncoding];
-    if (!uriBytes || [uriBytes length] > kVCMaximumConfigURIBytes) {
-        return @"configuration URI is too long";
-    }
-    if (![@[@"vless",@"trojan",@"vmess",@"ss"] containsObject:[self schemeFromURIString:uri]]) return nil;
-
-    NSRange question = [uri rangeOfString:@"?"];
-    NSRange fragment = [uri rangeOfString:@"#"];
-    if (question.location == NSNotFound ||
-        (fragment.location != NSNotFound && question.location > fragment.location) ||
-        question.location + 1 >= [uri length]) {
-        return nil;
-    }
-    NSUInteger queryEnd = fragment.location == NSNotFound ? [uri length] : fragment.location;
-    NSString *query = [uri substringWithRange:NSMakeRange(question.location + 1,
-                                                           queryEnd - question.location - 1)];
-    if ([query length] == 0) return nil;
-
-    NSArray *pairs = [query componentsSeparatedByString:@"&"];
-    if ([pairs count] > kVCMaximumConfigQueryParameters) return @"too many query parameters";
-
-    NSMutableSet *seen = [NSMutableSet setWithCapacity:[pairs count]];
-    for (id object in pairs) {
-        if (![object isKindOfClass:[NSString class]] || [(NSString *)object length] == 0) {
-            return @"invalid query parameter";
-        }
-        NSString *pair = (NSString *)object;
-        NSRange equals = [pair rangeOfString:@"="];
-        if (equals.location == NSNotFound || equals.location == 0) {
-            return @"invalid query parameter";
-        }
-
-        NSString *key = [self canonicalConfigQueryKey:[pair substringToIndex:equals.location]];
-        if (![key isKindOfClass:[NSString class]] || [key length] == 0) {
-            return @"invalid query parameter name";
-        }
-        if ([seen containsObject:key]) return @"duplicate query parameter";
-        [seen addObject:key];
-
-        NSString *value = [pair substringFromIndex:(equals.location + 1)];
-        if ([[self schemeFromURIString:uri] isEqual:@"trojan"] && [key isEqual:@"security"] && ![value length]) return @"invalid Trojan security";
-        if (![self strictDecodedConfigQueryComponent:value]) {
-            return @"invalid query parameter encoding";
-        }
-    }
-    return nil;
+    NSString *reason=nil;
+    [self queryFieldsForURI:uri reason:&reason];
+    return reason;
 }
 
 - (NSString *)queryValueForURLString:(NSString *)urlString key:(NSString *)key {
@@ -989,46 +988,34 @@ static NSDictionary *VCProfileSSMetadata(NSString *uri) {
 
 - (NSArray *)extractConfigURIsFromText:(NSString *)text {
     if (!text || [text length] == 0) return [NSArray array];
-
-    NSMutableArray *out = [NSMutableArray array];
-    NSMutableArray *fallbackLines = [NSMutableArray array];
-    NSArray *lines = [text componentsSeparatedByCharactersInSet:[NSCharacterSet newlineCharacterSet]];
-    for (NSString *line in lines) {
-        NSString *trimmed = [self safeTrim:line];
-        if ([self isConfigurationURI:trimmed]) {
-            if (![out containsObject:trimmed]) {
-                [out addObject:trimmed];
+    NSMutableArray *out=[NSMutableArray array];
+    NSMutableSet *seen=[NSMutableSet set];
+    NSRegularExpression *expression=[NSRegularExpression regularExpressionWithPattern:@"(?:vless://|socks5://|trojan://|vmess://|ss://)[^\\s\"'<>]+" options:NSRegularExpressionCaseInsensitive error:NULL];
+    for (NSUInteger pass=0;pass<2;pass++) {
+        NSUInteger cursor=0;
+        while (cursor < [text length]) {
+            NSAutoreleasePool *pool=[[NSAutoreleasePool alloc] init];
+            NSUInteger end=0,contentsEnd=0;
+            [text getLineStart:NULL end:&end contentsEnd:&contentsEnd forRange:NSMakeRange(cursor,0)];
+            NSString *line=[text substringWithRange:NSMakeRange(cursor,contentsEnd-cursor)];
+            NSString *trimmed=[self safeTrim:line];
+            BOOL direct=[self isConfigurationURI:trimmed];
+            if (pass == 0 && direct && ![seen containsObject:trimmed]) {
+                [seen addObject:trimmed]; [out addObject:trimmed];
+            } else if (pass == 1 && !direct) {
+                NSUInteger position=0;
+                while (position < [line length]) {
+                    NSAutoreleasePool *matchPool=[[NSAutoreleasePool alloc] init];
+                    NSTextCheckingResult *match=[expression firstMatchInString:line options:0 range:NSMakeRange(position,[line length]-position)];
+                    if (!match || !match.range.length) { [matchPool drain]; break; }
+                    position=NSMaxRange(match.range);
+                    NSString *uri=[line substringWithRange:match.range];
+                    while ([uri length] > 1 && ([uri hasSuffix:@","] || [uri hasSuffix:@";"] || [uri hasSuffix:@")"] || [uri hasSuffix:@"]"])) uri=[uri substringToIndex:[uri length]-1];
+                    if ([self isConfigurationURI:uri] && ![seen containsObject:uri]) { [seen addObject:uri]; [out addObject:uri]; }
+                    [matchPool drain];
+                }
             }
-        } else if ([line length] > 0) {
-            [fallbackLines addObject:line];
-        }
-    }
-
-    NSString *fallbackText = [fallbackLines componentsJoinedByString:@"\n"];
-    if ([fallbackText length] == 0) return out;
-
-    NSError *reErr = nil;
-    NSRegularExpression *re = [NSRegularExpression regularExpressionWithPattern:@"(?:vless://|socks5://|trojan://|vmess://|ss://)[^\\s\"'<>]+"
-                                                                         options:NSRegularExpressionCaseInsensitive
-                                                                           error:&reErr];
-    if (!re || reErr) {
-        return out;
-    }
-
-    NSArray *matches = [re matchesInString:fallbackText options:0 range:NSMakeRange(0, [fallbackText length])];
-    for (NSTextCheckingResult *m in matches) {
-        if (m.range.location == NSNotFound || m.range.length == 0) continue;
-        NSString *uri = [fallbackText substringWithRange:m.range];
-
-        while ([uri hasSuffix:@","] || [uri hasSuffix:@";"] || [uri hasSuffix:@")"] || [uri hasSuffix:@"]"]) {
-            if ([uri length] <= 1) break;
-            uri = [uri substringToIndex:([uri length] - 1)];
-        }
-
-        if ([uri length] == 0) continue;
-        if (![self isConfigurationURI:uri]) continue;
-        if (![out containsObject:uri]) {
-            [out addObject:uri];
+            cursor=end; [pool drain];
         }
     }
     return out;
@@ -1047,11 +1034,15 @@ static NSDictionary *VCProfileSSMetadata(NSString *uri) {
         return [NSArray array];
     }
 
-    NSArray *matches = [re matchesInString:text options:0 range:NSMakeRange(0, [text length])];
     NSMutableArray *out = [NSMutableArray array];
+    NSMutableSet *seen = [NSMutableSet set];
     NSCharacterSet *trailSet = [NSCharacterSet characterSetWithCharactersInString:@",;)]}>\"'"];
-    for (NSTextCheckingResult *m in matches) {
-        if (m.range.location == NSNotFound || m.range.length == 0) continue;
+    NSUInteger cursor=0;
+    while (cursor < [text length]) {
+        NSAutoreleasePool *pool=[[NSAutoreleasePool alloc] init];
+        NSTextCheckingResult *m=[re firstMatchInString:text options:0 range:NSMakeRange(cursor,[text length]-cursor)];
+        if (!m || !m.range.length) { [pool drain]; break; }
+        cursor=NSMaxRange(m.range);
         NSString *link = [text substringWithRange:m.range];
         link = [self safeTrim:link];
         while ([link length] > 0) {
@@ -1059,7 +1050,7 @@ static NSDictionary *VCProfileSSMetadata(NSString *uri) {
             if (![trailSet characterIsMember:c]) break;
             link = [link substringToIndex:([link length] - 1)];
         }
-        if ([link length] == 0) continue;
+        if ([link length] == 0) { [pool drain]; continue; }
 
         NSString *lower = [link lowercaseString];
         if (![self isConfigurationURI:link] &&
@@ -1068,18 +1059,21 @@ static NSDictionary *VCProfileSSMetadata(NSString *uri) {
             ![lower hasPrefix:@"happ://crypt5/"] &&
             ![lower hasPrefix:@"http://"] &&
             ![lower hasPrefix:@"https://"]) {
-            continue;
+            [pool drain]; continue;
         }
 
-        if (![out containsObject:link]) {
-            [out addObject:link];
+        if (![seen containsObject:link]) {
+            [seen addObject:link]; [out addObject:link];
         }
+        [pool drain];
     }
     return out;
 }
 
 - (NSDictionary *)importReportFromHappJSONData:(NSData *)data {
+    if ([data length] > kVCMaximumSubscriptionBytes) return @{@"uris":@[],@"skipped":@0,@"issues":@[],@"error":@"Subscription response exceeds 32 MiB"};
     NSMutableArray *uris=[NSMutableArray array],*issues=[NSMutableArray array];
+    NSMutableSet *seen=[NSMutableSet set];
     NSUInteger skipped=0;
     id root=data ? [NSJSONSerialization JSONObjectWithData:data options:0 error:NULL] : nil;
     NSArray *configs=[self happJSONArrayValue:root];
@@ -1088,11 +1082,13 @@ static NSDictionary *VCProfileSSMetadata(NSString *uri) {
         if (!configs && [root objectForKey:@"outbounds"]) configs=@[root];
     }
     for (id value in configs) {
+        NSAutoreleasePool *pool=[[NSAutoreleasePool alloc] init];
         NSString *uri=[self URIFromHappJSONConfig:[self happJSONDictionaryValue:value]];
         if (![uri length]) {
             skipped++;
             if ([issues count] < 16) [issues addObject:@"configs[]: invalid or unsupported profile settings"];
-        } else if (![uris containsObject:uri]) [uris addObject:uri];
+        } else if (![seen containsObject:uri]) { [seen addObject:uri]; [uris addObject:uri]; }
+        [pool drain];
     }
     return @{@"uris":uris,@"skipped":@(skipped),@"issues":issues};
 }
@@ -1103,6 +1099,7 @@ static NSDictionary *VCProfileSSMetadata(NSString *uri) {
 
 - (NSDictionary *)subscriptionImportReportFromData:(NSData *)data {
     if (!data || ![data length]) return @{@"uris":@[],@"skipped":@0,@"issues":@[]};
+    if ([data length] > kVCMaximumSubscriptionBytes) return @{@"uris":@[],@"skipped":@0,@"issues":@[],@"error":@"Subscription response exceeds 32 MiB"};
     NSString *raw=[[[NSString alloc] initWithData:data encoding:NSUTF8StringEncoding] autorelease];
     if (!raw) raw=[[[NSString alloc] initWithData:data encoding:NSISOLatin1StringEncoding] autorelease];
     NSString *trim=[self safeTrim:raw];
@@ -1119,9 +1116,11 @@ static NSDictionary *VCProfileSSMetadata(NSString *uri) {
     }
     NSMutableArray *accepted=[NSMutableArray array],*issues=[NSMutableArray array]; NSUInteger skipped=0;
     for (NSString *uri in uris) {
+        NSAutoreleasePool *pool=[[NSAutoreleasePool alloc] init];
         NSString *reason=[self unsupportedConfigReasonForURI:uri];
         if (reason) { skipped++; if ([issues count] < 16) [issues addObject:reason]; }
         else [accepted addObject:uri];
+        [pool drain];
     }
     return @{@"uris":[self sanitizeSubscriptionURIs:accepted],@"skipped":@(skipped),@"issues":issues};
 }

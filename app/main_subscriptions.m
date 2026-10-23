@@ -419,6 +419,8 @@
         NSMutableDictionary *failureCategories = [[NSMutableDictionary alloc] init];
         NSUInteger okCount = 0;
         for (NSNumber *idxObj in refreshIndices) {
+            NSAutoreleasePool *entryPool=[[NSAutoreleasePool alloc] init];
+            @try {
             NSInteger i = [idxObj integerValue];
             dispatch_sync(dispatch_get_main_queue(), ^{
                 [self setUpdatingSubscriptionIndex:i];
@@ -434,6 +436,7 @@
                 [failureTexts addObject:[self shortUpdateFailureTextForSubscription:sub errorText:errorText]];
                 VCIncrementDiagnosticCategory(failureCategories, errorText);
             }
+            } @finally { [entryPool drain]; }
         }
 
         dispatch_async(dispatch_get_main_queue(), ^{

@@ -26,6 +26,7 @@ HOST_TESTS += $(HOST_BUILD_DIR)/test_dns_relay
 HOST_TESTS += $(HOST_BUILD_DIR)/test_ping
 HOST_TESTS += $(HOST_BUILD_DIR)/test_proxy_probe
 HOST_TESTS += $(HOST_BUILD_DIR)/test_core_config
+HOST_TESTS += $(HOST_BUILD_DIR)/test_large_subscriptions
 CORE_PARSE_SRC := uri utils xhttp_config xhttp_download xhttp_payload buffer_budget websocket grpc http_headers json core_log
 CORE_PARSE_SRC += vmess_uri shadowsocks_uri shadowsocks_crypto blake3 trojan core_random deadline socket_util relay_memory connection_trace resolver
 CORE_PARSE_OBJ := $(addprefix $(HOST_BUILD_DIR)/core-parser/,$(addsuffix .o,$(CORE_PARSE_SRC)))
@@ -35,6 +36,7 @@ HOST_ZBAR_HEADERS := $(shell find $(ROOT)/$(ZBAR_DIR) -name '*.h')
 
 test: requirements $(HOST_TESTS)
 	$(HOST_BUILD_DIR)/test_app_logic
+	$(HOST_BUILD_DIR)/test_large_subscriptions
 	$(HOST_BUILD_DIR)/test_legacy_loopback_host
 	$(HOST_BUILD_DIR)/test_legacy_dns_host
 	$(HOST_BUILD_DIR)/test_main_geometry
@@ -76,6 +78,9 @@ $(HOST_BUILD_DIR)/integrations/happ/%.o: ../integrations/happ/%.c | requirements
 	$(HOST_CC) $(HOST_CPPFLAGS) $(HOST_CFLAGS) -MMD -MP -c $< -o $@
 
 $(HOST_BUILD_DIR)/test_app_logic: $(APP_OBJECTS)
+	$(HOST_CC) $(SANITIZE) $^ -o $@ $(HOST_LIBS)
+
+$(HOST_BUILD_DIR)/test_large_subscriptions: $(HOST_BUILD_DIR)/test_large_subscriptions.o $(filter-out $(HOST_BUILD_DIR)/test_app_logic.o,$(APP_OBJECTS))
 	$(HOST_CC) $(SANITIZE) $^ -o $@ $(HOST_LIBS)
 
 $(HOST_BUILD_DIR)/test_ping: $(HOST_BUILD_DIR)/test_ping.o $(HOST_BUILD_DIR)/common/connection_logic.o

@@ -192,14 +192,17 @@ static NSArray *VCConfigURIsFromKaringGroup(NSDictionary *item, NSMutableArray *
     if (![serversValue isKindOfClass:[NSArray class]]) return [NSArray array];
 
     NSMutableArray *uris = [NSMutableArray array];
+    NSMutableSet *seen = [NSMutableSet set];
     for (id value in (NSArray *)serversValue) {
+        NSAutoreleasePool *pool=[[NSAutoreleasePool alloc] init];
         NSString *error=nil;
         NSString *uri = [VCProfiles() URIFromKaringServer:value error:&error];
         if (![uri length]) {
             (*skipped)++;
             if ([issues count] < 16) [issues addObject:error ?: @"servers[]: invalid profile"];
         }
-        if ([uri length] > 0 && ![uris containsObject:uri]) [uris addObject:uri];
+        if ([uri length] > 0 && ![seen containsObject:uri]) { [seen addObject:uri]; [uris addObject:uri]; }
+        [pool drain];
     }
     return uris;
 }
@@ -230,6 +233,8 @@ NSArray *VCKaringSubscriptionsFromBackupData(NSData *data, NSString **errorText)
     NSMutableArray *subscriptions = [NSMutableArray array];
     NSMutableSet *seenURLs = [NSMutableSet set];
     for (id value in (NSArray *)itemsValue) {
+        NSAutoreleasePool *pool=[[NSAutoreleasePool alloc] init];
+        @try {
         if (![value isKindOfClass:[NSDictionary class]]) continue;
         NSDictionary *item = (NSDictionary *)value;
         NSString *url = VCTrimmedString([item objectForKey:@"urlOrPath"]);
@@ -246,6 +251,7 @@ NSArray *VCKaringSubscriptionsFromBackupData(NSData *data, NSString **errorText)
         if ([configs count] > 0) [entry setObject:configs forKey:@"items"];
         [subscriptions addObject:entry];
         [seenURLs addObject:url];
+        } @finally { [pool drain]; }
     }
 
     if ([subscriptions count] == 0) {

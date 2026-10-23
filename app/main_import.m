@@ -419,6 +419,8 @@
         NSUInteger fallbackCount = 0;
 
         for (NSString *urlString in urlsToImport) {
+            NSAutoreleasePool *entryPool=[[NSAutoreleasePool alloc] init];
+            @try {
             BOOL happAddSource = [self isHappAddLink:urlString];
             BOOL happSource = happAddSource || [self isHappEncryptedLink:urlString];
             NSString *subscriptionURL = happAddSource ? [self targetFromHappAddLink:urlString] : urlString;
@@ -460,6 +462,7 @@
                 VCIncrementDiagnosticCategory(failureCategories, errorText);
                 [failureTexts addObject:[self shortImportFailureTextForURL:urlString errorText:errorText]];
             }
+            } @finally { [entryPool drain]; }
         }
 
         dispatch_async(dispatch_get_main_queue(), ^{
