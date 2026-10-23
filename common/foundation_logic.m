@@ -1,5 +1,6 @@
 #import "foundation_logic.h"
 #import "app_constants.h"
+#include "daemon_policy.h"
 #include "../integrations/happ/happ_crypto.h"
 #include <openssl/evp.h>
 #include <openssl/rand.h>
@@ -216,19 +217,8 @@ NSString *VCAppearanceAccentName(void) {
 
 BOOL VCXrayVersionIsValid(NSString *value) {
     if (![value isKindOfClass:[NSString class]]) return NO;
-    NSArray *parts = [value componentsSeparatedByString:@"."];
-    if ([parts count] != 3) return NO;
-
-    for (NSString *part in parts) {
-        NSUInteger length = [part length];
-        if (length == 0 || length > 3) return NO;
-        for (NSUInteger i = 0; i < length; i++) {
-            unichar c = [part characterAtIndex:i];
-            if (c < '0' || c > '9') return NO;
-        }
-        if ([part integerValue] > 255) return NO;
-    }
-    return YES;
+    const char *text=[value UTF8String];
+    return text && strlen(text) == [value lengthOfBytesUsingEncoding:NSUTF8StringEncoding] && vc_xray_version_valid(text);
 }
 
 BOOL URLStringUsesPlainHTTP(NSString *urlString) {

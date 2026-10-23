@@ -36,11 +36,7 @@ int is_supported_config_uri(const char *uri) {
 }
 
 int xray_version_valid(const char *value) {
-    unsigned int x = 0, y = 0, z = 0;
-    char trailing = '\0';
-    return value &&
-           sscanf(value, "%u.%u.%u%c", &x, &y, &z, &trailing) == 3 &&
-           x <= 255 && y <= 255 && z <= 255;
+    return vc_xray_version_valid(value);
 }
 
 int parse_server_host(const char *uri, char *out, size_t out_cap) {

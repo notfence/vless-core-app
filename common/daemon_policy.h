@@ -17,6 +17,21 @@ typedef enum {
 int starts_with_ci(const char *s, const char *prefix);
 int contains_ci(const char *haystack, const char *needle);
 int is_supported_config_uri(const char *uri);
+static inline int vc_xray_version_valid(const char *value) {
+    if (!value) return 0;
+    for (unsigned component=0;component<3;component++) {
+        unsigned number=0;
+        if (*value < '0' || *value > '9') return 0;
+        do {
+            unsigned digit=(unsigned)(*value-'0');
+            if (number > (255U-digit)/10U) return 0;
+            number=number*10U+digit; value++;
+        } while (*value >= '0' && *value <= '9');
+        if (*value != (component == 2 ? '\0' : '.')) return 0;
+        if (component != 2) value++;
+    }
+    return 1;
+}
 int xray_version_valid(const char *value);
 int parse_server_host(const char *uri, char *out, size_t out_cap);
 int ip_list_contains(const char *list, const char *ip);

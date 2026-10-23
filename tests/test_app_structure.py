@@ -53,6 +53,16 @@ def implementations(path):
         index += 1
 
 def main():
+    runtime = (ROOT / 'app/runtime_info.m').read_text()
+    core_version = runtime.split('NSString *DetectCoreBinaryVersion(void) {', 1)[1].split('\n}', 1)[0]
+    if 'return v;' not in core_version or 'substring' in core_version or 'componentsSeparated' in core_version:
+        raise AssertionError('app/core-version-must-preserve-full-output')
+    help_source = (ROOT / 'app/help_controllers.m').read_text()
+    if '[self rowWithTitle:@"vless-core-cli" detail:coreVersion]' not in help_source:
+        raise AssertionError('app/core-version-display-must-use-full-string')
+    settings = (ROOT / 'app/settings.m').read_text().split('- (BOOL)saveVersion {', 1)[1].split('\n}', 1)[0]
+    if 'stringByTrimming' in settings:
+        raise AssertionError('app/xray-version-must-validate-unmodified-input')
     with tempfile.TemporaryDirectory(prefix='vless-source-manifest-') as directory:
         manifest = Path(directory) / 'manifest.mk'
         manifest.write_text('.PHONY: vc_test_source_manifest\nvc_test_source_manifest:\n\t@printf "VC_TEST_APP_SOURCES=%s\\n" "$(APP_SRC)"\n')

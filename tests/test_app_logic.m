@@ -294,6 +294,9 @@ static void dataTests(void) {
     CHECK("updates/numeric-version", VCCompareVersions(@"0.6.10", @"0.6.9") == NSOrderedDescending);
     CHECK("updates/prefix-normalization", [VCNormalizedReleaseVersion(@" v0.6.3 ") isEqual:@"0.6.3"]);
     CHECK("settings/xray-version-validation", VCXrayVersionIsValid(@"26.3.27") && !VCXrayVersionIsValid(@"26.3.x"));
+    for (NSString *value in @[@"0.0.0",@"255.255.255",@"0000.0003.00027"]) CHECK("settings/xray-version-boundaries",VCXrayVersionIsValid(value));
+    for (NSString *value in @[@"+1.2.3",@"-0.2.3",@" 1.2.3",@"1.2.3 ",@"1.2.3x",@"1.2.3.4",@"1..3",@"256.0.0",@"4294967297.2.3",@"18446744073709551616.2.3",@"1.2.3\n",@"1.2.3\0ignored"])
+        CHECK("settings/xray-version-strict-decimal",!VCXrayVersionIsValid(value));
     CHECK("routing/ipv4-normalization", [VCNormalizedIPAddress(@" 192.0.2.1 ") isEqual:@"192.0.2.1"]);
     CHECK("routing/ipv6-normalization", [VCNormalizedIPAddress(@"2001:db8::1") isEqual:@"2001:db8::1"]);
     CHECK("routing/host-is-not-ip", VCNormalizedIPAddress(@"example.test") == nil);

@@ -17,12 +17,11 @@
 }
 
 - (BOOL)saveVersion {
-    NSString *value = [_versionField.text
-        stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
+    NSString *value = _versionField.text;
     if (!VCXrayVersionIsValid(value)) {
         _versionField.text = VCSelectedXrayVersion();
         UIAlertView *error = [[[UIAlertView alloc] initWithTitle:@"Invalid version"
-                                                        message:@"Use x.y.z; each number must be from 0 to 255."
+                                                        message:@"Use x.y.z with decimal numbers from 0 to 255, without signs or spaces."
                                                        delegate:nil
                                               cancelButtonTitle:@"OK"
                                               otherButtonTitles:nil] autorelease];

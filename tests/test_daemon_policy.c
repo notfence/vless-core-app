@@ -27,6 +27,10 @@ static const char *baselineRuleDigests[16] = {
 
 int main(void) {
     char host[128], list[128] = ""; int bypass = 0;
+    for (const char **value=(const char *[]){"0.0.0","255.255.255","26.3.27","0000.0003.00027",NULL}; *value; value++)
+        CHECK("daemon/xray-version-boundaries",xray_version_valid(*value));
+    for (const char **value=(const char *[]){"+1.2.3","-0.2.3"," 1.2.3","1.2.3 ","1.2.3x","1.2.3.4","1..3","1.2","256.0.0","4294967297.2.3","18446744073709551616.2.3","1.2.3\n",NULL}; *value; value++)
+        CHECK("daemon/xray-version-strict-decimal",!xray_version_valid(*value));
     CHECK("daemon/host-vless", parse_server_host("vless://uuid@example.test:443?type=tcp", host, sizeof(host)) == 0 && !strcmp(host, "example.test"));
     CHECK("daemon/host-socks-auth-ipv6", parse_server_host("socks5://u:p@[2001:db8::1]:1080", host, sizeof(host)) == 0 && !strcmp(host, "2001:db8::1"));
     for (const char **scheme=(const char *[]){"vless://", "socks5://", "trojan://", "vmess://", "ss://", NULL}; *scheme; scheme++)
