@@ -95,7 +95,7 @@ with tempfile.TemporaryDirectory(prefix="vless-app-bridge-", dir=private_parent)
                 raise AssertionError("independent XHTTP channel was not used")
             print(f"PASS HAPP/core/Xray: {transport}/{security}")
 
-    protocols = [("trojan", None)]
+    protocols = [("trojan", None), ("vmess", None)]
     cases = [("tcp", s, None, False) for s in ("none", "tls", "reality")]
     cases += [("ws", s, None, False) for s in ("none", "tls")]
     cases += [("grpc", s, mode, False) for s in ("none", "tls", "reality") for mode in ("gun", "multi")]

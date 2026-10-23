@@ -1085,7 +1085,7 @@
     }
 
     VCRecordAppEvent(@"import", @"Import rejected", @"reason=unsupported_format");
-    [self showStatus:@"Unsupported import format (use vless://, trojan://, socks5://, happ://, karing://sync-download/, or an HTTP(S) subscription)" ok:NO];
+    [self showStatus:@"Unsupported import format (use vless://, trojan://, vmess://, socks5://, happ://, karing://sync-download/, or an HTTP(S) subscription)" ok:NO];
 }
 
 - (void)showProfileImportWarnings:(NSArray *)reports {

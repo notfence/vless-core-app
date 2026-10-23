@@ -25,7 +25,7 @@
 - (void)buildSections {
     NSArray *gettingStarted = [NSArray arrayWithObjects:
         [self question:@"How do I import?"
-                 answer:@"Tap + and choose Import from Clipboard, Import from File, Scan QR Code, or Manual Input. You can import vless://, trojan:// and socks5:// configurations, HTTP/HTTPS subscription URLs, happ:// links, and Karing backup ZIP files or LAN Send QR codes."],
+                 answer:@"Tap + and choose Import from Clipboard, Import from File, Scan QR Code, or Manual Input. You can import vless://, trojan://, vmess:// and socks5:// configurations, HTTP/HTTPS subscription URLs, happ:// links, and Karing backup ZIP files or LAN Send QR codes."],
         [self question:@"How do I delete or reorder items?"
                  answer:@"Swipe a standalone configuration or subscription from right to left to delete it. To change the order, tap the list button beside Configurations or Subscriptions, drag the rows, then tap the checkmark to finish."],
         [self question:@"Do I need to respring after installation?"

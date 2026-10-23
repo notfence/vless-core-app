@@ -150,6 +150,53 @@ static void trojanProfiles(void) {
     NSString *direct=@"trojan://a+b%3A%40%25@example.test:443#Fixture";
     CHECK("trojan/text-and-subscription-original",[[p parseSubscriptionData:[direct dataUsingEncoding:NSUTF8StringEncoding]] isEqual:@[direct]] && [[p extractImportLinksFromText:direct] isEqual:@[direct]]);
 }
+
+static NSString *vmessJSONURI(NSDictionary *json) {
+    NSData *data=[NSJSONSerialization dataWithJSONObject:json options:0 error:NULL];
+    return [@"vmess://" stringByAppendingString:[data base64EncodedStringWithOptions:0]];
+}
+
+static void vmessProfiles(void) {
+    VCProfileLogic *p=VCProfiles(); NSString *identifier=@"11111111-2222-4333-8444-555555555555";
+    NSString *address=[NSString stringWithFormat:@"vmess://%@@example.test:443?type=ws&security=tls&scy=chacha20-poly1305",identifier];
+    CHECK("vmess/app-address-supported",[p isSupportedConfigTupleForURI:address]);
+    NSDictionary *json=@{@"v":@"2",@"add":@"example.test",@"port":@"443",@"id":identifier,@"aid":@0,@"scy":@"chacha20-poly1305",@"net":@"ws",@"tls":@"tls",@"ps":@"JSON title"};
+    NSString *encoded=vmessJSONURI(json); NSDictionary *metadata=[p metadataForURI:encoded];
+    CHECK("vmess/json-metadata",[p isSupportedConfigTupleForURI:encoded] && [[metadata objectForKey:@"host"] isEqual:@"example.test"] && [[metadata objectForKey:@"port"] intValue] == 443 && [[metadata objectForKey:@"transport"] isEqual:@"ws"] && [[metadata objectForKey:@"security"] isEqual:@"tls"]);
+    CHECK("vmess/json-title",[[metadata objectForKey:@"title"] isEqual:@"JSON title"] && [[[[p metadataForURI:[encoded stringByAppendingString:@"#Outer%20title"]] objectForKey:@"title"] description] isEqual:@"Outer title"]);
+    CHECK("vmess/no-id-in-metadata",![[metadata description] containsString:identifier] && ![metadata objectForKey:@"id"]);
+    vless_config_t a=parsed(address),b=parsed(encoded);
+    CHECK("vmess/effective-config-matches",a.protocol == CORE_PROTOCOL_VMESS && b.protocol == a.protocol && a.transport_mode == b.transport_mode && a.vmess_security == b.vmess_security && !memcmp(a.uuid,b.uuid,16));
+    for (NSString *cipher in @[@"auto",@"aes-128-gcm",@"chacha20-poly1305",@"none",@"zero"]) {
+        NSDictionary *target=@{@"address":@"example.test",@"port":@443,@"users":@[@{@"id":identifier,@"security":cipher,@"alterId":@0}]};
+        NSDictionary *happ=@{@"outbounds":@[@{@"protocol":@"vmess",@"settings":@{@"vnext":@[target]}}]};
+        NSString *uri=[p URIFromHappJSONConfig:happ]; a=parsed(uri);
+        CHECK("vmess/happ-body-cipher",!strcmp(a.encryption,[cipher UTF8String]) && !strcmp(a.security,"none"));
+        uri=[p URIFromKaringServer:@{@"type":@"vmess",@"server":@"example.test",@"server_port":@443,@"uuid":identifier,@"security":cipher,@"alter_id":@0} error:NULL];
+        b=parsed(uri); CHECK("vmess/karing-effective-cipher",a.vmess_security == b.vmess_security && !memcmp(a.uuid,b.uuid,16));
+    }
+    for (NSString *suffix in @[@"?aid=1",@"?alterId=18446744073709551616",@"?scy=aes-128-cfb",@"?flow=xtls-rprx-vision",@"?encryption=auto&scy=none",@"?type=ws&security=reality"])
+        CHECK("vmess/unsupported-options",[p unsupportedConfigReasonForURI:[[NSString stringWithFormat:@"vmess://%@@example.test:443",identifier] stringByAppendingString:suffix]] != nil);
+    for (NSString *bad in @[@"A",@"AAAA=",@"AAAA===",@"AAAA!",@"_AAA+AAA"])
+        CHECK("vmess/strict-base64",![p isSupportedConfigTupleForURI:[@"vmess://" stringByAppendingString:bad]]);
+    for (NSDictionary *fields in @[@{@"aid":@1},@{@"scy":@"aes-128-cfb"},@{@"v":@3},@{@"port":@65536},@{@"add":@[]},@{@"tls":@"tls",@"security":@"none"}]) {
+        NSMutableDictionary *bad=[[json mutableCopy] autorelease]; [bad addEntriesFromDictionary:fields];
+        CHECK("vmess/json-invalid-shape",![p isSupportedConfigTupleForURI:vmessJSONURI(bad)]);
+    }
+    NSMutableDictionary *grpc=[[json mutableCopy] autorelease];
+    [grpc addEntriesFromDictionary:@{@"net":@"grpc",@"type":@"multi",@"multiMode":@(YES),@"path":@"service",@"host":@"authority.test",@"sni":@"tls.test"}];
+    NSString *grpcURI=vmessJSONURI(grpc);
+    CHECK("vmess/json-grpc-metadata",[p isSupportedConfigTupleForURI:grpcURI] && [[p queryValueForURLString:grpcURI key:@"serviceName"] isEqual:@"service"] && [[p queryValueForURLString:grpcURI key:@"authority"] isEqual:@"authority.test"] && [[p queryValueForURLString:grpcURI key:@"mode"] isEqual:@"multi"] && [[p queryValueForURLString:grpcURI key:@"sni"] isEqual:@"tls.test"]);
+    [grpc setObject:@(NO) forKey:@"multiMode"];
+    CHECK("vmess/json-grpc-conflict",![p isSupportedConfigTupleForURI:vmessJSONURI(grpc)]);
+    NSString *duplicate=[NSString stringWithFormat:@"{\"add\":\"example.test\",\"add\":\"other.test\",\"id\":\"%@\",\"port\":443}",identifier];
+    CHECK("vmess/conflicting-duplicate-rejected",![p isSupportedConfigTupleForURI:[@"vmess://" stringByAppendingString:[[duplicate dataUsingEncoding:NSUTF8StringEncoding] base64EncodedStringWithOptions:0]]]);
+    NSString *unpadded=[encoded stringByTrimmingCharactersInSet:[NSCharacterSet characterSetWithCharactersInString:@"="]];
+    CHECK("vmess/unpadded-json",[p isSupportedConfigTupleForURI:unpadded]);
+    NSArray *mixed=[p parseSubscriptionData:[[NSString stringWithFormat:@"%@\n%@\ntrojan://secret@example.test:443",encoded,vmessJSONURI(@{@"add":@"bad"})] dataUsingEncoding:NSUTF8StringEncoding]];
+    CHECK("vmess/mixed-subscription",[mixed count] == 2 && [[mixed objectAtIndex:0] isEqual:encoded]);
+    CHECK("vmess/subscription-keeps-original",[[p parseSubscriptionData:[encoded dataUsingEncoding:NSUTF8StringEncoding]] isEqual:@[encoded]]);
+}
 int main(int argc, char **argv) {
     if (argc == 2 && (!strcmp(argv[1], "--convert") || !strcmp(argv[1],"--convert-karing"))) {
         NSAutoreleasePool *pool = [[NSAutoreleasePool alloc] init];
@@ -219,5 +266,6 @@ int main(int argc, char **argv) {
     extendedProfiles();
     converterParity();
     trojanProfiles();
+    vmessProfiles();
     FINISH("import formats"); [pool drain]; return 0;
 }
