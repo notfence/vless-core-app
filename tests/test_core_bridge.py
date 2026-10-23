@@ -1,4 +1,5 @@
 import contextlib
+import base64
 import json
 import os
 from pathlib import Path
@@ -95,7 +96,7 @@ with tempfile.TemporaryDirectory(prefix="vless-app-bridge-", dir=private_parent)
                 raise AssertionError("independent XHTTP channel was not used")
             print(f"PASS HAPP/core/Xray: {transport}/{security}")
 
-    protocols = [("trojan", None), ("vmess", None)]
+    protocols = [("trojan", None), ("vmess", None)] + [("shadowsocks", method) for method in f.SHADOWSOCKS_METHODS]
     cases = [("tcp", s, None, False) for s in ("none", "tls", "reality")]
     cases += [("ws", s, None, False) for s in ("none", "tls")]
     cases += [("grpc", s, mode, False) for s in ("none", "tls", "reality") for mode in ("gun", "multi")]
@@ -172,3 +173,25 @@ with tempfile.TemporaryDirectory(prefix="vless-app-bridge-", dir=private_parent)
                     if separate and (not upload.client_data or not download.client_data):
                         raise AssertionError(f"{protocol}/{source}: separate channel was not used")
                 print(f"PASS app/core/Xray: {protocol}/{method or '-'}/{transport}/{security}/{mode}/download={separate}")
+
+    for method in ("2022-blake3-aes-128-gcm", "2022-blake3-aes-256-gcm"):
+        size = 16 if method.endswith("128-gcm") else 32
+        keys = [base64.b64encode(bytes(range(i, i + size))).decode() for i in range(3)]
+        for count in (2, 3):
+            with contextlib.ExitStack() as stack:
+                target = stack.enter_context(f.Server())
+                leaf = stack.enter_context(f.xray_server("tcp", "none", protocol="shadowsocks", ss_method=method,
+                    password=keys[count - 2], ss_users=[{"password": keys[count - 1]}]))
+                reference = leaf if count == 2 else stack.enter_context(f.xray_server("tcp", "none", protocol="shadowsocks",
+                    ss_method=method, password=keys[0], ss_users=[{"password": keys[1], "address": "127.0.0.1", "port": leaf.port}]))
+                settings = {"address": "127.0.0.1", "port": reference.port, "method": method, "password": ":".join(keys[:count])}
+                happ = {"outbounds": [{"protocol": "shadowsocks", "settings": settings}]}
+                karing = {"type": "shadowsocks", "server": "127.0.0.1", "server_port": reference.port,
+                          "method": method, "password": settings["password"]}
+                for document, option in ((happ, "--convert"), (karing, "--convert-karing")):
+                    converted = subprocess.run([str(BUILD / "test_import_formats"), option], input=json.dumps(document),
+                                               text=True, capture_output=True, timeout=5, check=True)
+                    with f.cli(converted.stdout.strip()) as client:
+                        with f.socks_connect(client.port, target.port) as connection:
+                            f.exchange(connection, b"\x00\x00SIP023" + bytes(range(256)) * 256)
+                print(f"PASS app/core/Xray: SIP023/{method}/{count}")

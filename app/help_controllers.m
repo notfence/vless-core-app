@@ -25,7 +25,7 @@
 - (void)buildSections {
     NSArray *gettingStarted = [NSArray arrayWithObjects:
         [self question:@"How do I import?"
-                 answer:@"Tap + and choose Import from Clipboard, Import from File, Scan QR Code, or Manual Input. You can import vless://, trojan://, vmess:// and socks5:// configurations, HTTP/HTTPS subscription URLs, happ:// links, and Karing backup ZIP files or LAN Send QR codes."],
+                 answer:@"Tap + and choose Import from Clipboard, Import from File, Scan QR Code, or Manual Input. You can import vless://, trojan://, vmess://, ss:// and socks5:// configurations, HTTP/HTTPS subscription URLs, happ:// links, and Karing backup ZIP files or LAN Send QR codes."],
         [self question:@"How do I delete or reorder items?"
                  answer:@"Swipe a standalone configuration or subscription from right to left to delete it. To change the order, tap the list button beside Configurations or Subscriptions, drag the rows, then tap the checkmark to finish."],
         [self question:@"Do I need to respring after installation?"
@@ -46,15 +46,16 @@
                  answer:@"Make sure a configuration is selected, then check the message shown after pressing Connect. If the protocol text is red, the link contains an unsupported option. Otherwise, verify the server parameters, confirm that the server is online, and check both logs for the exact failure."],
         [self question:@"What can the app connect to?"
                  answer:@"Supported configurations:\n"
-                         @"• VLESS TCP with no security, TLS, or Reality; with TLS/Reality, flow may be omitted or set to xtls-rprx-vision\n"
-                         @"• VLESS XHTTP with no security, TLS, or Reality; modes auto, packet-up, stream-one, and stream-up\n"
-                         @"• VLESS gRPC with no security, TLS, or Reality; single-stream and multi modes\n"
-                         @"• VLESS WebSocket with TLS or no security\n"
+                         @"• VLESS, Trojan, VMess AEAD, and Shadowsocks: TCP, gRPC gun/multi, and XHTTP with no external security, TLS, or Reality\n"
+                         @"• WebSocket with TLS or no external security; WS + Reality is not supported\n"
+                         @"• XHTTP: auto, packet-up, stream-one, stream-up, XMUX, and a separate download server\n"
+                         @"• VLESS Encryption and applicable Vision; not available for other protocols\n"
+                         @"• VMess alterId=0 only; auto, AES-GCM, ChaCha20-Poly1305, none, or zero\n"
+                         @"• Shadowsocks AEAD and SS 2022; AES SIP023 key chains; no plugins or legacy stream ciphers. No external TLS does not disable Shadowsocks encryption\n"
                          @"• SOCKS5\n"
-                         @"• Trojan over TCP, WebSocket, gRPC and XHTTP; TLS or no outer TLS, and Reality except with WebSocket\n"
                          @"Supported fingerprints are chrome, firefox, edge, random, randomized, and qq."],
         [self question:@"Why is the protocol text red?"
-                 answer:@"Red text means the transport, security type, mode, flow, or fingerprint is not supported. The app keeps the entry visible so you can identify it, but blocks the connection to avoid a broken tunnel. Press Connect to see the unsupported option."],
+                 answer:@"Red text means the transport, security type, mode, flow, or fingerprint is not supported. Existing entries remain visible but cannot connect. Subscription imports skip invalid entries and report safe reasons. Full cryptographic validation runs before the VPN changes the network."],
         [self question:@"How does routing work?"
                  answer:@"Open Settings → Routing. Enable it, choose the default Proxy, Direct, or Block action, then add ordered domain, IP/CIDR, or port rules. The first matching rule wins after the optional local-network bypass. Reconnect the VPN after changing the policy; existing connections are left untouched."],
         [self question:@"Does closing the app stop the VPN?"

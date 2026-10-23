@@ -197,6 +197,46 @@ static void vmessProfiles(void) {
     CHECK("vmess/mixed-subscription",[mixed count] == 2 && [[mixed objectAtIndex:0] isEqual:encoded]);
     CHECK("vmess/subscription-keeps-original",[[p parseSubscriptionData:[encoded dataUsingEncoding:NSUTF8StringEncoding]] isEqual:@[encoded]]);
 }
+
+static void shadowsocksProfiles(void) {
+    VCProfileLogic *p=VCProfiles();
+    NSString *raw=@"ss://aes-128-gcm:A%2B%3A%40%25%00z@example.test:443";
+    CHECK("ss/raw-supported",[p isSupportedConfigTupleForURI:raw]);
+    NSDictionary *metadata=[p metadataForURI:raw];
+    CHECK("ss/metadata-no-credential",[[metadata objectForKey:@"host"] isEqual:@"example.test"] && [[metadata objectForKey:@"port"] intValue] == 443 && [[metadata objectForKey:@"method"] isEqual:@"aes-128-gcm"] && ![[metadata description] containsString:@"A+"]);
+    NSString *password=@"A+:@%\0z";
+    NSArray *methods=@[@"aes-128-gcm",@"aes-256-gcm",@"chacha20-poly1305",@"xchacha20-poly1305",@"2022-blake3-aes-128-gcm",@"2022-blake3-aes-256-gcm",@"2022-blake3-chacha20-poly1305"];
+    for (NSString *method in methods) {
+        BOOL modern=[method hasPrefix:@"2022-"];
+        NSString *key=modern ? [[NSMutableData dataWithLength:[method hasSuffix:@"128-gcm"] ? 16 : 32] base64EncodedStringWithOptions:0] : password;
+        NSDictionary *happ=@{@"outbounds":@[@{@"protocol":@"shadowsocks",@"settings":@{@"servers":@[@{@"address":@"example.test",@"port":@443,@"method":method,@"password":key}]}}]};
+        NSString *uri=[p URIFromHappJSONConfig:happ]; vless_config_t a=parsed(uri);
+        CHECK("ss/happ-method",a.protocol == CORE_PROTOCOL_SHADOWSOCKS && a.ss.count == 1 && !strcmp(a.security,"none"));
+        uri=[p URIFromKaringServer:@{@"type":@"shadowsocks",@"server":@"example.test",@"server_port":@443,@"method":method,@"password":key} error:NULL];
+        vless_config_t b=parsed(uri); CHECK("ss/karing-effective-keys",a.ss.method == b.ss.method && !memcmp(a.ss.keys,b.ss.keys,sizeof(a.ss.keys)));
+        if (!modern) for (BOOL legacy=NO;;legacy=YES) {
+            NSString *userinfo=[NSString stringWithFormat:@"%@:%@%@",method,password,legacy ? @"@example.test:443" : @""];
+            NSString *encoded=[[userinfo dataUsingEncoding:NSUTF8StringEncoding] base64EncodedStringWithOptions:0];
+            NSString *link=[NSString stringWithFormat:@"ss://%@%@#Old",encoded,legacy ? @"" : @"@example.test:443/"];
+            CHECK("ss/base64-envelopes",[p isSupportedConfigTupleForURI:link] && [[[p metadataForURI:link] objectForKey:@"host"] isEqual:@"example.test"]);
+            b=parsed(link); CHECK("ss/base64-exact-password",a.ss.method == b.ss.method && !memcmp(a.ss.keys,b.ss.keys,sizeof(a.ss.keys)));
+            CHECK("ss/original-subscription-uri",[[p parseSubscriptionData:[link dataUsingEncoding:NSUTF8StringEncoding]] isEqual:@[link]]);
+            if (legacy) break;
+        }
+    }
+    NSString *key=@"AAECAwQFBgcICQoLDA0ODw==";
+    NSString *chain=[NSString stringWithFormat:@"ss://2022-blake3-aes-128-gcm:%@%%3A%@@example.test:443",key,key];
+    CHECK("ss/sip023-kept",[p isSupportedConfigTupleForURI:chain] && parsed(chain).ss.count == 2);
+    for (NSString *bad in @[@"ss://none:p@example.test:443",@"ss://aes-128-cfb:p@example.test:443",@"ss://aes-128-gcm:@example.test:443",@"ss://aes-128-gcm:p%GG@example.test:443",@"ss://aes-128-gcm:p@example.test:443?plugin=v2ray-plugin",@"ss://aes-128-gcm:p@example.test:443?flow=xtls-rprx-vision",@"ss://aes-128-gcm:p@example.test:443?encryption=auto",@"ss://aes-128-gcm:p@example.test:443?type=ws&security=reality",@"ss://A===@example.test:443",@"ss://_AAA+AAA@example.test:443"])
+        CHECK("ss/invalid-envelope-or-options",![p isSupportedConfigTupleForURI:bad]);
+    NSString *legacy2022=[NSString stringWithFormat:@"ss://%@",[[[NSString stringWithFormat:@"2022-blake3-aes-128-gcm:%@@example.test:443",key] dataUsingEncoding:NSUTF8StringEncoding] base64EncodedStringWithOptions:0]];
+    CHECK("ss/2022-legacy-rejected",![p isSupportedConfigTupleForURI:legacy2022]);
+    CHECK("ss/outer-none-keeps-method",[[[p metadataForURI:[raw stringByAppendingString:@"?encryption=none&security=none"]] objectForKey:@"method"] isEqual:@"aes-128-gcm"]);
+    for (NSString *alias in @[@"aead_aes_128_gcm",@"aead_aes_256_gcm",@"chacha20-ietf-poly1305",@"aead_chacha20_poly1305",@"xchacha20-ietf-poly1305",@"aead_xchacha20_poly1305"])
+        CHECK("ss/core-method-aliases",[p isSupportedConfigTupleForURI:[NSString stringWithFormat:@"ss://%@:p@example.test:443",alias]]);
+    for (NSString *value in @[@"ss://@example.test:443",@"ss://?",@"ss://",@"ss://aes-128-gcm:p@[::1]:0",@"ss://aes-128-gcm:p@example.test:65536"])
+        CHECK("ss/empty-and-endpoint-bounds",![p isSupportedConfigTupleForURI:value]);
+}
 int main(int argc, char **argv) {
     if (argc == 2 && (!strcmp(argv[1], "--convert") || !strcmp(argv[1],"--convert-karing"))) {
         NSAutoreleasePool *pool = [[NSAutoreleasePool alloc] init];
@@ -267,5 +307,6 @@ int main(int argc, char **argv) {
     converterParity();
     trojanProfiles();
     vmessProfiles();
+    shadowsocksProfiles();
     FINISH("import formats"); [pool drain]; return 0;
 }

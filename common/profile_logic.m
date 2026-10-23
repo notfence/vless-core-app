@@ -207,7 +207,7 @@ static NSString *VCProfileVMessKey(NSString *key) {
 }
 
 static NSDictionary *VCProfileVMessJSON(NSString *uri) {
-    if (![uri hasPrefix:@"vmess://"]) return nil;
+    if ([uri length] < 8 || [[uri substringToIndex:8] caseInsensitiveCompare:@"vmess://"] != NSOrderedSame) return nil;
     NSString *body=[[[uri substringFromIndex:8] componentsSeparatedByString:@"#"] objectAtIndex:0];
     if ([body rangeOfString:@"@"].location != NSNotFound || [body rangeOfString:@"?"].location != NSNotFound) return nil;
     NSMutableData *data=VCProfileBase64(body);
@@ -249,6 +249,80 @@ static BOOL VCProfileVMessCipher(NSString *value) {
     return [@[@"auto",@"aes-128-gcm",@"chacha20-poly1305",@"none",@"zero"] containsObject:value];
 }
 
+static NSString *VCProfileSSMethod(NSString *method) {
+    if (!VCProfileText(method)) return nil;
+    NSString *lower=[method lowercaseString];
+    NSDictionary *aliases=@{@"aead_aes_128_gcm":@"aes-128-gcm",@"aead_aes_256_gcm":@"aes-256-gcm",@"chacha20-ietf-poly1305":@"chacha20-poly1305",@"aead_chacha20_poly1305":@"chacha20-poly1305",@"xchacha20-ietf-poly1305":@"xchacha20-poly1305",@"aead_xchacha20_poly1305":@"xchacha20-poly1305"};
+    lower=[aliases objectForKey:lower] ?: lower;
+    return [@[@"aes-128-gcm",@"aes-256-gcm",@"chacha20-poly1305",@"xchacha20-poly1305",@"2022-blake3-aes-128-gcm",@"2022-blake3-aes-256-gcm",@"2022-blake3-chacha20-poly1305"] containsObject:lower] ? lower : nil;
+}
+
+static NSMutableData *VCProfilePercentBytes(NSString *text) {
+    NSData *input=[text dataUsingEncoding:NSUTF8StringEncoding];
+    if (!input) return nil;
+    NSMutableData *output=[NSMutableData dataWithLength:[input length]];
+    const unsigned char *source=[input bytes]; unsigned char *bytes=[output mutableBytes]; NSUInteger used=0;
+    for (NSUInteger i=0;i<[input length];i++) {
+        unsigned c=source[i];
+        if (c == '%') {
+            if (i+2 >= [input length] || !isxdigit(source[i+1]) || !isxdigit(source[i+2])) { VCProfileClear(output); return nil; }
+            unsigned a=source[++i],b=source[++i];
+            a=a <= '9' ? a-'0' : (a|32)-'a'+10; b=b <= '9' ? b-'0' : (b|32)-'a'+10; c=(a<<4)|b;
+        }
+        bytes[used++]=(unsigned char)c;
+    }
+    [output setLength:used]; return output;
+}
+
+static NSDictionary *VCProfileSSMetadata(NSString *uri) {
+    NSString *body=[uri substringFromIndex:5];
+    NSRange end=[body rangeOfCharacterFromSet:[NSCharacterSet characterSetWithCharactersInString:@"?#"]];
+    if (end.location != NSNotFound) body=[body substringToIndex:end.location];
+    NSRange at=[body rangeOfString:@"@"];
+    NSString *endpoint=nil; NSMutableData *data=nil; BOOL encoded=NO;
+    if (at.location != NSNotFound) {
+        endpoint=[body substringFromIndex:at.location+1];
+        if ([endpoint rangeOfString:@"@"].location != NSNotFound) return nil;
+        data=VCProfilePercentBytes([body substringToIndex:at.location]);
+        if (![data length]) return nil;
+        if (!memchr([data bytes],':',[data length])) {
+            NSString *base64=[[[NSString alloc] initWithData:data encoding:NSASCIIStringEncoding] autorelease];
+            NSMutableData *decoded=VCProfileBase64(base64); VCProfileClear(data); data=decoded; encoded=YES;
+        }
+    } else {
+        NSMutableData *text=VCProfilePercentBytes(body);
+        NSString *base64=[[[NSString alloc] initWithData:text encoding:NSASCIIStringEncoding] autorelease];
+        data=VCProfileBase64(base64); VCProfileClear(text); encoded=YES;
+        const unsigned char *bytes=[data bytes]; NSUInteger split=[data length];
+        while (split && bytes[split-1] != '@') split--;
+        if (split && split < [data length]) {
+            endpoint=[[[NSString alloc] initWithBytes:bytes+split length:[data length]-split encoding:NSUTF8StringEncoding] autorelease];
+            [data setLength:split-1];
+        }
+    }
+    NSString *host=nil; uint16_t port=0;
+    if ([endpoint hasSuffix:@"/"]) endpoint=[endpoint substringToIndex:[endpoint length]-1];
+    NSDictionary *result=nil;
+    if ([data length] && VCProfileEndpoint(endpoint,0,&host,&port)) {
+        const unsigned char *bytes=[data bytes],*colon=memchr(bytes,':',[data length]);
+        if (colon && colon > bytes && colon+1 < bytes+[data length]) {
+            NSString *method=[[[NSString alloc] initWithBytes:bytes length:(NSUInteger)(colon-bytes) encoding:NSASCIIStringEncoding] autorelease];
+            method=VCProfileSSMethod(method);
+            BOOL valid=method != nil;
+            if ([method hasPrefix:@"2022-"]) {
+                NSUInteger count=1;
+                if (encoded || memchr(colon+1,0,(NSUInteger)(bytes+[data length]-colon-1))) valid=NO;
+                for (const unsigned char *p=colon+1;p<bytes+[data length];p++) if (*p == ':') {
+                    count++; if (p == colon+1 || p+1 == bytes+[data length] || p[-1] == ':') valid=NO;
+                }
+                if ([method isEqual:@"2022-blake3-chacha20-poly1305"] && count != 1) valid=NO;
+            }
+            if (valid) result=@{@"host":host,@"port":@(port),@"method":method};
+        }
+    }
+    VCProfileClear(data); return result;
+}
+
 @implementation VCProfileLogic
 
 - (void)dealloc {
@@ -257,7 +331,7 @@ static BOOL VCProfileVMessCipher(NSString *value) {
 }
 
 - (BOOL)isConfigurationURI:(NSString *)uri {
-    return [@[@"vless",@"socks5",@"trojan",@"vmess"] containsObject:[self schemeFromURIString:uri]] && [uri rangeOfString:@"://"].location != NSNotFound;
+    return [@[@"vless",@"socks5",@"trojan",@"vmess",@"ss"] containsObject:[self schemeFromURIString:uri]] && [uri rangeOfString:@"://"].location != NSNotFound;
 }
 
 - (NSDictionary *)uncachedMetadataForURI:(NSString *)uri {
@@ -268,7 +342,11 @@ static BOOL VCProfileVMessCipher(NSString *value) {
     NSRange prefix=[uri rangeOfString:@"://"];
     NSString *host=nil; uint16_t port=0;
     NSDictionary *vmess=nil;
-    if (!reason && [scheme isEqual:@"vmess"] && [[[uri componentsSeparatedByString:@"#"] objectAtIndex:0] rangeOfString:@"@"].location == NSNotFound) {
+    if (!reason && [scheme isEqual:@"ss"]) {
+        NSDictionary *ss=VCProfileSSMetadata(uri);
+        if (!ss) reason=@"invalid or unsupported Shadowsocks envelope";
+        else { [result addEntriesFromDictionary:ss]; host=[ss objectForKey:@"host"]; port=(uint16_t)[[ss objectForKey:@"port"] unsignedIntValue]; }
+    } else if (!reason && [scheme isEqual:@"vmess"] && [[[uri componentsSeparatedByString:@"#"] objectAtIndex:0] rangeOfString:@"@"].location == NSNotFound) {
         vmess=VCProfileVMessJSON(uri); unsigned number=0;
         id address=[vmess objectForKey:@"add"],identifier=[vmess objectForKey:@"id"];
         if (!vmess || !VCProfileText(address) || !VCProfileHost(address) || !VCProfileText(identifier) || ![identifier length] || !VCProfileUnsignedScalar([vmess objectForKey:@"port"],65535,&number) || !number) reason=@"invalid VMess JSON envelope";
@@ -335,6 +413,11 @@ static BOOL VCProfileVMessCipher(NSString *value) {
         if (!reason && vmess && ![transport isEqual:@"grpc"] && [[vmess objectForKey:@"type"] length] && ![[vmess objectForKey:@"type"] isEqual:@"none"]) reason=@"unsupported VMess TCP header";
     }
     if (!reason && [scheme isEqual:@"trojan"] && ([flow length] || ([encryption length] && ![encryption isEqual:@"none"]))) reason=@"Trojan does not support flow or VLESS Encryption";
+    if (!reason && [scheme isEqual:@"ss"]) {
+        if ([flow length] || ([encryption length] && ![[encryption lowercaseString] isEqual:@"none"]) || [[self queryValueForURLString:uri key:@"plugin"] length]) reason=@"unsupported Shadowsocks flow, encryption or plugin";
+        for (NSString *field in @[@"method",@"password",@"scy",@"aid",@"alterid",@"mux",@"uot",@"udp",@"packetencoding",@"obfs",@"headertype",@"cert",@"ca",@"pinsha256",@"pinnedpeercertificatesha256",@"pinnedpeercertificatespkisha256",@"verifycert",@"peer",@"vcn",@"pcs"])
+            if ([self queryValueForURLString:uri key:field]) { reason=@"unsupported Shadowsocks query field"; break; }
+    }
     if (!reason && [flow length] && [transport isEqual:@"tcp"] && [security isEqual:@"none"] && (![encryption length] || [encryption isEqual:@"none"])) reason=@"Vision requires TLS, REALITY or VLESS Encryption";
     NSString *fp=vmess ? [vmess objectForKey:@"fp"] : [self queryValueForURLString:uri key:@"fp"];
     fp=VCProfileText(fp) ? [fp lowercaseString] : @"";
@@ -804,7 +887,7 @@ static BOOL VCProfileVMessCipher(NSString *value) {
     if (!uriBytes || [uriBytes length] > kVCMaximumConfigURIBytes) {
         return @"configuration URI is too long";
     }
-    if (![@[@"vless",@"trojan",@"vmess"] containsObject:[self schemeFromURIString:uri]]) return nil;
+    if (![@[@"vless",@"trojan",@"vmess",@"ss"] containsObject:[self schemeFromURIString:uri]]) return nil;
 
     NSRange question = [uri rangeOfString:@"?"];
     NSRange fragment = [uri rangeOfString:@"#"];
@@ -925,7 +1008,7 @@ static BOOL VCProfileVMessCipher(NSString *value) {
     if ([fallbackText length] == 0) return out;
 
     NSError *reErr = nil;
-    NSRegularExpression *re = [NSRegularExpression regularExpressionWithPattern:@"(?:vless://|socks5://|trojan://|vmess://)[^\\s\"'<>]+"
+    NSRegularExpression *re = [NSRegularExpression regularExpressionWithPattern:@"(?:vless://|socks5://|trojan://|vmess://|ss://)[^\\s\"'<>]+"
                                                                          options:NSRegularExpressionCaseInsensitive
                                                                            error:&reErr];
     if (!re || reErr) {
@@ -957,7 +1040,7 @@ static BOOL VCProfileVMessCipher(NSString *value) {
     }
 
     NSError *reErr = nil;
-    NSRegularExpression *re = [NSRegularExpression regularExpressionWithPattern:@"(?:vless://|socks5://|trojan://|vmess://|happ://(?:add|crypt4|crypt5)/|https?://)[^\\s\"'<>]+"
+    NSRegularExpression *re = [NSRegularExpression regularExpressionWithPattern:@"(?:vless://|socks5://|trojan://|vmess://|ss://|happ://(?:add|crypt4|crypt5)/|https?://)[^\\s\"'<>]+"
                                                                          options:NSRegularExpressionCaseInsensitive
                                                                            error:&reErr];
     if (!re || reErr) {
@@ -1163,7 +1246,7 @@ static BOOL VCProfileVMessCipher(NSString *value) {
     for (id value in [self happJSONArrayValue:[config objectForKey:@"outbounds"]]) {
         NSDictionary *candidate=[self happJSONDictionaryValue:value];
         NSString *protocol=[[self happJSONStringValue:[candidate objectForKey:@"protocol"]] lowercaseString];
-        if (![@[@"vless",@"trojan",@"vmess"] containsObject:protocol]) continue;
+        if (![@[@"vless",@"trojan",@"vmess",@"shadowsocks"] containsObject:protocol]) continue;
         if (!proxy) proxy=candidate;
         if ([[[self happJSONStringValue:[candidate objectForKey:@"tag"]] lowercaseString] isEqual:@"proxy"]) { proxy=candidate; break; }
     }
@@ -1195,10 +1278,20 @@ static BOOL VCProfileVMessCipher(NSString *value) {
     id flow=[user objectForKey:@"flow"],encryption=[user objectForKey:@"encryption"];
     if ((flow && !VCProfileText(flow)) || (encryption && !VCProfileText(encryption))) return nil;
     NSString *credential=nil;
-    if ([protocol isEqual:@"trojan"]) {
+    if ([protocol isEqual:@"trojan"] || [protocol isEqual:@"shadowsocks"]) {
         id password=[user objectForKey:@"password"];
         if (![password isKindOfClass:[NSString class]] || ![password length] || [flow length] || ([encryption length] && ![encryption isEqual:@"none"])) return nil;
         credential=[self percentEncodedHappURIValue:password];
+        if ([protocol isEqual:@"shadowsocks"]) {
+            NSString *method=VCProfileSSMethod([user objectForKey:@"method"]);
+            if (!method) return nil;
+            for (NSDictionary *object in @[user,settings]) {
+                id plugin=[object objectForKey:@"plugin"];
+                if (plugin && (![plugin isKindOfClass:[NSString class]] || [plugin length])) return nil;
+            }
+            if (VCProfileForbidden(user,@[@"uot",@"udp_over_tcp",@"udpOverTcp",@"packetEncoding"],@"settings.")) return nil;
+            credential=[NSString stringWithFormat:@"%@:%@",method,credential];
+        }
     } else {
         id identifier=[user objectForKey:@"id"];
         if (!VCProfileText(identifier) || ![identifier length]) return nil;
@@ -1223,7 +1316,7 @@ static BOOL VCProfileVMessCipher(NSString *value) {
     id title=[config objectForKey:@"remarks"];
     if (title && !VCProfileText(title)) return nil;
     NSString *fragment=[title length] ? [@"#" stringByAppendingString:[self percentEncodedHappURIValue:title]] : @"";
-    NSString *uri=[NSString stringWithFormat:@"%@://%@@%@:%u?%@%@",protocol,credential,host,port,[query componentsJoinedByString:@"&"],fragment];
+    NSString *uri=[NSString stringWithFormat:@"%@://%@@%@:%u?%@%@",[protocol isEqual:@"shadowsocks"] ? @"ss" : protocol,credential,host,port,[query componentsJoinedByString:@"&"],fragment];
     return [self unsupportedConfigReasonForURI:uri] ? nil : uri;
 }
 
@@ -1408,7 +1501,7 @@ static BOOL VCProfileVMessCipher(NSString *value) {
     if (error) *error=@"invalid or unsupported Karing profile";
     if (![server isKindOfClass:[NSDictionary class]]) return nil;
     NSString *protocol=[[server objectForKey:@"type"] isKindOfClass:[NSString class]] ? [[server objectForKey:@"type"] lowercaseString] : nil;
-    if (![@[@"vless",@"socks",@"socks5",@"trojan",@"vmess"] containsObject:protocol]) return nil;
+    if (![@[@"vless",@"socks",@"socks5",@"trojan",@"vmess",@"shadowsocks"] containsObject:protocol]) return nil;
     unsigned port=0;
     if (!VCProfileText([server objectForKey:@"server"]) || !VCProfileUnsignedScalar([server objectForKey:@"server_port"],65535,&port) || !port) return nil;
     if ([protocol isEqual:@"socks"] || [protocol isEqual:@"socks5"]) {
@@ -1425,10 +1518,11 @@ static BOOL VCProfileVMessCipher(NSString *value) {
         return uri;
     }
     NSMutableDictionary *user=[NSMutableDictionary dictionary];
-    for (NSString *field in @[@"uuid",@"encryption",@"flow",@"password"]) {
+    for (NSString *field in @[@"uuid",@"encryption",@"flow",@"password",@"method",@"plugin"]) {
         id value=[server objectForKey:field];
         if (value) [user setObject:value forKey:[field isEqual:@"uuid"] ? @"id" : field];
     }
+    if ([protocol isEqual:@"shadowsocks"] && VCProfileForbidden(server,@[@"plugin_opts",@"plugin_options",@"udp_over_tcp",@"uot"],@"server.")) return nil;
     if ([protocol isEqual:@"vmess"]) {
         if ([server objectForKey:@"security"]) [user setObject:[server objectForKey:@"security"] forKey:@"security"];
         if (!VCProfileCopyAliases(server,user,@"alterId",@[@"alter_id",@"alterId",@"aid"])) return nil;
