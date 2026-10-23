@@ -6,6 +6,8 @@
 @protocol VCSubscriptionUpdateOptions <NSObject>
 - (BOOL)preserveCustomSubscriptionNames;
 - (NSTimeInterval)subscriptionUpdateTimestamp;
+@optional
+- (void)profileMetadataPrepared:(NSDictionary *)metadata;
 @end
 
 @interface VCProfileLogic : NSObject {
@@ -14,6 +16,8 @@
 - (NSDictionary *)metadataForURI:(NSString *)uri;
 - (BOOL)isConfigurationURI:(NSString *)uri;
 - (void)prepareMetadataForConfigurations:(NSArray *)configs subscriptions:(NSArray *)subscriptions;
+- (NSDictionary *)preparedMetadataForConfigurations:(NSArray *)configs subscriptions:(NSArray *)subscriptions additionalMetadata:(NSDictionary *)additional;
+- (void)installPreparedMetadata:(NSDictionary *)metadata;
 - (BOOL)parseServerHost:(NSString **)hostOut port:(uint16_t *)portOut fromURI:(NSString *)uri;
 - (NSString *)URIFromKaringServer:(NSDictionary *)server error:(NSString **)error;
 - (NSString *)URIFromHappJSONConfig:(NSDictionary *)config;

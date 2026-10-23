@@ -47,6 +47,13 @@
 
     NSMutableArray *_configs;
     NSMutableArray *_subscriptions;
+    dispatch_queue_t _configurationQueue;
+    BOOL _configurationLoading;
+    BOOL _metadataPreparationRunning;
+    BOOL _metadataPreparationPending;
+    NSUInteger _metadataRevision;
+    NSMutableDictionary *_pendingProfileMetadata;
+    NSURL *_deferredImportURL;
     NSMutableDictionary *_pingDisplayByURI;
     NSString *_pingNetworkSignature;
     NSTimer *_pingNetworkTimer;
@@ -147,6 +154,9 @@
 - (void)flushMainStateDefaults;
 - (void)saveData;
 - (void)loadData;
+- (void)completeConfigurationLoad:(NSDictionary *)loaded;
+- (void)prepareProfileMetadata;
+- (void)profileMetadataPrepared:(NSDictionary *)metadata;
 - (NSArray *)subscriptionItemsAtIndex:(NSInteger)subIdx;
 - (NSInteger)subscriptionRowsExpandedIndex;
 - (NSInteger)subscriptionHeaderExpandedIndex;

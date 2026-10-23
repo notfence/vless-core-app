@@ -259,6 +259,9 @@
     [self applyTheme];
     [self refreshUpdateIndicatorFromCache];
     [self queryInitialStatus];
+    if (_configurationLoading) {
+        _plusBtn.enabled=NO; _refreshBtn.enabled=NO; _settingsBtn.enabled=NO;
+    }
     VCRecordAppEvent(@"ui", @"Main screen initialized",
                      [NSString stringWithFormat:@"width=%.0f height=%.0f configs=%lu subscriptions=%lu ipad=%d",
                       b.size.width,
@@ -322,6 +325,9 @@
 }
 
 - (void)dealloc {
+    if (_configurationQueue) dispatch_release(_configurationQueue);
+    [_pendingProfileMetadata release];
+    [_deferredImportURL release];
     [[NSNotificationCenter defaultCenter] removeObserver:self];
     [NSObject cancelPreviousPerformRequestsWithTarget:self
                                              selector:@selector(startLaunchAutoUpdateIfNeeded)

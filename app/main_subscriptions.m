@@ -504,6 +504,7 @@
 }
 
 - (void)startLaunchAutoUpdateIfNeeded {
+    if (_configurationLoading) return;
     if (_didRunLaunchAutoUpdate) return;
     if (!_autoUpdateSubscriptions || [_subscriptions count] == 0) {
         _didRunLaunchAutoUpdate = YES;

@@ -1402,6 +1402,11 @@
 }
 
 - (void)importFileAtURL:(NSURL *)url {
+    if (_configurationLoading) {
+        if (!_deferredImportURL) _deferredImportURL=[url copy];
+        else [self showStatus:@"Configurations are loading; retry this import when ready" ok:NO];
+        return;
+    }
     if (![url isKindOfClass:[NSURL class]] || ![url isFileURL]) {
         VCRecordAppEvent(@"import", @"File import rejected", @"reason=unsupported_url");
         [self showStatus:@"Unsupported import file URL" ok:NO];

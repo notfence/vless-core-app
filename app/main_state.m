@@ -157,6 +157,7 @@ static BOOL gVCSecureStoreWritable = YES;
 }
 
 - (void)saveMainState {
+    if (_configurationLoading) return;
     NSUserDefaults *ud = [NSUserDefaults standardUserDefaults];
     NSDictionary *lastSelection = nil;
     if (_selectedConfigIndex >= 0 && _selectedConfigIndex < (NSInteger)[_configs count]) {
@@ -193,7 +194,8 @@ static BOOL gVCSecureStoreWritable = YES;
 }
 
 - (void)saveData {
-    [VCProfiles() prepareMetadataForConfigurations:_configs subscriptions:_subscriptions];
+    if (_configurationLoading) return;
+    [self prepareProfileMetadata];
     NSUserDefaults *ud = [NSUserDefaults standardUserDefaults];
     BOOL storeSaved = gVCSecureStoreWritable &&
         VCSaveProtectedConfigurationData(_configs, _subscriptions);
@@ -218,15 +220,43 @@ static BOOL gVCSecureStoreWritable = YES;
 }
 
 - (void)loadData {
+    _configurationLoading=YES;
+    _configurationQueue=dispatch_queue_create("com.vlesscore.configuration", DISPATCH_QUEUE_SERIAL);
+    _configs=[[NSMutableArray alloc] init];
+    _subscriptions=[[NSMutableArray alloc] init];
+    _selectedConfigIndex=_selectedSubIndex=_selectedSubItemIndex=_expandedSubscription=-1;
+    _updatingSubscriptionIndex=_reorderingSection=-1;
+    NSUserDefaults *defaults=[NSUserDefaults standardUserDefaults];
+    _autoUpdateSubscriptions=[defaults objectForKey:kDefaultsAutoUpdateSubsKey] ? [defaults boolForKey:kDefaultsAutoUpdateSubsKey] : YES;
+    _preserveCustomSubscriptionNames=[defaults boolForKey:kDefaultsPreserveCustomSubscriptionNamesKey];
+    _stealthModeEnabled=[defaults boolForKey:kDefaultsStealthModeKey];
+    _darkThemeEnabled=[defaults boolForKey:kDefaultsDarkThemeKey];
+    _automaticUpdateChecksEnabled=[defaults objectForKey:kDefaultsAutomaticUpdateChecksKey] ? [defaults boolForKey:kDefaultsAutomaticUpdateChecksKey] : YES;
+    NSArray *legacyConfigs=[[defaults objectForKey:kDefaultsConfigsKey] retain];
+    NSArray *legacySubscriptions=[[defaults objectForKey:kDefaultsSubsKey] retain];
+    BOOL writable=gVCSecureStoreWritable;
+    dispatch_async(_configurationQueue, ^{
+        NSAutoreleasePool *pool=[[NSAutoreleasePool alloc] init];
+        BOOL exists=NO;
+        NSDictionary *protectedData=VCLoadProtectedConfigurationData(&exists);
+        VCConfigurationDataSelection selected=VCInitialConfigurationData(protectedData,exists,legacyConfigs,legacySubscriptions,writable);
+        NSArray *configs=selected.configs ?: @[],*subscriptions=selected.subscriptions ?: @[];
+        BOOL migrated=NO;
+        if (!protectedData && selected.writable && (legacyConfigs || legacySubscriptions)) migrated=VCSaveProtectedConfigurationData(configs,subscriptions);
+        NSDictionary *metadata=[VCProfiles() preparedMetadataForConfigurations:configs subscriptions:subscriptions additionalMetadata:nil];
+        NSDictionary *loaded=[[NSDictionary alloc] initWithObjectsAndKeys:configs,@"configs",subscriptions,@"subscriptions",metadata,@"metadata",@(selected.writable),@"writable",@(protectedData != nil),@"secure",@(migrated),@"migrated",nil];
+        dispatch_async(dispatch_get_main_queue(), ^{ [self completeConfigurationLoad:loaded]; [loaded release]; });
+        [legacyConfigs release]; [legacySubscriptions release]; [pool drain];
+    });
+}
+
+- (void)completeConfigurationLoad:(NSDictionary *)loaded {
     NSUserDefaults *ud = [NSUserDefaults standardUserDefaults];
-    BOOL secureFileExists = NO;
-    NSDictionary *protectedData = VCLoadProtectedConfigurationData(&secureFileExists);
     NSArray *legacyConfigs = [ud objectForKey:kDefaultsConfigsKey];
     NSArray *legacySubscriptions = [ud objectForKey:kDefaultsSubsKey];
-    VCConfigurationDataSelection initial = VCInitialConfigurationData(protectedData, secureFileExists, legacyConfigs, legacySubscriptions, gVCSecureStoreWritable);
-    NSArray *cfg = initial.configs;
-    NSArray *subs = initial.subscriptions;
-    gVCSecureStoreWritable = initial.writable;
+    NSArray *cfg=[loaded objectForKey:@"configs"],*subs=[loaded objectForKey:@"subscriptions"];
+    gVCSecureStoreWritable=[[loaded objectForKey:@"writable"] boolValue];
+    [_configs release]; [_subscriptions release];
 
     if ([cfg isKindOfClass:[NSArray class]]) {
         _configs = [[NSMutableArray alloc] initWithArray:cfg];
@@ -240,16 +270,14 @@ static BOOL gVCSecureStoreWritable = YES;
         _subscriptions = [[NSMutableArray alloc] init];
     }
 
-    [VCProfiles() prepareMetadataForConfigurations:_configs subscriptions:_subscriptions];
+    [VCProfiles() installPreparedMetadata:[loaded objectForKey:@"metadata"]];
 
-    if ([protectedData isKindOfClass:[NSDictionary class]] &&
+    if ([[loaded objectForKey:@"secure"] boolValue] &&
         ([legacyConfigs isKindOfClass:[NSArray class]] || [legacySubscriptions isKindOfClass:[NSArray class]])) {
         [ud removeObjectForKey:kDefaultsConfigsKey];
         [ud removeObjectForKey:kDefaultsSubsKey];
         [ud synchronize];
-    } else if (![protectedData isKindOfClass:[NSDictionary class]] &&
-        ([legacyConfigs isKindOfClass:[NSArray class]] || [legacySubscriptions isKindOfClass:[NSArray class]]) &&
-        VCSaveProtectedConfigurationData(_configs, _subscriptions)) {
+    } else if ([[loaded objectForKey:@"migrated"] boolValue]) {
         [ud removeObjectForKey:kDefaultsConfigsKey];
         [ud removeObjectForKey:kDefaultsSubsKey];
         [ud synchronize];
@@ -320,8 +348,48 @@ static BOOL gVCSecureStoreWritable = YES;
                      [NSString stringWithFormat:@"configs=%lu subscriptions=%lu secure=%d writable=%d",
                       (unsigned long)[_configs count],
                       (unsigned long)[_subscriptions count],
-                      [protectedData isKindOfClass:[NSDictionary class]] ? 1 : 0,
+                      [[loaded objectForKey:@"secure"] boolValue] ? 1 : 0,
                       gVCSecureStoreWritable ? 1 : 0]);
+    _configurationLoading=NO;
+    _plusBtn.enabled=YES; _refreshBtn.enabled=YES; _settingsBtn.enabled=YES;
+    [self normalizeSelection];
+    [self reloadMainTableDataAfterExternalChange];
+    [self updateConnectButton];
+    [self showStatus:gVCSecureStoreWritable ? (_connected ? @"Connected" : @"Ready") : @"Configuration store is unavailable" ok:gVCSecureStoreWritable];
+    if (_deferredImportURL) {
+        NSURL *url=[_deferredImportURL autorelease]; _deferredImportURL=nil;
+        [self importFileAtURL:url];
+    } else [self startLaunchAutoUpdateIfNeeded];
+}
+
+- (void)profileMetadataPrepared:(NSDictionary *)metadata {
+    if (![metadata count]) return;
+    @synchronized(self) {
+        if (!_pendingProfileMetadata) _pendingProfileMetadata=[[NSMutableDictionary alloc] init];
+        [_pendingProfileMetadata addEntriesFromDictionary:metadata];
+    }
+}
+
+- (void)prepareProfileMetadata {
+    _metadataRevision++;
+    if (_metadataPreparationRunning) { _metadataPreparationPending=YES; return; }
+    _metadataPreparationRunning=YES;
+    _metadataPreparationPending=NO;
+    NSUInteger revision=_metadataRevision;
+    NSArray *configs=[_configs copy],*subscriptions=[_subscriptions copy];
+    NSDictionary *additional=nil;
+    @synchronized(self) { additional=_pendingProfileMetadata; _pendingProfileMetadata=nil; }
+    dispatch_async(_configurationQueue, ^{
+        NSAutoreleasePool *pool=[[NSAutoreleasePool alloc] init];
+        NSDictionary *metadata=[[VCProfiles() preparedMetadataForConfigurations:configs subscriptions:subscriptions additionalMetadata:additional] retain];
+        dispatch_async(dispatch_get_main_queue(), ^{
+            if (revision == _metadataRevision) [VCProfiles() installPreparedMetadata:metadata];
+            _metadataPreparationRunning=NO;
+            if (_metadataPreparationPending) [self prepareProfileMetadata];
+            [metadata release];
+        });
+        [additional release]; [configs release]; [subscriptions release]; [pool drain];
+    });
 }
 
 - (NSArray *)subscriptionItemsAtIndex:(NSInteger)subIdx {

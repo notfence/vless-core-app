@@ -241,6 +241,7 @@
 }
 
 - (BOOL)isConnectionActionInProgress {
+    if (_configurationLoading) return YES;
     return VCConnectionActionInProgress(_connectionActionInProgress, _reconnectInProgress, [_pendingReconnectURI length] > 0);
 }
 
@@ -491,7 +492,7 @@
             [resp rangeOfString:@"protected=1"].location != NSNotFound;
 
         dispatch_async(dispatch_get_main_queue(), ^{
-            if (generation != _connectionActionGeneration || [self isConnectionActionInProgress]) return;
+            if (generation != _connectionActionGeneration || VCConnectionActionInProgress(_connectionActionInProgress, _reconnectInProgress, [_pendingReconnectURI length] > 0)) return;
             if (connectedNow) {
                 VCRecordAppEvent(@"connection", @"Existing VPN session detected", protectedLogsNow ? @"protected_logs=1" : @"protected_logs=0");
                 _connected = YES;

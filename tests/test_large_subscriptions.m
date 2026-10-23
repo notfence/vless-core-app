@@ -48,7 +48,10 @@ static int measure(NSString *path) {
     double parsed=clockMS()-begin;
     [work drain];
     work=[[NSAutoreleasePool alloc] init]; begin=clockMS();
-    [profiles prepareMetadataForConfigurations:@[] subscriptions:@[@{@"items":[report objectForKey:@"uris"]}]];
+    if ([profiles respondsToSelector:@selector(preparedMetadataForConfigurations:subscriptions:additionalMetadata:)])
+        [profiles installPreparedMetadata:[profiles preparedMetadataForConfigurations:@[] subscriptions:@[@{@"items":[report objectForKey:@"uris"]}]
+                                                                    additionalMetadata:[report objectForKey:@"metadata"]]];
+    else [profiles prepareMetadataForConfigurations:@[] subscriptions:@[@{@"items":[report objectForKey:@"uris"]}]];
     double metadata=clockMS()-begin;
     [work drain];
     unsigned long rss,peak; memory(&rss,&peak);
@@ -87,5 +90,18 @@ int main(int argc, char **argv) {
     CHECK("bulk/aliases-rejected",[profiles unsupportedConfigReasonForURI:@"vless://u@example.test:443?type=ws&network=tcp"] != nil);
     CHECK("bulk/empty-query-compatible",[profiles isSupportedConfigTupleForURI:@"vless://u@example.test:443?fp=&type=tcp&security=none"]);
     CHECK("bulk/socks-query-compatible",[profiles isSupportedConfigTupleForURI:@"socks5://example.test?ignored&security=none"]);
+    CHECK("bulk/prepared-metadata-interface",[profiles respondsToSelector:@selector(preparedMetadataForConfigurations:subscriptions:additionalMetadata:)]);
+    NSDictionary *preparedReport=[profiles subscriptionImportReportFromData:plain];
+    NSDictionary *entries=[preparedReport objectForKey:@"metadata"];
+    CHECK("bulk/report-keeps-validated-metadata",[entries count] == 2 && ![[[entries objectForKey:one] description] containsString:@"A+:"]);
+    NSDictionary *prepared=[profiles preparedMetadataForConfigurations:@[] subscriptions:@[@{@"items":@[one]}] additionalMetadata:entries];
+    CHECK("bulk/preparation-reuses-parsed-metadata",[prepared objectForKey:one] == [entries objectForKey:one] && [prepared count] == 1);
+    CHECK("bulk/preparation-does-not-install",[profiles metadataForURI:one] != [entries objectForKey:one]);
+    [profiles installPreparedMetadata:prepared];
+    CHECK("bulk/prepared-install",[profiles metadataForURI:one] == [entries objectForKey:one]);
+    NSDictionary *reused=[profiles preparedMetadataForConfigurations:@[@{@"uri":one}] subscriptions:@[] additionalMetadata:nil];
+    CHECK("bulk/unchanged-metadata-reused",[reused objectForKey:one] == [entries objectForKey:one]);
+    [profiles installPreparedMetadata:[profiles preparedMetadataForConfigurations:@[] subscriptions:@[] additionalMetadata:nil]];
+    CHECK("bulk/removed-metadata-pruned",[profiles metadataForURI:one] != [entries objectForKey:one]);
     [profiles release]; FINISH("large subscriptions"); [outer drain]; return 0;
 }

@@ -497,17 +497,30 @@ static NSDictionary *VCProfileSSMetadata(NSString *uri) {
 }
 
 - (void)prepareMetadataForConfigurations:(NSArray *)configs subscriptions:(NSArray *)subscriptions {
+    [self installPreparedMetadata:[self preparedMetadataForConfigurations:configs subscriptions:subscriptions additionalMetadata:nil]];
+}
+
+- (NSDictionary *)preparedMetadataForConfigurations:(NSArray *)configs subscriptions:(NSArray *)subscriptions additionalMetadata:(NSDictionary *)additional {
     NSMutableSet *uris=[NSMutableSet set];
     for (id config in configs) if ([config isKindOfClass:[NSDictionary class]] && [[config objectForKey:@"uri"] isKindOfClass:[NSString class]]) [uris addObject:[config objectForKey:@"uri"]];
     for (id sub in subscriptions) if ([sub isKindOfClass:[NSDictionary class]] && [[sub objectForKey:@"items"] isKindOfClass:[NSArray class]])
         for (id uri in [sub objectForKey:@"items"]) if ([uri isKindOfClass:[NSString class]]) [uris addObject:uri];
     NSMutableDictionary *metadata=[NSMutableDictionary dictionaryWithCapacity:[uris count]];
+    NSDictionary *previous=nil;
+    @synchronized(self) { previous=[_profileMetadata retain]; }
     for (NSString *uri in uris) {
         NSAutoreleasePool *pool=[[NSAutoreleasePool alloc] init];
-        [metadata setObject:[self metadataForURI:uri] forKey:uri];
+        NSDictionary *entry=[additional objectForKey:uri] ?: [previous objectForKey:uri];
+        [metadata setObject:entry ?: [self metadataForURI:uri] forKey:uri];
         [pool drain];
     }
-    @synchronized(self) { [_profileMetadata release]; _profileMetadata=[metadata copy]; }
+    [previous release];
+    return [[metadata copy] autorelease];
+}
+
+- (void)installPreparedMetadata:(NSDictionary *)metadata {
+    NSDictionary *snapshot=[metadata copy];
+    @synchronized(self) { [_profileMetadata release]; _profileMetadata=snapshot; }
 }
 
 - (BOOL)parseServerHost:(NSString **)hostOut port:(uint16_t *)portOut fromURI:(NSString *)uri {
@@ -791,6 +804,7 @@ static NSDictionary *VCProfileSSMetadata(NSString *uri) {
         return nil;
     }
     NSArray *uris = [importReport objectForKey:@"uris"];
+    if ([options respondsToSelector:@selector(profileMetadataPrepared:)]) [options profileMetadataPrepared:[importReport objectForKey:@"metadata"]];
     if ([uris count] == 0) {
         if (errorTextOut) {
             if (SubscriptionDataLooksLikeHTML(data)) {
@@ -1073,6 +1087,7 @@ static NSDictionary *VCProfileSSMetadata(NSString *uri) {
 - (NSDictionary *)importReportFromHappJSONData:(NSData *)data {
     if ([data length] > kVCMaximumSubscriptionBytes) return @{@"uris":@[],@"skipped":@0,@"issues":@[],@"error":@"Subscription response exceeds 32 MiB"};
     NSMutableArray *uris=[NSMutableArray array],*issues=[NSMutableArray array];
+    NSMutableDictionary *metadata=[NSMutableDictionary dictionary];
     NSMutableSet *seen=[NSMutableSet set];
     NSUInteger skipped=0;
     id root=data ? [NSJSONSerialization JSONObjectWithData:data options:0 error:NULL] : nil;
@@ -1083,14 +1098,15 @@ static NSDictionary *VCProfileSSMetadata(NSString *uri) {
     }
     for (id value in configs) {
         NSAutoreleasePool *pool=[[NSAutoreleasePool alloc] init];
-        NSString *uri=[self URIFromHappJSONConfig:[self happJSONDictionaryValue:value]];
+        NSDictionary *entry=nil;
+        NSString *uri=[self URIFromHappJSONConfig:[self happJSONDictionaryValue:value] metadata:&entry];
         if (![uri length]) {
             skipped++;
             if ([issues count] < 16) [issues addObject:@"configs[]: invalid or unsupported profile settings"];
-        } else if (![seen containsObject:uri]) { [seen addObject:uri]; [uris addObject:uri]; }
+        } else if (![seen containsObject:uri]) { [seen addObject:uri]; [uris addObject:uri]; [metadata setObject:entry forKey:uri]; }
         [pool drain];
     }
-    return @{@"uris":uris,@"skipped":@(skipped),@"issues":issues};
+    return @{@"uris":uris,@"skipped":@(skipped),@"issues":issues,@"metadata":metadata};
 }
 
 - (NSArray *)extractConfigURIsFromHappJSONData:(NSData *)data {
@@ -1115,14 +1131,16 @@ static NSDictionary *VCProfileSSMetadata(NSString *uri) {
         uris=[self extractConfigURIsFromText:text];
     }
     NSMutableArray *accepted=[NSMutableArray array],*issues=[NSMutableArray array]; NSUInteger skipped=0;
+    NSMutableDictionary *metadata=[NSMutableDictionary dictionary];
     for (NSString *uri in uris) {
         NSAutoreleasePool *pool=[[NSAutoreleasePool alloc] init];
-        NSString *reason=[self unsupportedConfigReasonForURI:uri];
+        NSDictionary *entry=[self metadataForURI:uri];
+        NSString *reason=[entry objectForKey:@"reason"];
         if (reason) { skipped++; if ([issues count] < 16) [issues addObject:reason]; }
-        else [accepted addObject:uri];
+        else { [accepted addObject:uri]; [metadata setObject:entry forKey:uri]; }
         [pool drain];
     }
-    return @{@"uris":[self sanitizeSubscriptionURIs:accepted],@"skipped":@(skipped),@"issues":issues};
+    return @{@"uris":[self sanitizeSubscriptionURIs:accepted],@"skipped":@(skipped),@"issues":issues,@"metadata":metadata};
 }
 
 - (NSArray *)parseSubscriptionData:(NSData *)data {
@@ -1240,6 +1258,10 @@ static NSDictionary *VCProfileSSMetadata(NSString *uri) {
 }
 
 - (NSString *)URIFromHappJSONConfig:(NSDictionary *)config {
+    return [self URIFromHappJSONConfig:config metadata:NULL];
+}
+
+- (NSString *)URIFromHappJSONConfig:(NSDictionary *)config metadata:(NSDictionary **)metadata {
     if (![config isKindOfClass:[NSDictionary class]]) return nil;
     NSDictionary *proxy=nil;
     for (id value in [self happJSONArrayValue:[config objectForKey:@"outbounds"]]) {
@@ -1316,7 +1338,10 @@ static NSDictionary *VCProfileSSMetadata(NSString *uri) {
     if (title && !VCProfileText(title)) return nil;
     NSString *fragment=[title length] ? [@"#" stringByAppendingString:[self percentEncodedHappURIValue:title]] : @"";
     NSString *uri=[NSString stringWithFormat:@"%@://%@@%@:%u?%@%@",[protocol isEqual:@"shadowsocks"] ? @"ss" : protocol,credential,host,port,[query componentsJoinedByString:@"&"],fragment];
-    return [self unsupportedConfigReasonForURI:uri] ? nil : uri;
+    NSDictionary *entry=[self metadataForURI:uri];
+    if ([entry objectForKey:@"reason"]) return nil;
+    if (metadata) *metadata=entry;
+    return uri;
 }
 
 - (NSDictionary *)happJSONDictionaryValue:(id)value {

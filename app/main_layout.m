@@ -301,7 +301,7 @@
     NSString *title = _subscriptionRefreshInProgress ? @"Updating" : (_connected ? @"Disconnect" : @"Connect");
     _connectButtonTitle.text = title;
     _connectBtn.accessibilityLabel = title;
-    [_connectPowerIcon setLoading:_subscriptionRefreshInProgress || [self isConnectionActionInProgress]];
+    [_connectPowerIcon setLoading:_subscriptionRefreshInProgress || VCConnectionActionInProgress(_connectionActionInProgress, _reconnectInProgress, [_pendingReconnectURI length] > 0)];
     UIColor *fill = _connected
         ? [UIColor colorWithRed:0.12f green:0.58f blue:0.20f alpha:1.0f]
         : VCAccentColor();
