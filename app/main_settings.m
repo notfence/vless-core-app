@@ -67,6 +67,16 @@
     VCRecordAppEvent(@"settings", @"Subscription ping sorting changed", enabled ? @"enabled=1" : @"enabled=0");
 }
 
+- (void)settingsVCDidChangePingSettings:(SettingsVC *)vc {
+    (void)vc;
+    [self stopAllPings];
+    ++_pingNetworkGeneration;
+    [_pingDisplayByURI removeAllObjects];
+    [self scheduleSubscriptionPingSort];
+    [self refreshVisiblePingAccessoriesForURI:nil];
+    [self refreshVisibleSubscriptionHeaderAccessories];
+}
+
 - (void)settingsVC:(SettingsVC *)vc didChangeDarkTheme:(BOOL)enabled {
     (void)vc;
     _darkThemeEnabled = enabled;

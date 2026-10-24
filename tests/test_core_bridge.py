@@ -31,6 +31,33 @@ with tempfile.TemporaryDirectory(prefix="vless-app-bridge-", dir=private_parent)
     decryption = f"mlkem768x25519plus.native.600s.{f.KEY}"
     flow = "xtls-rprx-vision"
     cert, _ = f.certificate()
+    for protocol, transport, security in (("vless", "tcp", "none"), ("trojan", "ws", "tls"),
+                                          ("vmess", "grpc", "tls"), ("shadowsocks", "xhttp", "reality")):
+        requests = []
+        def http_probe(connection):
+            request = bytearray()
+            while b"\r\n\r\n" not in request and len(request) < 4096:
+                block = connection.recv(512)
+                if not block:
+                    raise AssertionError("truncated proxy GET")
+                request.extend(block)
+            requests.append(bytes(request))
+            connection.sendall(b"HTTP/1.1 302 Found\r\nLocation: http://never-follow.invalid/\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
+        with contextlib.ExitStack() as stack:
+            target = stack.enter_context(f.Server(handler=http_probe))
+            reference = stack.enter_context(f.xray_server(transport, security, protocol=protocol,
+                                                          mode="stream-one" if transport == "xhttp" else None))
+            options = {"mode": "stream-one"} if transport == "xhttp" else {}
+            client = stack.enter_context(f.cli(f.uri(reference.port, transport, security, protocol=protocol, **options),
+                                               environment={"VLESS_CA_BUNDLE": str(cert)}))
+            url = f"http://127.0.0.1:{target.port}/custom%2Fprobe?q=a+b%26c"
+            result = subprocess.run([str(BUILD / "test_proxy_probe"), "--probe-url", str(client.port), url],
+                                    capture_output=True, text=True, timeout=8, check=True)
+            expected = (f"GET /custom%2Fprobe?q=a+b%26c HTTP/1.1\r\nHost: 127.0.0.1:{target.port}\r\n"
+                        "User-Agent: vless-core-app-ping\r\nConnection: close\r\n\r\n").encode()
+            if requests != [expected] or "result=0 latency_ms=" not in result.stdout or target.errors:
+                raise AssertionError("custom proxy GET changed the request or followed a redirect")
+        print(f"PASS app/core/Xray: custom-proxy-GET/{protocol}/{transport}/{security}")
     for transport, security in (("tcp", "none"), ("ws", "tls"), ("grpc", "tls"), ("xhttp", "reality")):
         shared = {"sessionIDPlacement": "header", "sessionIDKey": "X-vless-core-session", "seqPlacement": "header"}
         with contextlib.ExitStack() as stack:

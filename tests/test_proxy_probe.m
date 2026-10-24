@@ -1,7 +1,9 @@
 #import "../app/proxy_probe.h"
+#import "../common/subscription_task.h"
 #include "check.h"
 #include <sys/socket.h>
 #include <netinet/in.h>
+#include <arpa/inet.h>
 #include <unistd.h>
 #include <signal.h>
 #include <errno.h>
@@ -9,6 +11,11 @@
 #include <fcntl.h>
 
 static int probe_running,probe_fd=-1,partial_io,write_interrupted,read_interrupted;
+static const char *default_request="GET /generate_204 HTTP/1.1\r\nHost: www.gstatic.com\r\nUser-Agent: vless-core-app-ping\r\nConnection: close\r\n\r\n";
+static void install_defaults(NSUserDefaults *defaults, NSDictionary *values) {
+    [defaults removeVolatileDomainForName:NSArgumentDomain];
+    [defaults setVolatileDomain:values forName:NSArgumentDomain];
+}
 int __real_socket(int,int,int);
 ssize_t __real_write(int,const void *,size_t);
 ssize_t __real_read(int,void *,size_t);
@@ -42,8 +49,10 @@ static int probe(uint16_t port,int timeout,int *ms) {
 typedef struct {
     int listener,request_read,connected;
     const char *response;
+    const char *expected_host,*expected_request;
+    uint16_t expected_port;
     size_t response_length;
-    int fragmented,hold,release;
+    int fragmented,hold,release,delay_us;
     pthread_mutex_t lock;
     pthread_cond_t condition;
 } peer_t;
@@ -73,11 +82,22 @@ static void *serve(void *opaque) {
         unsigned char size;
         if (receive_bytes(fd,&size,1)) goto done;
         length=(size_t)size+2;
-    } else goto done;
+    } else if (head[3] == 4) length=18;
+    else goto done;
     if (receive_bytes(fd,address,length)) goto done;
+    if (peer->expected_host) {
+        unsigned char expected[256];
+        size_t expected_length;
+        int expected_type;
+        if (inet_pton(AF_INET,peer->expected_host,expected) == 1) { expected_length=4; expected_type=1; }
+        else if (inet_pton(AF_INET6,peer->expected_host,expected) == 1) { expected_length=16; expected_type=4; }
+        else { expected_length=strlen(peer->expected_host); expected_type=3; memcpy(expected,peer->expected_host,expected_length); }
+        if (head[3] != expected_type || length != expected_length+2 || memcmp(address,expected,expected_length) ||
+            ((unsigned)address[length-2]*256+address[length-1]) != peer->expected_port) goto done;
+    }
     peer->connected=1;
     if (send(fd,"\x05\x00\x00\x01\x7f\x00\x00\x01\x00\x00",10,0) != 10) goto done;
-    char request[1024]; size_t used=0;
+    char request[2304]; size_t used=0;
     while (used+1<sizeof(request)) {
         ssize_t count=recv(fd,request+used,1,0);
         if (count < 0 && errno == EINTR) continue;
@@ -85,7 +105,7 @@ static void *serve(void *opaque) {
         request[++used]=0;
         if (strstr(request,"\r\n\r\n")) break;
     }
-    int valid_request=!strcmp(request,kVCProxyPingRequest);
+    int valid_request=!strcmp(request,peer->expected_request ?: default_request);
     pthread_mutex_lock(&peer->lock);
     peer->request_read=valid_request;
     pthread_cond_signal(&peer->condition);
@@ -98,7 +118,7 @@ static void *serve(void *opaque) {
         if (count < 0 && errno == EINTR) continue;
         if (count <= 0) break;
         offset+=(size_t)count;
-        if (peer->fragmented) usleep(1000);
+        if (peer->fragmented) usleep(peer->delay_us ?: 1000);
     }
 done:
     close(fd); return NULL;
@@ -132,6 +152,61 @@ static void *cancellable_probe(void *opaque) {
     [pool drain]; return NULL;
 }
 
+static void target_tests(void) {
+    CHECK("probe-url/default-remains-unchanged",[kVCDefaultProxyPingURL isEqual:@"http://www.gstatic.com/generate_204"]);
+    NSDictionary *target=VCProxyPingTargetForURL(kVCDefaultProxyPingURL);
+    CHECK("probe-url/default-wire-unchanged",[[target objectForKey:@"request"] isEqual:[NSString stringWithUTF8String:default_request]]);
+    NSArray *urls=@[@"http://Example.COM",@"HTTP://probe.example:1?key=+%2B",@"http://127.0.0.1:65535/a",
+        @"http://[::1]:8080/check",@"http://[2001:db8::1]/",@"http://probe.example:00080/?empty=&encoded=%23%26%40",
+        @"http://probe.example/a%0D%0A+test"];
+    for (NSString *url in urls) CHECK("probe-url/valid-target",VCProxyPingTargetForURL(url) != nil);
+    target=VCProxyPingTargetForURL([urls objectAtIndex:1]);
+    CHECK("probe-url/query-plus-and-escapes-preserved",[[target objectForKey:@"request"] hasPrefix:@"GET /?key=+%2B HTTP/1.1\r\nHost: probe.example:1\r\n"]);
+    target=VCProxyPingTargetForURL([urls objectAtIndex:3]);
+    CHECK("probe-url/ipv6-host-separated-from-authority",[[target objectForKey:@"host"] isEqual:@"::1"] && [[target objectForKey:@"port"] intValue] == 8080 &&
+        [[target objectForKey:@"request"] rangeOfString:@"Host: [::1]:8080\r\n"].location != NSNotFound);
+    NSArray *invalid=@[@"",@"http://",@"https://probe.example/",@"ftp://probe.example/",@"probe.example",@"//probe.example/",
+        @" http://probe.example/",@"http://probe.example/ ",@"http://probe.example/\n",@"http://probe.example\r\nX: injected/",
+        @"http://probe.example/a\tb",@"http://probe.example/a\0b",@"http://user:password@probe.example/",@"http://@probe.example/",
+        @"http://probe.example/#fragment",@"http://probe.example:0/",@"http://probe.example:65536/",@"http://probe.example:/",
+        @"http://probe.example:+80/",@"http://probe.example:-1/",@"http://probe.example:80x/",@"http://probe.example:999999999999999999999999/",
+        @"http://[::1",@"http://[]/",@"http://[not-ip]/",@"http://[::1]x/",@"http://[::1]]/",@"http://[::1]:/",
+        @"http://::1/",@"http://probe.example\\evil/",@"http://probe%2Eexample/",@"http://probe.example/%",@"http://probe.example/%0",
+        @"http://probe.example/%XY",@"http://probe.example/\"",@"http://probe.example/{a}",@"http://probe.example/тест"];
+    for (NSString *url in invalid) {
+        CHECK("probe-url/reject-unsafe-or-unsupported-input",VCProxyPingTargetForURL(url) == nil);
+        probe_fd=-1; probe_running=1; int ms=777;
+        int result=ProxyGetConnectToURLOnceMs(1,url,50,&ms,nil);
+        probe_running=0;
+        CHECK("probe-url/invalid-target-never-opens-socket",result != 0 && probe_fd == -1 && ms == 777);
+    }
+    CHECK("probe-url/reject-non-string",VCProxyPingTargetForURL((id)@42) == nil && VCProxyPingTargetForURL(nil) == nil);
+    NSString *prefix=@"http://probe.example/";
+    NSString *maximum=[prefix stringByPaddingToLength:2048 withString:@"a" startingAtIndex:0];
+    CHECK("probe-url/length-boundaries",VCProxyPingTargetForURL(maximum) && !VCProxyPingTargetForURL([maximum stringByAppendingString:@"a"]));
+    NSMutableDictionary *defaults=[NSMutableDictionary dictionary];
+    CHECK("probe-url/unset-default",[VCProxyPingURLInDefaults(defaults) isEqual:kVCDefaultProxyPingURL]);
+    [defaults setObject:[urls objectAtIndex:1] forKey:@"vlesscore.ping.url"];
+    CHECK("probe-url/saved-value-roundtrip",[VCProxyPingURLInDefaults(defaults) isEqual:[urls objectAtIndex:1]]);
+    for (id value in @[@"",@42,@"https://probe.example/",@"http://probe.example/\r\n"]) {
+        [defaults setObject:value forKey:@"vlesscore.ping.url"];
+        CHECK("probe-url/corrupt-setting-falls-back-safely",[VCProxyPingURLInDefaults(defaults) isEqual:kVCDefaultProxyPingURL]);
+    }
+    uint32_t state=42;
+    for (unsigned attempt=0;attempt<10000;attempt++) {
+        NSAutoreleasePool *pool=[[NSAutoreleasePool alloc] init];
+        unichar chars[80]; size_t count=attempt%80;
+        for (size_t index=0;index<count;index++) { state=state*1664525+1013904223; chars[index]=(state>>16)&0xffff; }
+        NSString *suffix=[NSString stringWithCharacters:chars length:count];
+        NSDictionary *parsed=VCProxyPingTargetForURL([prefix stringByAppendingString:suffix]);
+        if (parsed) {
+            NSString *request=[parsed objectForKey:@"request"];
+            CHECK("probe-url/fuzz-cannot-inject-headers",[[request componentsSeparatedByString:@"\r\n"] count] == 6 && [[parsed objectForKey:@"host"] isEqual:@"probe.example"]);
+        }
+        [pool drain];
+    }
+}
+
 int main(int argc,char **argv) {
     alarm(10); signal(SIGPIPE,SIG_IGN);
     NSAutoreleasePool *pool=[[NSAutoreleasePool alloc] init];
@@ -140,6 +215,17 @@ int main(int argc,char **argv) {
         printf("result=%d latency_ms=%d\n",result,ms);
         [pool drain]; return result == 0 ? 0 : 1;
     }
+    if (argc == 4 && !strcmp(argv[1],"--probe-url")) {
+        int ms=-1,result=ProxyGetConnectToURLOnceMs((uint16_t)atoi(argv[2]),[NSString stringWithUTF8String:argv[3]],3500,&ms,nil);
+        printf("result=%d latency_ms=%d\n",result,ms);
+        [pool drain]; return result == 0 ? 0 : 1;
+    }
+    NSUserDefaults *defaults=[NSUserDefaults standardUserDefaults];
+    NSDictionary *saved_domain=[[defaults volatileDomainForName:NSArgumentDomain] copy];
+    NSMutableDictionary *probe_defaults=[NSMutableDictionary dictionaryWithDictionary:saved_domain ?: @{}];
+    [probe_defaults setObject:kVCDefaultProxyPingURL forKey:@"vlesscore.ping.url"];
+    install_defaults(defaults,probe_defaults);
+    target_tests();
     const char *responses[]={"HTTP/1.1 204 No Content\r\n\r\n","HTTP/1.0 200 OK\r\n\r\n","HTTP/1.1 403 Forbidden\r\n\r\n",
         "","HTTP/","HTTP/1.1 204 No Content","not HTTP\r\n","HTTP/1.1 abc Invalid\r\n","HTTP/1.1 099 Invalid\r\n","HTTP/1.1 600 Invalid\r\n"};
     for (size_t i=0;i<sizeof(responses)/sizeof(responses[0]);i++) {
@@ -175,6 +261,50 @@ int main(int argc,char **argv) {
     CHECK("probe/cancellation-closes-socket",probe_fd >= 0 && fcntl(probe_fd,F_GETFD) == -1 && errno == EBADF);
     VCPingCancellation *cancelled=[[[VCPingCancellation alloc] init] autorelease]; [cancelled cancel];
     CHECK("probe-cancelled-before-connect",ProxyGetConnectOnceMs(1,50,&ms,cancelled) != 0);
+    id saved=[[defaults objectForKey:@"vlesscore.ping.url"] retain];
+    [probe_defaults setObject:@"http://probe.example:8088/check%2Fpath?q=a+b%26c" forKey:@"vlesscore.ping.url"];
+    install_defaults(defaults,probe_defaults);
+    peer_t custom={.response=valid,.response_length=strlen(valid),.expected_host="probe.example",.expected_port=8088,
+        .expected_request="GET /check%2Fpath?q=a+b%26c HTTP/1.1\r\nHost: probe.example:8088\r\nUser-Agent: vless-core-app-ping\r\nConnection: close\r\n\r\n"};
+    port=listen_peer(&custom,&worker);
+    int custom_result=probe(port,300,&ms);
+    finish_peer(&custom,worker);
+    if (saved) [probe_defaults setObject:saved forKey:@"vlesscore.ping.url"];
+    else [probe_defaults removeObjectForKey:@"vlesscore.ping.url"];
+    install_defaults(defaults,probe_defaults);
+    [saved release];
+    CHECK("probe/configured-url-controls-socks-and-http-target",custom_result == 0 && custom.request_read);
+    NSArray *wire_urls=@[@"http://Example.COM",@"http://127.0.0.1:65535/?q=+%2B",@"http://[::1]:8080/check"];
+    NSArray *wire_hosts=@[@"Example.COM",@"127.0.0.1",@"::1"];
+    NSArray *wire_ports=@[@80,@65535,@8080];
+    NSArray *wire_requests=@[@"GET / HTTP/1.1\r\nHost: Example.COM\r\nUser-Agent: vless-core-app-ping\r\nConnection: close\r\n\r\n",
+        @"GET /?q=+%2B HTTP/1.1\r\nHost: 127.0.0.1:65535\r\nUser-Agent: vless-core-app-ping\r\nConnection: close\r\n\r\n",
+        @"GET /check HTTP/1.1\r\nHost: [::1]:8080\r\nUser-Agent: vless-core-app-ping\r\nConnection: close\r\n\r\n"];
+    saved=[[defaults objectForKey:@"vlesscore.ping.url"] retain];
+    [probe_defaults setObject:@"http://different.example/" forKey:@"vlesscore.ping.url"];
+    install_defaults(defaults,probe_defaults);
+    for (NSUInteger index=0;index<[wire_urls count];index++) {
+        peer_t peer={.response=valid,.response_length=strlen(valid),.fragmented=1,
+            .expected_host=[[wire_hosts objectAtIndex:index] UTF8String],.expected_port=[[wire_ports objectAtIndex:index] unsignedIntValue],
+            .expected_request=[[wire_requests objectAtIndex:index] UTF8String]};
+        port=listen_peer(&peer,&worker);
+        int result=ProxyGetConnectToURLOnceMs(port,[wire_urls objectAtIndex:index],300,&ms,nil);
+        finish_peer(&peer,worker);
+        CHECK("probe/custom-host-port-request-and-atyp-on-wire",result == 0 && peer.request_read && peer.connected);
+    }
+    if (saved) [probe_defaults setObject:saved forKey:@"vlesscore.ping.url"];
+    else [probe_defaults removeObjectForKey:@"vlesscore.ping.url"];
+    install_defaults(defaults,probe_defaults);
+    [saved release];
+    peer_t trickle={.response=valid,.response_length=strlen(valid),.fragmented=1,.delay_us=20000};
+    port=listen_peer(&trickle,&worker);
+    double started=VCSubscriptionMonotonicTime(); ms=-1;
+    int result=probe(port,50,&ms);
+    double elapsed=VCSubscriptionMonotonicTime()-started;
+    finish_peer(&trickle,worker);
+    CHECK("probe/trickled-status-does-not-extend-deadline",result != 0 && ms == -1 && elapsed < 0.5);
+    install_defaults(defaults,saved_domain ?: @{});
+    [saved_domain release];
     FINISH("proxy health check");
     [pool drain]; return 0;
 }

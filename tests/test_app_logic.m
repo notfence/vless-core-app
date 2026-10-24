@@ -9,6 +9,7 @@
 #include <unistd.h>
 #include <time.h>
 #include <sys/resource.h>
+#include <math.h>
 
 @interface VCProfileLogic (VCMetadataTests)
 - (NSDictionary *)metadataForURI:(NSString *)uri;
@@ -301,6 +302,18 @@ static void dataTests(void) {
     CHECK("routing/ipv6-normalization", [VCNormalizedIPAddress(@"2001:db8::1") isEqual:@"2001:db8::1"]);
     CHECK("routing/host-is-not-ip", VCNormalizedIPAddress(@"example.test") == nil);
     VCMemoryDefaults *defaults = [[[VCMemoryDefaults alloc] init] autorelease];
+    CHECK("settings/ping-timeout-default-five-seconds",VCPingTimeoutSecondsInDefaults(defaults) == 5);
+    for (NSInteger seconds=5;seconds<=15;seconds++) {
+        [defaults setObject:@(seconds) forKey:kDefaultsPingTimeoutSecondsKey];
+        CHECK("settings/ping-timeout-roundtrip",VCPingTimeoutSecondsInDefaults(defaults) == seconds);
+    }
+    for (id value in @[@0,@4,@16,@(-1),@7.5,@(YES),@"10",[NSNull null],@(NAN),@(INFINITY),@1e100]) {
+        [defaults setObject:value forKey:kDefaultsPingTimeoutSecondsKey];
+        CHECK("settings/ping-timeout-invalid-value-safe-default",VCPingTimeoutSecondsInDefaults(defaults) == 5);
+    }
+    CHECK("settings/ping-timeout-slider-rounding",VCNormalizedPingTimeoutSeconds(7.49) == 7 && VCNormalizedPingTimeoutSeconds(7.5) == 8);
+    CHECK("settings/ping-timeout-slider-bounds",VCNormalizedPingTimeoutSeconds(-1e100) == 5 && VCNormalizedPingTimeoutSeconds(1e100) == 15);
+    CHECK("settings/ping-timeout-slider-nonfinite",VCNormalizedPingTimeoutSeconds(NAN) == 5 && VCNormalizedPingTimeoutSeconds(INFINITY) == 5);
     CHECK("settings/ping-sort-default-off", ![defaults boolForKey:kDefaultsSortSubscriptionsByPingKey]);
     [defaults setBool:YES forKey:kDefaultsSortSubscriptionsByPingKey];
     CHECK("settings/ping-sort-enabled", [defaults boolForKey:kDefaultsSortSubscriptionsByPingKey]);

@@ -1,13 +1,14 @@
 #import "app_support.h"
 #import "update_checker.h"
 
-@class VCAccentColorVC, SettingsVC, XrayVersionSpoofVC, SettingsNavController;
+@class VCAccentColorVC, SettingsVC, XrayVersionSpoofVC, SettingsNavController, VCPingSettingsVC;
 
 @protocol SettingsVCDelegate <NSObject>
 - (void)settingsVC:(SettingsVC *)vc didChangeAutoUpdate:(BOOL)enabled;
 - (void)settingsVC:(SettingsVC *)vc didChangeAutomaticUpdateChecks:(BOOL)enabled;
 - (void)settingsVC:(SettingsVC *)vc didChangePreserveCustomSubscriptionNames:(BOOL)enabled;
 - (void)settingsVC:(SettingsVC *)vc didChangeSortSubscriptionsByPing:(BOOL)enabled;
+- (void)settingsVCDidChangePingSettings:(SettingsVC *)vc;
 - (void)settingsVC:(SettingsVC *)vc didChangeStealthMode:(BOOL)enabled;
 - (void)settingsVC:(SettingsVC *)vc didChangeDarkTheme:(BOOL)enabled;
 - (void)settingsVCDidChangeAccentColor:(SettingsVC *)vc;
@@ -17,6 +18,17 @@
 - (void)accentColorVCDidChange;
 @end
 
+@protocol VCPingSettingsVCDelegate <NSObject>
+- (void)pingSettingsVCDidChangeProbeSettings:(VCPingSettingsVC *)vc;
+@end
+
+@interface VCPingSettingsVC : UITableViewController <UIActionSheetDelegate, UIAlertViewDelegate> {
+    id<VCPingSettingsVCDelegate> _delegate;
+    UISlider *_timeoutSlider;
+}
+- (id)initWithDelegate:(id<VCPingSettingsVCDelegate>)delegate;
+@end
+
 @interface VCAccentColorVC : UIViewController <UITableViewDataSource, UITableViewDelegate> {
     UITableView *_tableView;
     id<VCAccentColorVCDelegate> _delegate;
@@ -24,7 +36,7 @@
 - (id)initWithDelegate:(id<VCAccentColorVCDelegate>)delegate;
 @end
 
-@interface SettingsVC : UIViewController <UITableViewDataSource, UITableViewDelegate, UIActionSheetDelegate, UIAlertViewDelegate, VCUpdateCheckerDelegate, VCAccentColorVCDelegate> {
+@interface SettingsVC : UIViewController <UITableViewDataSource, UITableViewDelegate, UIAlertViewDelegate, VCUpdateCheckerDelegate, VCAccentColorVCDelegate, VCPingSettingsVCDelegate> {
     UITableView *_tableView;
     UISwitch *_autoUpdateSwitch;
     UISwitch *_preserveCustomNamesSwitch;

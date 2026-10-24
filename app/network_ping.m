@@ -4,7 +4,7 @@
 #import <SystemConfiguration/CaptiveNetwork.h>
 
 static long long PingMonotonicMs(void) {
-    return (long long)([[NSProcessInfo processInfo] systemUptime] * 1000.0);
+    return (long long)(VCSubscriptionMonotonicTime() * 1000.0);
 }
 
 static NSDictionary *NativePingReport(NSString *stage, long long dns, long long tcp, long long carry, long long total) {
@@ -89,7 +89,9 @@ int ConnectLatencyMs(const char *host, uint16_t port, int timeout_ms, int *laten
     long long dns = PingMonotonicMs() - started;
 
     int rc_out = -3;
+    long long deadline=PingMonotonicMs()+timeout_ms;
     for (struct addrinfo *ai = res; ai && ![cancellation isCancelled]; ai = ai->ai_next) {
+        if (PingMonotonicMs() >= deadline) break;
         int fd = socket(ai->ai_family, ai->ai_socktype, ai->ai_protocol);
         if (fd < 0) continue;
         if (cancellation && ![cancellation registerSocket:fd]) break;
@@ -107,7 +109,8 @@ int ConnectLatencyMs(const char *host, uint16_t port, int timeout_ms, int *laten
             continue;
         }
 
-        int sr = VCWaitForPingSocket(fd, YES, timeout_ms, cancellation);
+        int remaining=(int)MAX(0,deadline-PingMonotonicMs());
+        int sr = VCWaitForPingSocket(fd, YES, remaining, cancellation);
         if (sr > 0) {
             int soerr = 0;
             socklen_t sl = (socklen_t)sizeof(soerr);
@@ -272,9 +275,9 @@ static pid_t spawn_temp_core_for_ping(const char *uri, uint16_t port, const char
 
 int ProxyGetViaTempCoreMs(const char *uri, const char *xray_version,
                                  int timeout_ms, int attempts, int *latency_ms,
-                                 VCPingCancellation *cancellation) {
+                                 VCPingCancellation *cancellation, NSString *probeURL) {
     cancellation.diagnosticReport = nil;
-    if (!uri || !*uri || [cancellation isCancelled]) return -1;
+    if (!uri || !*uri || [cancellation isCancelled] || !VCProxyPingTargetForURL(probeURL)) return -1;
     if (attempts <= 0) attempts = 1;
 
     int port = pick_free_loopback_port();
@@ -302,7 +305,7 @@ int ProxyGetViaTempCoreMs(const char *uri, const char *xray_version,
     NSDictionary *selectedReport = nil;
     for (int i = 0; i < attempts && ![cancellation isCancelled]; i++) {
         int ms = 0;
-        int result = ProxyGetConnectOnceMs((uint16_t)port, timeout_ms, &ms, cancellation);
+        int result = ProxyGetConnectToURLOnceMs((uint16_t)port, probeURL, timeout_ms, &ms, cancellation);
         NSDictionary *report = ReadProbeReport(capture,previousID,cancellation);
         if (report) previousID = [[report objectForKey:@"id"] longLongValue];
         if (result == 0) {

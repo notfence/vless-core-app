@@ -67,6 +67,68 @@ def main():
     state = (ROOT / 'app/main_state.m').read_text()
     settings_source = (ROOT / 'app/settings.m').read_text()
     main_settings = (ROOT / 'app/main_settings.m').read_text()
+    if '@implementation VCPingSettingsVC' not in settings_source:
+        raise AssertionError('app/ping-type-and-url-must-have-a-dedicated-ping-menu')
+    ping_settings = settings_source.split('@implementation VCPingSettingsVC', 1)[1].split('@end', 1)[0]
+    parent_settings = settings_source.split('@implementation SettingsVC', 1)[1].split('@end', 1)[0]
+    if 'return @"Ping";' not in parent_settings or 'if (section == 1) return 3;' not in parent_settings or 'VCPingSettingsVC alloc' not in parent_settings:
+        raise AssertionError('app/network-must-open-ping-menu-instead-of-exposing-its-fields')
+    if 'kVCSettingsProxyPingURLAlertTag' in parent_settings or 'otherButtonTitles:@"Proxy GET"' in parent_settings:
+        raise AssertionError('app/ping-editors-must-not-remain-in-parent-settings')
+    for required in ('self.title = @"Ping";', 'return 3;', '@"Ping type"', '@"URL"', '@"Timeout"', 'VCSelectedPingTypeText()', 'VCSelectedProxyPingURL()', 'kDefaultsPingTypeKey'):
+        if required not in ping_settings:
+            raise AssertionError('app/ping-menu-must-contain-working-type-url-and-timeout-rows')
+    ping_sections = ping_settings.split('- (NSInteger)numberOfSectionsInTableView:', 1)[1].split('\n}', 1)[0]
+    ping_rows = ping_settings.split('numberOfRowsInSection:', 1)[1].split('\n}', 1)[0]
+    if 'return 3;' not in ping_sections or 'return 1;' not in ping_rows:
+        raise AssertionError('app/each-ping-setting-must-have-its-own-section')
+    ping_footer = ping_settings.split('titleForFooterInSection:', 1)[1].split('\n}', 1)[0]
+    if any(';' in text for text in re.findall(r'@"(?:\\.|[^"\\])*"', ping_footer)):
+        raise AssertionError('app/ping-descriptions-must-use-sentences-without-semicolons')
+    for required in ('if (section == 0)', 'if (section == 1)', 'Proxy GET', 'TCP', 'ICMP', 'Only HTTP', 'Empty restores', 'per attempt', 'two attempts', 'DNS and core startup'):
+        if required not in ping_footer:
+            raise AssertionError('app/ping-settings-must-have-separate-explanations-for-type-url-and-timeout')
+    if 'indexPath.row' in ping_settings or 'titleForRow:' in ping_settings or 'detailForRow:' in ping_settings:
+        raise AssertionError('app/ping-cards-and-editors-must-address-sections-not-row-numbers')
+    for required in ('indexPathForRow:0 inSection:0', 'indexPathForRow:0 inSection:1', 'indexPathForRow:0 inSection:2', 'indexPath.section == 2', 'titleForSection:indexPath.section', 'detailForSection:indexPath.section'):
+        if required not in ping_settings:
+            raise AssertionError('app/ping-section-layout-must-preserve-editor-refresh-and-slider-targets')
+    parent_detail = parent_settings.split('- (NSString *)settingsDetailTextForIndexPath:', 1)[1].split('\n}', 1)[0]
+    if 'return @"Ping settings";' not in parent_detail or 'VCSelectedPingTypeText()' in parent_detail:
+        raise AssertionError('app/ping-menu-description-must-describe-settings-not-selection')
+    if 'VCApplyStaticSettingsCell(' not in ping_settings or 'rowHeight = 56' in ping_settings or 'systemFontOfSize:12' in ping_settings:
+        raise AssertionError('app/ping-cards-must-use-shared-settings-style-and-native-row-height')
+    if 'VCApplySettingsCell(' in ping_settings or 'Marquee' in ping_settings or 'viewDidLayoutSubviews' in ping_settings:
+        raise AssertionError('app/ping-menu-must-use-native-labels-without-marquee-layout-passes')
+    static_settings_cell = settings_source.split('static void VCApplyStaticSettingsCell(', 1)[1].split('\n}', 1)[0]
+    if any(value in static_settings_cell for value in ('Marquee', 'layoutIfNeeded', 'clearColor')) or 'VCAppearanceApplyCell(cell);' not in static_settings_cell:
+        raise AssertionError('app/static-settings-style-must-keep-native-visible-labels-without-scrolling')
+    marquee_settings_cell = settings_source.split('static void VCApplySettingsCell(', 1)[1].split('\n}', 1)[0]
+    if 'VCApplyStaticSettingsCell(cell,title,detail);' not in marquee_settings_cell or 'VCSettingsMarqueeForCell(' not in marquee_settings_cell:
+        raise AssertionError('app/main-settings-must-keep-marquee-on-top-of-shared-native-style')
+    if 'VCApplySettingsCell(cell,title,detail);' not in parent_settings:
+        raise AssertionError('app/ping-and-main-settings-must-share-one-card-renderer')
+    for required in ('UISlider alloc', 'kVCPingTimeoutMinimumSeconds', 'kVCPingTimeoutMaximumSeconds', 'VCNormalizedPingTimeoutSeconds', 'kDefaultsPingTimeoutSecondsKey', 'UIControlEventTouchUpInside', 'UIControlEventTouchUpOutside', 'UIControlEventTouchCancel'):
+        if required not in ping_settings:
+            raise AssertionError('app/ping-timeout-slider-must-be-bounded-snapped-and-saved-after-drag')
+    if 'else if (indexPath.section == 1)' not in ping_settings:
+        raise AssertionError('app/timeout-row-must-not-open-the-url-editor')
+    drag = ping_settings.split('- (void)timeoutChanged:', 1)[1].split('\n}', 1)[0]
+    if 'synchronize' in drag or 'reloadRowsAtIndexPaths:' in drag:
+        raise AssertionError('app/slider-drag-must-not-write-preferences-or-replace-the-active-cell')
+    if 'sender.tracking' not in drag or 'accessibilityValue' not in drag:
+        raise AssertionError('app/slider-must-support-live-values-and-accessibility-changes')
+    if 'pingSettingsVCDidChangeProbeSettings:' not in parent_settings or 'settingsVCDidChangePingSettings:self' not in parent_settings:
+        raise AssertionError('app/ping-menu-must-forward-setting-changes-to-invalidate-results')
+    save_probe_url = ping_settings.split('if (alertView.tag == kVCSettingsProxyPingURLAlertTag)', 1)[1]
+    if save_probe_url.index('VCProxyPingTargetForURL(value)') > save_probe_url.index('[defaults setObject:value'):
+        raise AssertionError('app/proxy-get-url-must-be-validated-before-saving')
+    if 'VCRecordAppEvent(@"settings",@"Proxy GET URL changed",nil)' not in save_probe_url or 'saveData' in save_probe_url:
+        raise AssertionError('app/proxy-get-url-must-not-log-url-or-rewrite-profile-store')
+    changed_url = main_settings.split('- (void)settingsVCDidChangePingSettings:', 1)[1].split('\n}', 1)[0]
+    for required in ('stopAllPings', '++_pingNetworkGeneration', 'removeAllObjects', 'scheduleSubscriptionPingSort', 'refreshVisiblePingAccessoriesForURI:'):
+        if required not in changed_url:
+            raise AssertionError('app/proxy-get-url-change-must-cancel-and-invalidate-results')
     if 'if (section == 0) return 4;' not in settings_source or 'SettingsPingSortCell' not in settings_source or 'settings.sortSubscriptionsByPing = _sortSubscriptionsByPing;' not in main_settings:
         raise AssertionError('app/ping-sort-must-have-a-subscriptions-setting')
     settings_controller = settings_source.split('@implementation SettingsVC', 1)[1].split('@end', 1)[0]
@@ -93,6 +155,19 @@ def main():
         if required not in apply_sort:
             raise AssertionError('app/ping-sort-must-wait-for-batch-and-interactions-and-only-reload-on-change')
     ping_source = (ROOT / 'app/main_ping.m').read_text()
+    worker = ping_source.split('- (void)pingWorker:', 1)[1].split('- (void)pingResultOnMain:', 1)[0]
+    if '[payload objectForKey:@"timeout_ms"]' not in worker or 'VCPingTimeoutSecondsInDefaults' not in ping_source:
+        raise AssertionError('app/ping-timeout-must-be-snapshotted-before-enqueuing')
+    if '3500, 2' in worker or '5000, 2' in worker or worker.count('timeoutMs, 2, &latencyMs') != 3:
+        raise AssertionError('app/all-ping-types-must-use-the-selected-timeout')
+    tcp_ping = (ROOT / 'app/network_ping.m').read_text().split('int ConnectLatencyMs(', 1)[1].split('int ConnectLatencyBestOfNMs(', 1)[0]
+    if 'deadline-PingMonotonicMs()' not in tcp_ping or 'VCWaitForPingSocket(fd, YES, remaining, cancellation)' not in tcp_ping:
+        raise AssertionError('app/tcp-address-fallback-must-not-restart-the-selected-timeout')
+    if '[[VCSelectedProxyPingURL() copy] autorelease]' not in ping_source or '[payload objectForKey:@"probe_url"]' not in ping_source:
+        raise AssertionError('app/proxy-get-workers-must-use-the-enqueued-url-snapshot')
+    attempts = (ROOT / 'app/network_ping.m').read_text().split('int ProxyGetViaTempCoreMs(', 1)[1].split('static uint16_t ICMPChecksum', 1)[0]
+    if 'ProxyGetConnectToURLOnceMs((uint16_t)port, probeURL,' not in attempts or 'VCSelectedProxyPingURL' in attempts:
+        raise AssertionError('app/proxy-get-retries-must-not-switch-url-mid-operation')
     ping_press = ping_source.split('- (void)pingButtonPressed:', 1)[1].split('\n}', 1)[0]
     if 'indexPathForCell:' not in ping_press or 'mapSubscriptionRow:' not in ping_press or 'sender.tag' in ping_press or '1000' in ping_press:
         raise AssertionError('app/ping-buttons-must-resolve-current-sorted-row-without-1000-item-tags')

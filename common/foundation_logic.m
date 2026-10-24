@@ -21,6 +21,22 @@ BOOL VCAppearanceIsDarkInDefaults(id defaults) {
     return [defaults boolForKey:kDefaultsDarkThemeKey];
 }
 
+NSInteger VCNormalizedPingTimeoutSeconds(double seconds) {
+    if (!isfinite(seconds)) return kVCPingTimeoutDefaultSeconds;
+    if (seconds <= kVCPingTimeoutMinimumSeconds) return kVCPingTimeoutMinimumSeconds;
+    if (seconds >= kVCPingTimeoutMaximumSeconds) return kVCPingTimeoutMaximumSeconds;
+    return (NSInteger)floor(seconds+0.5);
+}
+
+NSInteger VCPingTimeoutSecondsInDefaults(id defaults) {
+    id value=[defaults objectForKey:kDefaultsPingTimeoutSecondsKey];
+    if (![value isKindOfClass:[NSNumber class]]) return kVCPingTimeoutDefaultSeconds;
+    double seconds=[value doubleValue];
+    if (!isfinite(seconds) || seconds < kVCPingTimeoutMinimumSeconds || seconds > kVCPingTimeoutMaximumSeconds || floor(seconds) != seconds)
+        return kVCPingTimeoutDefaultSeconds;
+    return (NSInteger)seconds;
+}
+
 void VCAppearanceSetDarkInDefaults(BOOL dark, id defaults) {
     NSUserDefaults *ud = defaults;
     [ud setBool:dark forKey:kDefaultsDarkThemeKey];

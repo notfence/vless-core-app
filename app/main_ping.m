@@ -33,6 +33,7 @@
     }
     NSString *uri = [payload objectForKey:@"uri"];
     VCPingType pingType = (VCPingType)[[payload objectForKey:@"type"] integerValue];
+    int timeoutMs=[[payload objectForKey:@"timeout_ms"] intValue];
     NSString *host = nil;
     uint16_t port = 0;
     int latencyMs = -1;
@@ -44,11 +45,11 @@
         if (pingType == VCPingTypeProxyGET) {
             NSString *xrayVersion = VCActiveXrayVersion();
             rc = ProxyGetViaTempCoreMs([uri UTF8String], [xrayVersion UTF8String],
-                                       5000, 2, &latencyMs, cancellation);
+                                       timeoutMs, 2, &latencyMs, cancellation, [payload objectForKey:@"probe_url"]);
         } else if (pingType == VCPingTypeTCP) {
-            rc = ConnectLatencyBestOfNMs([host UTF8String], port, 3500, 2, &latencyMs, cancellation);
+            rc = ConnectLatencyBestOfNMs([host UTF8String], port, timeoutMs, 2, &latencyMs, cancellation);
         } else if (pingType == VCPingTypeICMP) {
-            rc = ICMPLatencyBestOfNMs([host UTF8String], 3500, 2, &latencyMs, cancellation);
+            rc = ICMPLatencyBestOfNMs([host UTF8String], timeoutMs, 2, &latencyMs, cancellation);
         }
         ok = (rc == 0 && latencyMs >= 0);
     }
@@ -146,6 +147,8 @@
                                     cancellation, @"cancellation",
                                     nil];
     [payload setObject:[NSNumber numberWithUnsignedInteger:_pingNetworkGeneration] forKey:@"network_generation"];
+    [payload setObject:@(VCPingTimeoutSecondsInDefaults([NSUserDefaults standardUserDefaults])*1000) forKey:@"timeout_ms"];
+    if (pingType == VCPingTypeProxyGET) [payload setObject:[[VCSelectedProxyPingURL() copy] autorelease] forKey:@"probe_url"];
     if (batchIdentifier && batchToken) {
         [payload setObject:batchIdentifier forKey:@"batch_identifier"];
         [payload setObject:batchToken forKey:@"batch_token"];

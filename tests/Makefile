@@ -102,7 +102,7 @@ $(HOST_BUILD_DIR)/app/proxy_probe.o: ../app/proxy_probe.m ../app/proxy_probe.h .
 	mkdir -p $(dir $@)
 	$(HOST_CC) $(HOST_CPPFLAGS) $(HOST_OBJCFLAGS) $(HOST_CFLAGS) -MMD -MP -c $< -o $@
 
-$(HOST_BUILD_DIR)/test_proxy_probe: $(HOST_BUILD_DIR)/test_proxy_probe.o $(HOST_BUILD_DIR)/app/proxy_probe.o $(HOST_BUILD_DIR)/common/connection_logic.o
+$(HOST_BUILD_DIR)/test_proxy_probe: $(HOST_BUILD_DIR)/test_proxy_probe.o $(HOST_BUILD_DIR)/app/proxy_probe.o $(HOST_BUILD_DIR)/common/connection_logic.o $(HOST_BUILD_DIR)/common/subscription_task.o
 	$(HOST_CC) $(SANITIZE) $^ -o $@ $(HOST_LIBS) -Wl,--wrap=socket,--wrap=write,--wrap=read
 
 $(HOST_BUILD_DIR)/test_legacy_loopback_host: test_legacy_loopback_host.c legacy_loopback_test.c ../daemon/legacy_loopback.c ../daemon/legacy_loopback.h support/darwin_route.h | requirements

@@ -124,7 +124,7 @@ int ConnectLatencyBestOfNMs(const char *host, uint16_t port, int timeout_ms, int
 
 int ProxyGetViaTempCoreMs(const char *uri, const char *xray_version,
                                  int timeout_ms, int attempts, int *latency_ms,
-                                 VCPingCancellation *cancellation);
+                                 VCPingCancellation *cancellation, NSString *probeURL);
 NSString *VCPingNetworkSignature(void);
 
 int ICMPLatencyBestOfNMs(const char *host,

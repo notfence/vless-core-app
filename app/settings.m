@@ -6,6 +6,279 @@
 #import "routing.h"
 
 @class SettingsVC;
+static NSInteger const kVCSettingsProxyPingURLAlertTag=7101;
+
+static VCMarqueeLabel *VCSettingsMarqueeForCell(UITableViewCell *cell, NSInteger tag) {
+    VCMarqueeLabel *marquee = (VCMarqueeLabel *)[cell.contentView viewWithTag:tag];
+    if (!marquee) {
+        marquee = [[[VCMarqueeLabel alloc] initWithFrame:CGRectZero] autorelease];
+        marquee.tag = tag;
+        marquee.userInteractionEnabled = NO;
+        marquee.backgroundColor = [UIColor clearColor];
+        [cell.contentView addSubview:marquee];
+    }
+    return marquee;
+}
+
+static void VCApplyStaticSettingsCell(UITableViewCell *cell, NSString *title, NSString *detail) {
+    if (!cell) return;
+    NSString *titleText = ([title isKindOfClass:[NSString class]] ? title : @"");
+    NSString *detailText = ([detail isKindOfClass:[NSString class]] ? detail : @"");
+    UIColor *titleColor = VCPrimaryTextColor();
+    UIColor *detailColor = VCSecondaryTextColor();
+    VCAppearanceApplyCell(cell);
+    cell.textLabel.textColor = titleColor;
+    cell.detailTextLabel.textColor = detailColor;
+    cell.textLabel.text = titleText;
+    cell.detailTextLabel.text = detailText;
+}
+
+static void VCApplySettingsCell(UITableViewCell *cell, NSString *title, NSString *detail) {
+    if (!cell) return;
+    VCApplyStaticSettingsCell(cell,title,detail);
+    NSString *titleText = cell.textLabel.text;
+    NSString *detailText = cell.detailTextLabel.text;
+    UIColor *titleColor = cell.textLabel.textColor;
+    UIColor *detailColor = cell.detailTextLabel.textColor;
+    [cell setNeedsLayout];
+    [cell layoutIfNeeded];
+
+    VCMarqueeLabel *titleMarquee = VCSettingsMarqueeForCell(cell,kVCSettingsTitleMarqueeTag);
+    if ([titleText length] > 0) {
+        titleMarquee.hidden = NO;
+        titleMarquee.frame = cell.textLabel.frame;
+        titleMarquee.font = cell.textLabel.font;
+        titleMarquee.textColor = titleColor;
+        titleMarquee.text = titleText;
+        cell.textLabel.textColor = [UIColor clearColor];
+    } else {
+        [titleMarquee stopMarquee];
+        titleMarquee.text = @"";
+        titleMarquee.hidden = YES;
+    }
+    VCMarqueeLabel *detailMarquee = VCSettingsMarqueeForCell(cell,kVCSettingsDetailMarqueeTag);
+    if ([detailText length] > 0) {
+        detailMarquee.hidden = NO;
+        detailMarquee.frame = cell.detailTextLabel.frame;
+        detailMarquee.font = cell.detailTextLabel.font;
+        detailMarquee.textColor = detailColor;
+        detailMarquee.text = detailText;
+        cell.detailTextLabel.textColor = [UIColor clearColor];
+    } else {
+        [detailMarquee stopMarquee];
+        detailMarquee.text = @"";
+        detailMarquee.hidden = YES;
+    }
+}
+
+@implementation VCPingSettingsVC
+
+- (id)initWithDelegate:(id<VCPingSettingsVCDelegate>)delegate {
+    self = [super initWithStyle:UITableViewStyleGrouped];
+    if (self) _delegate = delegate;
+    return self;
+}
+
+- (void)viewDidLoad {
+    [super viewDidLoad];
+    self.title = @"Ping";
+    [_timeoutSlider release];
+    _timeoutSlider = [[UISlider alloc] initWithFrame:CGRectMake(0.0f,0.0f,IsPadDevice() ? 220.0f : 140.0f,31.0f)];
+    _timeoutSlider.minimumValue = kVCPingTimeoutMinimumSeconds;
+    _timeoutSlider.maximumValue = kVCPingTimeoutMaximumSeconds;
+    _timeoutSlider.value = VCPingTimeoutSecondsInDefaults([NSUserDefaults standardUserDefaults]);
+    _timeoutSlider.accessibilityLabel = @"Ping timeout";
+    _timeoutSlider.accessibilityValue = [self detailForSection:2];
+    [_timeoutSlider addTarget:self action:@selector(timeoutChanged:) forControlEvents:UIControlEventValueChanged];
+    [_timeoutSlider addTarget:self action:@selector(savePingTimeout:) forControlEvents:UIControlEventTouchUpInside|UIControlEventTouchUpOutside|UIControlEventTouchCancel];
+}
+
+- (void)viewWillAppear:(BOOL)animated {
+    [super viewWillAppear:animated];
+    self.view.backgroundColor = VCBackgroundColor();
+    VCAppearanceApplyNavigationBar(self.navigationController.navigationBar);
+    VCAppearanceApplyStatusBar();
+    VCAppearanceApplyTable(self.tableView);
+    _timeoutSlider.minimumTrackTintColor = VCAccentColor();
+    [self.tableView reloadData];
+}
+
+- (void)viewWillDisappear:(BOOL)animated {
+    [self savePingTimeout:_timeoutSlider];
+    [super viewWillDisappear:animated];
+}
+
+- (void)dealloc {
+    [_timeoutSlider release];
+    [super dealloc];
+}
+
+- (NSString *)titleForSection:(NSInteger)section {
+    return section == 0 ? @"Ping type" : section == 1 ? @"URL" : @"Timeout";
+}
+
+- (NSString *)detailForSection:(NSInteger)section {
+    if (section == 0) return VCSelectedPingTypeText();
+    if (section == 1) return VCSelectedProxyPingURL();
+    return [NSString stringWithFormat:@"%ld seconds",(long)VCNormalizedPingTimeoutSeconds(_timeoutSlider.value)];
+}
+
+- (void)timeoutChanged:(UISlider *)sender {
+    sender.value = VCNormalizedPingTimeoutSeconds(sender.value);
+    NSString *detail=[self detailForSection:2];
+    sender.accessibilityValue=detail;
+    NSIndexPath *indexPath=[NSIndexPath indexPathForRow:0 inSection:2];
+    UITableViewCell *cell=[self.tableView cellForRowAtIndexPath:indexPath];
+    if (![cell.detailTextLabel.text isEqualToString:detail]) VCApplyStaticSettingsCell(cell,[self titleForSection:2],detail);
+    if (!sender.tracking) [self savePingTimeout:sender];
+}
+
+- (void)savePingTimeout:(UISlider *)sender {
+    if (!sender) return;
+    NSInteger seconds=VCNormalizedPingTimeoutSeconds(sender.value);
+    NSUserDefaults *defaults=[NSUserDefaults standardUserDefaults];
+    if (seconds == VCPingTimeoutSecondsInDefaults(defaults)) return;
+    [defaults setInteger:seconds forKey:kDefaultsPingTimeoutSecondsKey];
+    [defaults synchronize];
+    VCRecordAppEvent(@"settings",@"Ping timeout changed",[NSString stringWithFormat:@"timeout_seconds=%ld",(long)seconds]);
+    if ([_delegate respondsToSelector:@selector(pingSettingsVCDidChangeProbeSettings:)]) [_delegate pingSettingsVCDidChangeProbeSettings:self];
+}
+
+- (NSInteger)numberOfSectionsInTableView:(UITableView *)tableView {
+    (void)tableView;
+    return 3;
+}
+
+- (NSInteger)tableView:(UITableView *)tableView numberOfRowsInSection:(NSInteger)section {
+    (void)tableView;
+    (void)section;
+    return 1;
+}
+
+- (UITableViewCell *)tableView:(UITableView *)tableView cellForRowAtIndexPath:(NSIndexPath *)indexPath {
+    static NSString *cellIdentifier = @"PingSettingsCell";
+    UITableViewCell *cell = [tableView dequeueReusableCellWithIdentifier:cellIdentifier];
+    if (!cell) {
+        cell = [[[UITableViewCell alloc] initWithStyle:UITableViewCellStyleSubtitle reuseIdentifier:cellIdentifier] autorelease];
+    }
+    cell.selectionStyle = indexPath.section == 2 ? UITableViewCellSelectionStyleNone : UITableViewCellSelectionStyleBlue;
+    cell.accessoryView = indexPath.section == 2 ? (UIView *)_timeoutSlider : VCCreateDisclosureAccessoryView();
+    VCApplyStaticSettingsCell(cell,[self titleForSection:indexPath.section],[self detailForSection:indexPath.section]);
+    return cell;
+}
+
+- (void)tableView:(UITableView *)tableView willDisplayCell:(UITableViewCell *)cell forRowAtIndexPath:(NSIndexPath *)indexPath {
+    (void)tableView;
+    VCApplyStaticSettingsCell(cell,[self titleForSection:indexPath.section],[self detailForSection:indexPath.section]);
+}
+
+- (NSString *)tableView:(UITableView *)tableView titleForFooterInSection:(NSInteger)section {
+    (void)tableView;
+    if (section == 0) return @"Choose how to check a profile.\nProxy GET: an HTTP request through the proxy.\nTCP: a connection to the server port.\nICMP: an echo request to the server. It may be blocked.";
+    if (section == 1) return @"Target for Proxy GET and tunnel checks. Not used by TCP or ICMP. Only HTTP is supported. Redirects are not followed. Empty restores the default URL.";
+    return @"Maximum wait per attempt for all ping types: 5–15 seconds. Up to two attempts run. The best result is shown. DNS and core startup can add time.";
+}
+
+- (CGFloat)tableView:(UITableView *)tableView heightForFooterInSection:(NSInteger)section {
+    NSString *text = [self tableView:tableView titleForFooterInSection:section];
+    CGSize size = [text sizeWithFont:[UIFont systemFontOfSize:14.0f]
+                  constrainedToSize:CGSizeMake(MAX(1.0f, tableView.bounds.size.width - 36.0f), 1000.0f)
+                      lineBreakMode:NSLineBreakByWordWrapping];
+    return ceilf(size.height) + 14.0f;
+}
+
+- (UIView *)tableView:(UITableView *)tableView viewForFooterInSection:(NSInteger)section {
+    CGFloat height = [self tableView:tableView heightForFooterInSection:section];
+    UIView *footer = [[[UIView alloc] initWithFrame:CGRectMake(0.0f, 0.0f, tableView.bounds.size.width, height)] autorelease];
+    footer.backgroundColor = [UIColor clearColor];
+    UILabel *label = [[[UILabel alloc] initWithFrame:CGRectMake(18.0f, 4.0f, tableView.bounds.size.width - 36.0f, height - 8.0f)] autorelease];
+    label.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
+    label.backgroundColor = [UIColor clearColor];
+    label.font = [UIFont systemFontOfSize:14.0f];
+    label.numberOfLines = 0;
+    label.lineBreakMode = NSLineBreakByWordWrapping;
+    label.text = [self tableView:tableView titleForFooterInSection:section];
+    [footer addSubview:label];
+    VCAppearanceApplyHeaderView(footer);
+    return footer;
+}
+
+- (void)tableView:(UITableView *)tableView didSelectRowAtIndexPath:(NSIndexPath *)indexPath {
+    [tableView deselectRowAtIndexPath:indexPath animated:YES];
+    if (indexPath.section == 0) {
+        VCRecordAppEvent(@"ui", @"Ping type menu opened", nil);
+        UIActionSheet *sheet = [[[UIActionSheet alloc] initWithTitle:@"Ping type" delegate:self
+            cancelButtonTitle:@"Cancel" destructiveButtonTitle:nil otherButtonTitles:@"Proxy GET", @"TCP", @"ICMP", nil] autorelease];
+        sheet.tag = kVCSettingsPingTypeActionSheetTag;
+        [sheet showInView:self.view];
+    } else if (indexPath.section == 1) {
+        UIAlertView *alert=[[[UIAlertView alloc] initWithTitle:@"Proxy GET URL"
+            message:@"HTTP only. Empty restores the default."
+            delegate:self cancelButtonTitle:@"Cancel" otherButtonTitles:@"Save",nil] autorelease];
+        alert.tag=kVCSettingsProxyPingURLAlertTag;
+        alert.alertViewStyle=UIAlertViewStylePlainTextInput;
+        UITextField *field=[alert textFieldAtIndex:0];
+        field.text=VCSelectedProxyPingURL();
+        field.keyboardType=UIKeyboardTypeURL;
+        field.autocapitalizationType=UITextAutocapitalizationTypeNone;
+        field.autocorrectionType=UITextAutocorrectionTypeNo;
+        field.clearButtonMode=UITextFieldViewModeWhileEditing;
+        [alert show];
+    }
+}
+
+- (void)actionSheet:(UIActionSheet *)actionSheet clickedButtonAtIndex:(NSInteger)buttonIndex {
+    if (actionSheet.tag != kVCSettingsPingTypeActionSheetTag || buttonIndex < VCPingTypeProxyGET ||
+        buttonIndex > VCPingTypeICMP || buttonIndex == actionSheet.cancelButtonIndex) return;
+    VCPingType pingType = (VCPingType)buttonIndex;
+    BOOL changed=pingType != VCSelectedPingType();
+    VCRecordAppEvent(@"settings", @"Ping type changed", [NSString stringWithFormat:@"type=%ld", (long)pingType]);
+    NSUserDefaults *defaults = [NSUserDefaults standardUserDefaults];
+    [defaults setInteger:pingType forKey:kDefaultsPingTypeKey];
+    [defaults synchronize];
+    if (changed && [_delegate respondsToSelector:@selector(pingSettingsVCDidChangeProbeSettings:)]) [_delegate pingSettingsVCDidChangeProbeSettings:self];
+    [self.tableView reloadRowsAtIndexPaths:@[[NSIndexPath indexPathForRow:0 inSection:0]] withRowAnimation:UITableViewRowAnimationNone];
+}
+
+- (void)alertView:(UIAlertView *)alertView clickedButtonAtIndex:(NSInteger)buttonIndex {
+    if (alertView.tag == kVCSettingsProxyPingURLAlertTag) {
+        if (buttonIndex == alertView.cancelButtonIndex) return;
+        NSString *value=[alertView textFieldAtIndex:0].text;
+        if (![value length]) value=kVCDefaultProxyPingURL;
+        if (!VCProxyPingTargetForURL(value)) {
+            UIAlertView *error=[[[UIAlertView alloc] initWithTitle:@"Invalid Proxy GET URL"
+                message:@"Use an http:// URL up to 2048 characters, without spaces, credentials or a fragment. Use percent-encoding in the path and query; an explicit port must be 1–65535."
+                delegate:nil cancelButtonTitle:@"OK" otherButtonTitles:nil] autorelease];
+            [error show];
+            return;
+        }
+        BOOL changed=![value isEqualToString:VCSelectedProxyPingURL()];
+        NSUserDefaults *defaults=[NSUserDefaults standardUserDefaults];
+        if ([value isEqualToString:kVCDefaultProxyPingURL]) [defaults removeObjectForKey:kDefaultsProxyPingURLKey];
+        else [defaults setObject:value forKey:kDefaultsProxyPingURLKey];
+        [defaults synchronize];
+        if (changed) {
+            VCRecordAppEvent(@"settings",@"Proxy GET URL changed",nil);
+            if ([_delegate respondsToSelector:@selector(pingSettingsVCDidChangeProbeSettings:)]) [_delegate pingSettingsVCDidChangeProbeSettings:self];
+        }
+        [self.tableView reloadRowsAtIndexPaths:@[[NSIndexPath indexPathForRow:0 inSection:1]] withRowAnimation:UITableViewRowAnimationNone];
+    }
+}
+
+- (BOOL)shouldAutorotateToInterfaceOrientation:(UIInterfaceOrientation)interfaceOrientation {
+    return IsPadDevice() ? (UIInterfaceOrientationIsPortrait(interfaceOrientation) || UIInterfaceOrientationIsLandscape(interfaceOrientation))
+                         : interfaceOrientation == UIInterfaceOrientationPortrait;
+}
+
+- (BOOL)shouldAutorotate {
+    return IsPadDevice();
+}
+
+- (UIInterfaceOrientationMask)supportedInterfaceOrientations {
+    return IsPadDevice() ? UIInterfaceOrientationMaskAllButUpsideDown : UIInterfaceOrientationMaskPortrait;
+}
+
+@end
 
 @implementation XrayVersionSpoofVC
 
@@ -500,6 +773,11 @@
     }
 }
 
+- (void)pingSettingsVCDidChangeProbeSettings:(VCPingSettingsVC *)vc {
+    (void)vc;
+    if ([_delegate respondsToSelector:@selector(settingsVCDidChangePingSettings:)]) [_delegate settingsVCDidChangePingSettings:self];
+}
+
 - (void)viewDidLoad {
     [super viewDidLoad];
     self.view.backgroundColor = VCBackgroundColor();
@@ -600,65 +878,10 @@
     return @"About";
 }
 
-- (VCMarqueeLabel *)settingsMarqueeForCell:(UITableViewCell *)cell
-                                        tag:(NSInteger)tag
-                              createIfNeeded:(BOOL)createIfNeeded {
-    if (!cell) return nil;
-    VCMarqueeLabel *marquee = (VCMarqueeLabel *)[cell.contentView viewWithTag:tag];
-    if (!marquee && createIfNeeded) {
-        marquee = [[[VCMarqueeLabel alloc] initWithFrame:CGRectZero] autorelease];
-        marquee.tag = tag;
-        marquee.userInteractionEnabled = NO;
-        marquee.backgroundColor = [UIColor clearColor];
-        [cell.contentView addSubview:marquee];
-    }
-    return marquee;
-}
-
 - (void)applySettingsMarqueesToCell:(UITableViewCell *)cell
                                title:(NSString *)title
                               detail:(NSString *)detail {
-    if (!cell) return;
-    NSString *titleText = ([title isKindOfClass:[NSString class]] ? title : @"");
-    NSString *detailText = ([detail isKindOfClass:[NSString class]] ? detail : @"");
-    UIColor *titleColor = VCPrimaryTextColor();
-    UIColor *detailColor = VCSecondaryTextColor();
-
-    VCAppearanceApplyCell(cell);
-    cell.textLabel.textColor = titleColor;
-    cell.detailTextLabel.textColor = detailColor;
-    cell.textLabel.text = titleText;
-    cell.detailTextLabel.text = detailText;
-    [cell setNeedsLayout];
-    [cell layoutIfNeeded];
-
-    VCMarqueeLabel *titleMarquee = [self settingsMarqueeForCell:cell tag:kVCSettingsTitleMarqueeTag createIfNeeded:YES];
-    if ([titleText length] > 0) {
-        titleMarquee.hidden = NO;
-        titleMarquee.frame = cell.textLabel.frame;
-        titleMarquee.font = cell.textLabel.font;
-        titleMarquee.textColor = titleColor;
-        titleMarquee.text = titleText;
-        cell.textLabel.textColor = [UIColor clearColor];
-    } else {
-        [titleMarquee stopMarquee];
-        titleMarquee.text = @"";
-        titleMarquee.hidden = YES;
-    }
-
-    VCMarqueeLabel *detailMarquee = [self settingsMarqueeForCell:cell tag:kVCSettingsDetailMarqueeTag createIfNeeded:YES];
-    if ([detailText length] > 0) {
-        detailMarquee.hidden = NO;
-        detailMarquee.frame = cell.detailTextLabel.frame;
-        detailMarquee.font = cell.detailTextLabel.font;
-        detailMarquee.textColor = detailColor;
-        detailMarquee.text = detailText;
-        cell.detailTextLabel.textColor = [UIColor clearColor];
-    } else {
-        [detailMarquee stopMarquee];
-        detailMarquee.text = @"";
-        detailMarquee.hidden = YES;
-    }
+    VCApplySettingsCell(cell,title,detail);
 }
 
 - (NSString *)settingsTitleTextForIndexPath:(NSIndexPath *)indexPath {
@@ -678,7 +901,7 @@
         return @"Routing";
     }
     if (indexPath.section == 1 && indexPath.row == 1) {
-        return @"Ping type";
+        return @"Ping";
     }
     if (indexPath.section == 1 && indexPath.row == 2) {
         return @"Xray version spoof";
@@ -736,7 +959,7 @@
         return @"Proxy, Direct and Block rules";
     }
     if (indexPath.section == 1 && indexPath.row == 1) {
-        return VCSelectedPingTypeText();
+        return @"Ping settings";
     }
     if (indexPath.section == 1 && indexPath.row == 2) {
         return VCSelectedXrayVersionText();
@@ -847,18 +1070,9 @@
         cell.selectionStyle = UITableViewCellSelectionStyleBlue;
         cell.accessoryType = UITableViewCellAccessoryNone;
         cell.accessoryView = VCCreateDisclosureAccessoryView();
-        NSString *title = @"Xray version spoof";
-        NSString *detail = VCSelectedXrayVersionText();
-        if (indexPath.row == 0) {
-            title = @"Routing";
-            detail = @"Proxy, Direct and Block rules";
-        } else if (indexPath.row == 1) {
-            title = @"Ping type";
-            detail = VCSelectedPingTypeText();
-        }
         [self applySettingsMarqueesToCell:cell
-                                    title:title
-                                   detail:detail];
+                                    title:[self settingsTitleTextForIndexPath:indexPath]
+                                   detail:[self settingsDetailTextForIndexPath:indexPath]];
         return cell;
     }
 
@@ -1042,14 +1256,9 @@
         RoutingVC *routing = [[[RoutingVC alloc] init] autorelease];
         [self.navigationController pushViewController:routing animated:YES];
     } else if (indexPath.section == 1 && indexPath.row == 1) {
-        VCRecordAppEvent(@"ui", @"Ping type menu opened", nil);
-        UIActionSheet *sheet = [[[UIActionSheet alloc] initWithTitle:@"Ping type"
-                                                             delegate:self
-                                                    cancelButtonTitle:@"Cancel"
-                                               destructiveButtonTitle:nil
-                                                    otherButtonTitles:@"Proxy GET", @"TCP", @"ICMP", nil] autorelease];
-        sheet.tag = kVCSettingsPingTypeActionSheetTag;
-        [sheet showInView:self.view];
+        VCRecordAppEvent(@"ui", @"Ping settings opened", nil);
+        VCPingSettingsVC *ping = [[[VCPingSettingsVC alloc] initWithDelegate:self] autorelease];
+        [self.navigationController pushViewController:ping animated:YES];
     } else if (indexPath.section == 1 && indexPath.row == 2) {
         VCRecordAppEvent(@"ui", @"Xray version settings opened", nil);
         XrayVersionSpoofVC *spoof = [[[XrayVersionSpoofVC alloc] init] autorelease];
@@ -1091,25 +1300,6 @@
         }
     }
     [tableView deselectRowAtIndexPath:indexPath animated:YES];
-}
-
-- (void)actionSheet:(UIActionSheet *)actionSheet clickedButtonAtIndex:(NSInteger)buttonIndex {
-    if (actionSheet.tag != kVCSettingsPingTypeActionSheetTag ||
-        buttonIndex < VCPingTypeProxyGET ||
-        buttonIndex > VCPingTypeICMP ||
-        buttonIndex == actionSheet.cancelButtonIndex) {
-        return;
-    }
-
-    VCPingType pingType = (VCPingType)buttonIndex;
-    VCRecordAppEvent(@"settings", @"Ping type changed",
-                     [NSString stringWithFormat:@"type=%ld", (long)pingType]);
-    NSUserDefaults *defaults = [NSUserDefaults standardUserDefaults];
-    [defaults setInteger:pingType forKey:kDefaultsPingTypeKey];
-    [defaults synchronize];
-    [_tableView reloadRowsAtIndexPaths:
-        [NSArray arrayWithObject:[NSIndexPath indexPathForRow:1 inSection:1]]
-                          withRowAnimation:UITableViewRowAnimationNone];
 }
 
 - (void)alertView:(UIAlertView *)alertView clickedButtonAtIndex:(NSInteger)buttonIndex {

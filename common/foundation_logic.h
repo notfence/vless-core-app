@@ -10,6 +10,8 @@ BOOL VCAutomaticUpdateCheckIsFreshAtTime(id defaults, NSTimeInterval now);
 void VCCacheSuccessfulUpdateResultAtTime(NSDictionary *result, id defaults, NSTimeInterval now);
 NSString *RoutingPolicyTextInDefaults(id defaults);
 NSString *TrimSimpleString(NSString *s);
+NSInteger VCNormalizedPingTimeoutSeconds(double seconds);
+NSInteger VCPingTimeoutSecondsInDefaults(id defaults);
 
 BOOL VCIsASCIIHexDigit(unichar value);
 NSData *VCEncryptSecureStorePayload(NSData *plaintext, const unsigned char key[32]);
