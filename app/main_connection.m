@@ -421,6 +421,11 @@
     if (!disconnecting) {
         uri = [self uriForCurrentSelection];
         if (!uri) {
+            if (_subscriptionTask && _selectedSubIndex >= 0 && _selectedSubIndex < (NSInteger)[_subscriptions count]) {
+                _connectAfterSubscriptionTask=_subscriptionTask;
+                [_connectAfterSubscriptionURL release]; _connectAfterSubscriptionURL=[[[_subscriptions objectAtIndex:_selectedSubIndex] objectForKey:@"url"] copy];
+                return;
+            }
             VCRecordAppEvent(@"connection", @"Connection failed", @"stage=selection reason=none_selected");
             [self showStatus:@"Select/import a configuration first" ok:NO];
             return;

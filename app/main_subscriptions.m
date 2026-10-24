@@ -134,6 +134,7 @@
                                             &fetchErr,
                                             &curlHeaders,
                                             &curlExitCode);
+    if (VCCurrentSubscriptionTask().isCancelled) { if (errorTextOut) *errorTextOut=VCCurrentSubscriptionTask().cancellationReason; return nil; }
     if (!data && !allowInsecureFetch && CurlExitCodeCanRetryInsecurely(curlExitCode)) {
         if (insecureRetryAvailableOut) *insecureRetryAvailableOut = YES;
     }
@@ -166,7 +167,7 @@
         }
         NSURLResponse *resp = nil;
         NSError *err = nil;
-        data = [NSURLConnection sendSynchronousRequest:req returningResponse:&resp error:&err];
+        data = VCFetchSubscriptionRequest(req,20,&resp,&err);
         if (!data || err) {
             fetchErr = [err localizedDescription];
             if (!allowInsecureFetch && NSURLErrorCanRetryInsecurely(err)) {
@@ -195,7 +196,7 @@
                                  metadataFromResponse:metadataFromMeta
                                           nameFromURL:nameFromURL
                                              hostName:hostName
-                                              options:self
+                                              options:VCCurrentSubscriptionTask() ?: self
                                             errorText:errorTextOut];
 }
 
@@ -209,74 +210,16 @@
            !SubscriptionDictionaryAllowsPlainHTTP(sub);
 }
 
-- (BOOL)approvePlainHTTPForSubscriptionAtIndex:(NSInteger)index {
-    if (index < 0 || index >= (NSInteger)[_subscriptions count]) return NO;
-    NSDictionary *sub = [_subscriptions objectAtIndex:index];
-    if (![self subscriptionNeedsPlainHTTPApproval:sub]) {
-        return SubscriptionDictionaryAllowsPlainHTTP(sub);
-    }
-
-    NSMutableDictionary *approved = [NSMutableDictionary dictionaryWithDictionary:sub];
-    [approved setObject:[NSNumber numberWithBool:YES] forKey:kSubscriptionAllowPlainHTTPKey];
-    [_subscriptions replaceObjectAtIndex:index withObject:approved];
-    return YES;
-}
-
 - (BOOL)refreshSubscriptionAtIndex:(NSInteger)idx showStatus:(BOOL)showStatus {
     if (idx < 0 || idx >= (NSInteger)[_subscriptions count]) return NO;
-    if ([self isConnectionActionInProgress]) {
+    if ([self isConnectionActionInProgress] || _subscriptionTask) {
         if (showStatus) [self showStatus:@"Busy" ok:NO];
         return NO;
     }
-    NSTimeInterval diagnosticStarted = [NSDate timeIntervalSinceReferenceDate];
-    VCRecordAppEvent(@"subscription", @"Single subscription update started", nil);
-
-    NSDictionary *sub = [_subscriptions objectAtIndex:idx];
-    if ([self subscriptionNeedsPlainHTTPApproval:sub]) {
-        [self showPlainHTTPSubscriptionWarningForCount:1 confirmation:^{
-            if ([self approvePlainHTTPForSubscriptionAtIndex:idx]) {
-                [self saveData];
-                if ([self refreshSubscriptionAtIndex:idx showStatus:YES]) {
-                    [self reloadMainTableDataAfterExternalChange];
-                }
-            }
-        }];
-        return NO;
-    }
-
-    NSString *errorText = nil;
-    NSDictionary *updated = [self updatedSubscriptionDictionaryFromSource:sub errorText:&errorText];
-    if (![updated isKindOfClass:[NSDictionary class]]) {
-        VCRecordAppEvent(@"subscription", @"Single subscription update failed",
-                         [NSString stringWithFormat:@"error=%@ duration_ms=%.0f",
-                          VCDiagnosticErrorSummary(errorText),
-                          ([NSDate timeIntervalSinceReferenceDate] - diagnosticStarted) * 1000.0]);
-        if (showStatus) {
-            [self showStatus:([errorText length] > 0 ? errorText : @"Subscription update failed") ok:NO];
-            [self showSubscriptionUpdateFailures:[NSArray arrayWithObject:[self shortUpdateFailureTextForSubscription:sub errorText:errorText]]];
-        }
-        return NO;
-    }
-
-    NSArray *uris = [updated objectForKey:@"items"];
-    [_subscriptions replaceObjectAtIndex:idx withObject:updated];
-    [self showProfileImportWarnings:@[updated]];
-    if (_selectedSubIndex == idx) {
-        if (![uris isKindOfClass:[NSArray class]] || (NSInteger)[uris count] <= 0) {
-            _selectedSubItemIndex = -1;
-        } else if (_selectedSubItemIndex < 0 || _selectedSubItemIndex >= (NSInteger)[uris count]) {
-            _selectedSubItemIndex = 0;
-        }
-    }
-    [self saveData];
-    VCRecordAppEvent(@"subscription", @"Single subscription update finished",
-                     [NSString stringWithFormat:@"configs=%lu duration_ms=%.0f",
-                      (unsigned long)[uris count],
-                      ([NSDate timeIntervalSinceReferenceDate] - diagnosticStarted) * 1000.0]);
-    if (showStatus) {
-        [self showStatus:[NSString stringWithFormat:@"Subscription updated (%lu configs)", (unsigned long)[uris count]] ok:YES];
-    }
-    return YES;
+    [_pendingImportRefreshIndices release];
+    _pendingImportRefreshIndices=[@[ @(idx) ] copy];
+    [self startBackgroundSubscriptionRefresh];
+    return NO;
 }
 
 - (BOOL)subscriptionsMatchSnapshotForLaunchAutoUpdate:(NSArray *)snapshot {
@@ -307,12 +250,12 @@
     return YES;
 }
 
-- (void)startBackgroundSubscriptionRefreshWithStatus:(NSString *)startStatus {
+- (void)startBackgroundSubscriptionRefresh {
+    [self startBackgroundSubscriptionRefreshAllowPlainHTTP:NO];
+}
+
+- (void)startBackgroundSubscriptionRefreshAllowPlainHTTP:(BOOL)allowPlainHTTP {
     if ([_subscriptions count] == 0) {
-        if (_pendingImportDoneStatus) {
-            [_pendingImportDoneStatus release];
-            _pendingImportDoneStatus = nil;
-        }
         if (_pendingImportRefreshIndices) {
             [_pendingImportRefreshIndices release];
             _pendingImportRefreshIndices = nil;
@@ -323,8 +266,6 @@
     BOOL updateInProgress = _launchAutoUpdateInProgress;
     BOOL connectionActionInProgress = [self isConnectionActionInProgress];
     if (updateInProgress || connectionActionInProgress) {
-        [_pendingImportDoneStatus release];
-        _pendingImportDoneStatus = nil;
         [_pendingImportRefreshIndices release];
         _pendingImportRefreshIndices = nil;
         if (updateInProgress) {
@@ -352,14 +293,11 @@
             }
         }
     }
-    if ([plainHTTPIndices count] > 0) {
+    if ([plainHTTPIndices count] > 0 && !allowPlainHTTP) {
+        NSUInteger revision=_configurationRevision;
         [self showPlainHTTPSubscriptionWarningForCount:[plainHTTPIndices count] confirmation:^{
-            BOOL changed = NO;
-            for (NSNumber *indexValue in plainHTTPIndices) {
-                changed |= [self approvePlainHTTPForSubscriptionAtIndex:[indexValue integerValue]];
-            }
-            if (changed) [self saveData];
-            [self startBackgroundSubscriptionRefreshWithStatus:startStatus];
+            if (revision != _configurationRevision) { [self showStatus:@"Update skipped: subscriptions changed" ok:NO]; return; }
+            [self startBackgroundSubscriptionRefreshAllowPlainHTTP:YES];
         }];
         return;
     }
@@ -371,7 +309,14 @@
     [_pendingImportRefreshIndices release];
     _pendingImportRefreshIndices = nil;
 
-    NSArray *snapshot = [[NSArray alloc] initWithArray:_subscriptions copyItems:YES];
+    NSMutableArray *approvedSubscriptions=[NSMutableArray arrayWithArray:_subscriptions];
+    if (allowPlainHTTP) for (NSNumber *indexValue in plainHTTPIndices) {
+        NSUInteger index=[indexValue unsignedIntegerValue];
+        NSMutableDictionary *approved=[NSMutableDictionary dictionaryWithDictionary:[approvedSubscriptions objectAtIndex:index]];
+        [approved setObject:@(YES) forKey:kSubscriptionAllowPlainHTTPKey];
+        [approvedSubscriptions replaceObjectAtIndex:index withObject:approved];
+    }
+    NSArray *snapshot = [approvedSubscriptions copy];
     NSUInteger sourceRevision=_configurationRevision;
     NSMutableArray *refreshIndicesMutable = [NSMutableArray array];
     if ([requestedIndices count] > 0) {
@@ -389,37 +334,30 @@
     [requestedIndices release];
 
     if ([refreshIndicesMutable count] == 0) {
-        if (_pendingImportDoneStatus) {
-            [self showStatus:_pendingImportDoneStatus ok:YES];
-            [_pendingImportDoneStatus release];
-            _pendingImportDoneStatus = nil;
-        } else {
-            [self showStatus:@"No subscriptions to update" ok:NO];
-        }
+        [self showStatus:@"No subscriptions to update" ok:NO];
         [snapshot release];
         return;
     }
 
-    _launchAutoUpdateInProgress = YES;
-    [self setSubscriptionRefreshInProgress:YES];
+    VCSubscriptionTask *task=[self beginSubscriptionTaskWithKind:VCSubscriptionTaskUpdate];
+    if (!task) { [snapshot release]; return; }
     NSTimeInterval diagnosticStarted = [NSDate timeIntervalSinceReferenceDate];
 
     NSArray *refreshIndices = [[NSArray alloc] initWithArray:refreshIndicesMutable];
     VCRecordAppEvent(@"subscription", @"Subscription update batch started",
                      [NSString stringWithFormat:@"requested=%lu", (unsigned long)[refreshIndices count]]);
-    NSString *startText = ([startStatus isKindOfClass:[NSString class]] && [startStatus length] > 0)
-                              ? startStatus
-                              : @"Updating subscriptions...";
-    [self showStatus:startText ok:YES];
 
     dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_DEFAULT, 0), ^{
         NSAutoreleasePool *pool = [[NSAutoreleasePool alloc] init];
+        VCSubscriptionTask *previous=[VCSetCurrentSubscriptionTask(task) retain];
+        @try {
 
         NSMutableArray *updatedSubs = [[NSMutableArray alloc] initWithArray:snapshot];
         NSMutableArray *failureTexts = [[NSMutableArray alloc] init];
         NSMutableDictionary *failureCategories = [[NSMutableDictionary alloc] init];
         NSUInteger okCount = 0;
         for (NSNumber *idxObj in refreshIndices) {
+            if (task.isCancelled) break;
             NSAutoreleasePool *entryPool=[[NSAutoreleasePool alloc] init];
             @try {
             NSInteger i = [idxObj integerValue];
@@ -441,6 +379,10 @@
         }
 
         dispatch_async(dispatch_get_main_queue(), ^{
+            if (task != _subscriptionTask || task.isCancelled) {
+                [self finishSubscriptionTask:task success:NO];
+                [failureTexts release]; [failureCategories release]; [updatedSubs release]; [refreshIndices release]; [snapshot release]; return;
+            }
             if (sourceRevision != _configurationRevision || ![self subscriptionsMatchSnapshotForLaunchAutoUpdate:snapshot]) {
                 [self setUpdatingSubscriptionIndex:-1];
                 _launchAutoUpdateInProgress=NO;
@@ -448,10 +390,7 @@
                 VCRecordAppEvent(@"subscription", @"Subscription update batch discarded",
                                  @"reason=list_changed_during_update");
                 [self showStatus:@"Auto-update skipped: subscriptions changed" ok:YES];
-                if (_pendingImportDoneStatus) {
-                    [_pendingImportDoneStatus release];
-                    _pendingImportDoneStatus = nil;
-                }
+                [self finishSubscriptionTask:task success:NO];
                 [failureTexts release];
                 [failureCategories release];
                 [updatedSubs release];
@@ -465,8 +404,8 @@
             _launchAutoUpdateInProgress=NO;
             [self setSubscriptionRefreshInProgress:NO];
             if (!saved) {
+                [self finishSubscriptionTask:task success:NO];
                 [failureTexts release]; [failureCategories release]; [updatedSubs release]; [refreshIndices release]; [snapshot release];
-                [_pendingImportDoneStatus release]; _pendingImportDoneStatus=nil;
                 return;
             }
             [self showProfileImportWarnings:updatedSubs];
@@ -477,16 +416,10 @@
             [self refreshPresentedSubscriptionInfoIfNeeded];
 
             BOOL ok = okCount > 0;
-            if (_pendingImportDoneStatus) {
-                [self showStatus:_pendingImportDoneStatus ok:YES];
-                [_pendingImportDoneStatus release];
-                _pendingImportDoneStatus = nil;
-            } else {
-	                [self showStatus:[NSString stringWithFormat:@"Subscriptions updated: %lu/%lu",
-	                                  (unsigned long)okCount,
-	                                  (unsigned long)[refreshIndices count]]
-	                         ok:ok];
-            }
+            [self showStatus:[NSString stringWithFormat:@"Subscriptions updated: %lu/%lu",
+                              (unsigned long)okCount,
+                              (unsigned long)[refreshIndices count]]
+                         ok:ok];
 
             if ([failureTexts count] > 0) {
                 [self showSubscriptionUpdateFailures:failureTexts];
@@ -499,6 +432,7 @@
                               VCDiagnosticCategoryCountsText(failureCategories),
                               ([NSDate timeIntervalSinceReferenceDate] - diagnosticStarted) * 1000.0]);
 
+            [self finishSubscriptionTask:task success:ok];
             [failureTexts release];
             [failureCategories release];
             [updatedSubs release];
@@ -507,7 +441,7 @@
             }];
         });
 
-        [pool drain];
+        } @finally { VCSetCurrentSubscriptionTask(previous); [previous release]; [pool drain]; }
     });
 }
 
@@ -524,57 +458,7 @@
     }
     _didRunLaunchAutoUpdate = YES;
 
-    [self startBackgroundSubscriptionRefreshWithStatus:@"Auto-updating subscriptions in background..."];
-}
-
-- (void)refreshAllSubscriptions:(BOOL)showStatus {
-    if ([self isConnectionActionInProgress]) {
-        if (showStatus) [self showStatus:@"Busy" ok:NO];
-        return;
-    }
-    if ([_subscriptions count] == 0) {
-        if (showStatus) [self showStatus:@"No subscriptions to update" ok:NO];
-        return;
-    }
-
-    NSUInteger okCount = 0;
-    NSMutableArray *failureTexts = [NSMutableArray array];
-    for (NSInteger i = 0; i < (NSInteger)[_subscriptions count]; i++) {
-        NSDictionary *sub = [_subscriptions objectAtIndex:i];
-        NSString *errorText = nil;
-        NSDictionary *updated = [self updatedSubscriptionDictionaryFromSource:sub errorText:&errorText];
-        if ([updated isKindOfClass:[NSDictionary class]]) {
-            NSArray *uris = [updated objectForKey:@"items"];
-            [_subscriptions replaceObjectAtIndex:i withObject:updated];
-            [self showProfileImportWarnings:@[updated]];
-            if (_selectedSubIndex == i) {
-                if (![uris isKindOfClass:[NSArray class]] || (NSInteger)[uris count] <= 0) {
-                    _selectedSubItemIndex = -1;
-                } else if (_selectedSubItemIndex < 0 || _selectedSubItemIndex >= (NSInteger)[uris count]) {
-                    _selectedSubItemIndex = 0;
-                }
-            }
-            [self saveData];
-            okCount++;
-        } else {
-            [failureTexts addObject:[self shortUpdateFailureTextForSubscription:sub errorText:errorText]];
-        }
-    }
-
-    [self normalizeSelection];
-    [self reloadMainTableDataAfterExternalChange];
-    [self refreshPresentedSubscriptionInfoIfNeeded];
-
-    if (showStatus) {
-        BOOL ok = okCount > 0;
-        [self showStatus:[NSString stringWithFormat:@"Subscriptions updated: %lu/%lu",
-                          (unsigned long)okCount,
-                          (unsigned long)[_subscriptions count]]
-                     ok:ok];
-        if ([failureTexts count] > 0) {
-            [self showSubscriptionUpdateFailures:failureTexts];
-        }
-    }
+    [self startBackgroundSubscriptionRefresh];
 }
 
 - (void)openSubscriptionProviderURLAtIndex:(NSInteger)index
@@ -636,6 +520,10 @@
 }
 
 - (void)subscriptionInfoVCRequestedRefresh:(SubscriptionInfoVC *)vc atIndex:(NSInteger)index {
+    [self subscriptionInfoVCRequestedRefresh:vc atIndex:index allowPlainHTTP:NO];
+}
+
+- (void)subscriptionInfoVCRequestedRefresh:(SubscriptionInfoVC *)vc atIndex:(NSInteger)index allowPlainHTTP:(BOOL)allowPlainHTTP {
     if (_launchAutoUpdateInProgress) {
         [vc finishRefreshWithSubscription:nil errorText:@"Another subscription update is already running"];
         return;
@@ -650,13 +538,12 @@
         [vc finishRefreshWithSubscription:nil errorText:@"Connection action is in progress"];
         return;
     }
-    if ([self subscriptionNeedsPlainHTTPApproval:[_subscriptions objectAtIndex:index]]) {
+    if (!allowPlainHTTP && [self subscriptionNeedsPlainHTTPApproval:[_subscriptions objectAtIndex:index]]) {
+        NSUInteger revision=_configurationRevision;
         [self showPlainHTTPSubscriptionWarningForCount:1
                                           confirmation:^{
-                                              if ([self approvePlainHTTPForSubscriptionAtIndex:index]) {
-                                                  [self saveData];
-                                                  [self subscriptionInfoVCRequestedRefresh:vc atIndex:index];
-                                              }
+                                              if (revision != _configurationRevision) { [vc cancelRefresh]; return; }
+                                              [self subscriptionInfoVCRequestedRefresh:vc atIndex:index allowPlainHTTP:YES];
                                           }
                                             cancellation:^{
                                                 [vc cancelRefresh];
@@ -664,17 +551,22 @@
         return;
     }
 
-    NSDictionary *snapshot = [[_subscriptions objectAtIndex:index] copy];
+    VCSubscriptionTask *task=[self beginSubscriptionTaskWithKind:VCSubscriptionTaskUpdate];
+    if (!task) { [vc cancelRefresh]; return; }
+    NSMutableDictionary *approved=[NSMutableDictionary dictionaryWithDictionary:[_subscriptions objectAtIndex:index]];
+    if (allowPlainHTTP) [approved setObject:@(YES) forKey:kSubscriptionAllowPlainHTTPKey];
+    NSDictionary *snapshot = [approved copy];
     NSUInteger sourceRevision=_configurationRevision;
     NSString *expectedURL = [[snapshot objectForKey:@"url"] copy];
     SubscriptionInfoVC *infoVC = [vc retain];
     _launchAutoUpdateInProgress = YES;
     [self setSubscriptionRefreshInProgress:YES];
     [self setUpdatingSubscriptionIndex:index];
-    [self showStatus:@"Updating subscription..." ok:YES];
 
     dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_DEFAULT, 0), ^{
         NSAutoreleasePool *pool = [[NSAutoreleasePool alloc] init];
+        VCSubscriptionTask *previous=[VCSetCurrentSubscriptionTask(task) retain];
+        @try {
         NSString *errorText = nil;
         NSDictionary *updated = [[self updatedSubscriptionDictionaryFromSource:snapshot errorText:&errorText] retain];
         NSString *copiedError = [errorText copy];
@@ -682,7 +574,7 @@
         dispatch_async(dispatch_get_main_queue(), ^{
             BOOL stillExists = (index >= 0 && index < (NSInteger)[_subscriptions count]);
             NSString *currentURL = stillExists ? [[_subscriptions objectAtIndex:index] objectForKey:@"url"] : nil;
-            BOOL unchanged = sourceRevision == _configurationRevision && stillExists && [expectedURL isKindOfClass:[NSString class]] &&
+            BOOL unchanged = task == _subscriptionTask && !task.isCancelled && sourceRevision == _configurationRevision && stillExists && [expectedURL isKindOfClass:[NSString class]] &&
                              [currentURL isKindOfClass:[NSString class]] && [currentURL isEqualToString:expectedURL];
 
             void (^finishRefresh)(BOOL)=^(BOOL saved) {
@@ -706,10 +598,12 @@
                 if (![message isKindOfClass:[NSString class]] || [message length] == 0) {
                     message = @"Subscription update failed";
                 }
+                if (task.isCancelled) message=task.cancellationReason;
                 [self showStatus:message ok:NO];
                 [infoVC finishRefreshWithSubscription:nil errorText:message];
             }
 
+            [self finishSubscriptionTask:task success:(updated && unchanged && saved)];
             [updated release];
             [copiedError release];
             [expectedURL release];
@@ -722,7 +616,7 @@
                 [self commitConfigurations:_configs subscriptions:draft completion:finishRefresh];
             } else finishRefresh(NO);
         });
-        [pool drain];
+        } @finally { VCSetCurrentSubscriptionTask(previous); [previous release]; [pool drain]; }
     });
 }
 

@@ -81,6 +81,71 @@ def main():
     applied = state.split('- (void)finishConfigurationDraft:', 1)[1].split('\n}', 1)[0]
     if applied.index('if (saved)') > applied.index('[_configs release]') or 'installPreparedMetadata:' not in applied:
         raise AssertionError('app/import-must-only-apply-after-successful-save')
+    imports = (ROOT / 'app/main_import.m').read_text()
+    single_import = imports.split('- (void)importSubscriptionURL:', 1)[1].split('\n}', 1)[0]
+    if 'updatedSubscriptionDictionaryFromSource:' in single_import or 'startBackgroundSubscriptionImportForURLs:' not in single_import:
+        raise AssertionError('app/QR-and-single-subscription-import-must-be-background')
+    text_import = imports.split('- (void)importTextEntry:', 1)[1].split('\n}', 1)[0]
+    file_import = imports.split('- (void)importTextFileAtPath:', 1)[1].split('\n}', 1)[0]
+    if 'startTextImport:' not in text_import or 'startTextImport:' not in file_import or 'dataWithContentsOfFile:' in file_import:
+        raise AssertionError('app/text-and-file-import-must-use-worker')
+    subscriptions = (ROOT / 'app/main_subscriptions.m').read_text()
+    for source in (imports, subscriptions, (ROOT / 'app/main_screen.h').read_text(), (ROOT / 'app/subscription_work.m').read_text()):
+        if any(unused in source for unused in ('startStatus', 'importedPrefixPart', '_pendingImportDoneStatus', 'refreshAllSubscriptions:')):
+            raise AssertionError('app/subscription-code-must-not-retain-unused-status-plumbing')
+    if '[self approvePlainHTTPForSubscriptionAtIndex:' in subscriptions:
+        raise AssertionError('app/update-approval-must-not-mutate-store-before-commit')
+    refresh = subscriptions.split('- (BOOL)refreshSubscriptionAtIndex:', 1)[1].split('\n}', 1)[0]
+    if 'updatedSubscriptionDictionaryFromSource:' in refresh or 'startBackgroundSubscriptionRefresh]' not in refresh:
+        raise AssertionError('app/single-refresh-must-be-background')
+    work = (ROOT / 'app/subscription_work.m').read_text()
+    if 'task != _subscriptionTask' not in work or 'revision != _configurationRevision' not in work:
+        raise AssertionError('app/import-results-must-be-generation-checked')
+    progress = work.split('- (void)subscriptionTaskProgress:', 1)[1].split('\n}', 1)[0]
+    cancel = work.split('- (void)cancelSubscriptionTask {', 1)[1].split('\n}', 1)[0]
+    if 'cancelWithReason:nil' not in cancel or 'VCSubscriptionTaskUpdate ? @"Cancel update"' not in layout:
+        raise AssertionError('app/cancel-and-accessibility-must-follow-subscription-operation-kind')
+    warning = (ROOT / 'app/main_screen.m').read_text().split('- (void)didReceiveMemoryWarning {', 1)[1].split('\n}', 1)[0]
+    if 'cancellationReason stringByAppendingString:@": low memory"' not in warning:
+        raise AssertionError('app/memory-warning-cancellation-must-follow-operation-kind')
+    if 'showStatus:' in progress or 'showStatus:' in cancel or 'shows_notice' in progress:
+        raise AssertionError('app/transient-progress-must-not-use-status-or-notice')
+    if 'VCSubscriptionNotice' in work or '_subscriptionNotice' in (ROOT / 'app/main_screen.h').read_text():
+        raise AssertionError('app/subscription-progress-must-not-create-an-overlay')
+    if 'setProgress:[[progress objectForKey:@"fraction"] doubleValue]' not in progress or 'objectForKey:@"determinate"' not in progress or 'setLoading:YES' not in progress:
+        raise AssertionError('app/subscription-progress-must-fill-power-ring-with-real-fraction')
+    if progress.index('task != _subscriptionTask') > progress.index('consumeProgress') or 'updateConnectButton' in progress or '_refreshBtn.enabled=[[progress objectForKey:@"stoppable"] boolValue]' not in progress:
+        raise AssertionError('app/progress-must-ignore-stale-tasks-and-keep-cancel-without-rebuilding-button')
+    if 'if (_subscriptionTask) [self subscriptionTaskProgress:_subscriptionTask];' not in connect_button or 'BOOL refreshCancels=_subscriptionTask != nil;' not in layout:
+        raise AssertionError('app/button-refresh-must-preserve-progress-and-cancel-for-all-import-kinds')
+    finish = work.split('- (void)finishSubscriptionTask:', 1)[1].split('\n}', 1)[0]
+    if 'else [self updateConnectButton];' not in finish or finish.index('_subscriptionTask=nil') > finish.index('else [self updateConnectButton];'):
+        raise AssertionError('app/finishing-task-must-reset-ring-even-if-refresh-flag-was-cleared-earlier')
+    power = (ROOT / 'app/connection_button.m').read_text()
+    if '_progressTrackLayer' in power or '_progressLayer' in power or 'setProgressVisible:' in power:
+        raise AssertionError('app/power-progress-must-use-one-contour-without-translucent-background-or-crossfade')
+    ring = power.split('- (void)setProgress:', 1)[1].split('\n}', 1)[0]
+    for expected in ('_progressRequested=YES', '++_transitionGeneration', 'animatePath:_progressPath progress:fraction spinning:NO'):
+        if expected not in ring:
+            raise AssertionError('app/determinate-ring-must-stop-spin-and-invalidate-delayed-transitions')
+    transition = power.split('- (void)animatePath:(CGPathRef)path progress:(CGFloat)progress spinning:(BOOL)spinning {', 1)[1].split('\n}', 1)[0]
+    if transition.index('CGPathCreateCopy(visible.path') > transition.index('removeAnimationForKey:@"powerSpin"') or 'rotation.fromValue = [NSNumber numberWithFloat:angle]' not in transition or 'animateProgress:progress duration:kVCPowerMorphDuration' not in transition:
+        raise AssertionError('app/power-transitions-must-preserve-visible-path-angle-and-stroke')
+    filling = power.split('- (void)animateProgress:(CGFloat)progress duration:(CFTimeInterval)duration {', 1)[1].split('\n}', 1)[0]
+    if 'presentationLayer' not in filling or '_symbolLayer.strokeEnd=progress' not in filling or 'fabs(progress-from)' not in filling or 'progress > from' in filling:
+        raise AssertionError('app/progress-changes-and-resets-must-animate-from-presentation-state-in-both-directions')
+    loading = power.split('- (void)setLoading:', 1)[1].split('\n}', 1)[0]
+    if '!_progressRequested' not in loading or '_progressRequested=NO' not in loading:
+        raise AssertionError('app/spinner-and-idle-must-replace-progress-without-stale-callbacks')
+    if 'task.kind == VCSubscriptionTaskProfiles' not in work or '@"Subscriptions updated"' not in work:
+        raise AssertionError('app/subscription-summary-must-keep-result-counts')
+    if 'beginSubscriptionTaskWithKind:VCSubscriptionTaskAddition' not in imports or 'beginSubscriptionTaskWithKind:VCSubscriptionTaskAddition' in subscriptions:
+        raise AssertionError('app/import-and-update-must-retain-operation-kinds')
+    for source in (work, imports, subscriptions, state, (ROOT / 'app/main_screen.m').read_text()):
+        if re.search(r'showStatus:@"(?:Downloading|Processing|Reading import|Reading Karing|Receiving Karing|Saving configurations\.\.\.|Cancelling import|Loading configurations|Updating subscription)', source):
+            raise AssertionError('app/import-progress-must-not-replace-status-line')
+    if 'beginCommit]' not in state or 'cancelSubscriptionTask' not in (ROOT / 'app/main_settings.m').read_text():
+        raise AssertionError('app/import-cancel-and-commit-must-be-gated')
     runtime = (ROOT / 'app/runtime_info.m').read_text()
     core_version = runtime.split('NSString *DetectCoreBinaryVersion(void) {', 1)[1].split('\n}', 1)[0]
     if 'return v;' not in core_version or 'substring' in core_version or 'componentsSeparated' in core_version:

@@ -415,12 +415,18 @@ static BOOL gVCSecureStoreWritable = YES;
     _configurationDraft=[[NSDictionary alloc] initWithObjectsAndKeys:configSnapshot,@"configs",subscriptionSnapshot,@"subscriptions",nil];
     NSDictionary *additional=nil;
     @synchronized(self) { additional=_pendingProfileMetadata; _pendingProfileMetadata=nil; }
+    VCSubscriptionTask *task=[_subscriptionTask retain];
+    NSDictionary *taskMetadata=[[task takePreparedMetadata] retain];
     dispatch_async(_configurationQueue, ^{
         NSAutoreleasePool *pool=[[NSAutoreleasePool alloc] init];
-        NSDictionary *metadata=[[VCProfiles() preparedMetadataForConfigurations:configSnapshot subscriptions:subscriptionSnapshot additionalMetadata:additional] retain];
+        VCSubscriptionTask *previous=[VCSetCurrentSubscriptionTask(task) retain];
+        NSMutableDictionary *combined=[NSMutableDictionary dictionaryWithDictionary:additional ?: @{}];
+        if (taskMetadata) [combined addEntriesFromDictionary:taskMetadata];
+        NSDictionary *metadata=[[VCProfiles() preparedMetadataForConfigurations:configSnapshot subscriptions:subscriptionSnapshot additionalMetadata:combined] retain];
+        VCSetCurrentSubscriptionTask(previous); [previous release];
         dispatch_async(dispatch_get_main_queue(), ^{
             if (token == _configurationDraftToken && _configurationDraft) {
-                if (revision != _configurationRevision) [self finishConfigurationDraft:NO];
+                if (revision != _configurationRevision || !metadata || (task && ![task beginCommit])) [self finishConfigurationDraft:NO];
                 else {
                     NSMutableDictionary *draft=[[_configurationDraft mutableCopy] autorelease];
                     [draft setObject:metadata forKey:@"metadata"];
@@ -428,13 +434,14 @@ static BOOL gVCSecureStoreWritable = YES;
                     _configurationCommitInProgress=YES;
                     _plusBtn.enabled=NO; _settingsBtn.enabled=NO; _refreshBtn.enabled=NO;
                     [self setMainReorderingSection:-1 showStatus:NO];
+                    [self subscriptionTaskProgress:task];
                     [self keepConfigurationWriteAlive];
                     if (![_configurationWriter enqueueConfigurations:configSnapshot subscriptions:subscriptionSnapshot revision:++_storeSequence target:self selector:@selector(configurationStoreFinished:) context:@(token)]) [self finishConfigurationDraft:NO];
                 }
             }
             [metadata release];
         });
-        [additional release]; [configSnapshot release]; [subscriptionSnapshot release]; [pool drain];
+        [taskMetadata release]; [task release]; [additional release]; [configSnapshot release]; [subscriptionSnapshot release]; [pool drain];
     });
 }
 
@@ -456,6 +463,7 @@ static BOOL gVCSecureStoreWritable = YES;
 }
 
 - (void)finishConfigurationDraft:(BOOL)saved {
+    BOOL cancelled=_subscriptionTask.isCancelled;
     if (saved) {
         [_configs release]; _configs=[[_configurationDraft objectForKey:@"configs"] mutableCopy];
         [_subscriptions release]; _subscriptions=[[_configurationDraft objectForKey:@"subscriptions"] mutableCopy];
@@ -469,7 +477,7 @@ static BOOL gVCSecureStoreWritable = YES;
     _applyingConfigurationDraft=saved;
     if (completion) { completion(saved); Block_release(completion); }
     if (saved) [self saveData];
-    else [self showStatus:@"Import was not saved; previous configurations are unchanged" ok:NO];
+    else if (!cancelled) [self showStatus:@"Import was not saved; previous configurations are unchanged" ok:NO];
     _applyingConfigurationDraft=NO;
 }
 

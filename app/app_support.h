@@ -42,6 +42,7 @@
 #import "../common/foundation_logic.h"
 #import "../common/profile_logic.h"
 #import "../common/secure_store.h"
+#import "../common/subscription_task.h"
 #import "../common/connection_logic.h"
 #import "proxy_probe.h"
 #include "../common/main_geometry.h"

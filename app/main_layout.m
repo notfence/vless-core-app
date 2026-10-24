@@ -301,7 +301,11 @@
     NSString *title = _subscriptionRefreshInProgress ? @"Updating" : (_connected ? @"Disconnect" : @"Connect");
     _connectButtonTitle.text = title;
     _connectBtn.accessibilityLabel = title;
-    [_connectPowerIcon setLoading:_subscriptionRefreshInProgress || VCConnectionActionInProgress(_connectionActionInProgress, _reconnectInProgress, [_pendingReconnectURI length] > 0)];
+    if (_subscriptionTask) [self subscriptionTaskProgress:_subscriptionTask];
+    else {
+        _connectBtn.accessibilityValue=nil;
+        [_connectPowerIcon setLoading:_subscriptionRefreshInProgress || VCConnectionActionInProgress(_connectionActionInProgress, _reconnectInProgress, [_pendingReconnectURI length] > 0)];
+    }
     UIColor *fill = _connected
         ? [UIColor colorWithRed:0.12f green:0.58f blue:0.20f alpha:1.0f]
         : VCAccentColor();
@@ -351,7 +355,9 @@
     UIImage *trash = LoadBundledIconTinted(@"icon-trash", 20.0f, iconColor);
     UIImage *update = LoadBundledIconScaled(VCAppearanceIsDark() ? @"update-dark" : @"update-white", 20.0f);
 
-    [_refreshBtn setImage:(refresh ? refresh : MakeIconImage(VCIconTypeRefresh, 20.0f, NO)) forState:UIControlStateNormal];
+    BOOL refreshCancels=_subscriptionTask != nil;
+    [_refreshBtn setImage:(refreshCancels ? MakeIconImage(VCIconTypeStop,20.0f,NO) : (refresh ? refresh : MakeIconImage(VCIconTypeRefresh, 20.0f, NO))) forState:UIControlStateNormal];
+    _refreshBtn.accessibilityLabel=refreshCancels ? (_subscriptionTask.kind == VCSubscriptionTaskUpdate ? @"Cancel update" : @"Cancel import") : @"Update subscriptions";
     [_terminalBtn setImage:(terminal ? terminal : MakeIconImage(_showingTerminal ? VCIconTypeList : VCIconTypeTerminal, 20.0f, _showingTerminal))
                   forState:UIControlStateNormal];
     [_clearLogsBtn setImage:trash forState:UIControlStateNormal];

@@ -170,12 +170,14 @@
                                     fromBatchImport:(BOOL)fromBatchImport
                                          happSource:(BOOL)happSource {
     NSMutableArray *cleanURLs = [NSMutableArray array];
+    NSMutableSet *seenURLs = [NSMutableSet set];
     for (id obj in urlStrings) {
         if (![obj isKindOfClass:[NSString class]]) continue;
         NSString *urlString = [self safeTrim:(NSString *)obj];
         if ([urlString length] == 0) continue;
-        if (![cleanURLs containsObject:urlString]) {
+        if (![seenURLs containsObject:urlString]) {
             [cleanURLs addObject:urlString];
+            [seenURLs addObject:urlString];
         }
     }
 
@@ -328,33 +330,23 @@
 }
 
 - (void)startBackgroundSubscriptionImportForURLs:(NSArray *)urlStrings
-                              allowInsecureFetch:(BOOL)allowInsecureFetch
-                                     startStatus:(NSString *)startStatus
-                              importedPrefixPart:(NSString *)importedPrefixPart {
+                              allowInsecureFetch:(BOOL)allowInsecureFetch {
     [self startBackgroundSubscriptionImportForURLs:urlStrings
                                allowInsecureFetch:allowInsecureFetch
-                                      startStatus:startStatus
-                               importedPrefixPart:importedPrefixPart
                       fallbackSubscriptionsByURL:nil];
 }
 
 - (void)startBackgroundSubscriptionImportForURLs:(NSArray *)urlStrings
                               allowInsecureFetch:(BOOL)allowInsecureFetch
-                                     startStatus:(NSString *)startStatus
-                              importedPrefixPart:(NSString *)importedPrefixPart
                      fallbackSubscriptionsByURL:(NSDictionary *)fallbackSubscriptionsByURL {
     [self startBackgroundSubscriptionImportForURLs:urlStrings
                                allowInsecureFetch:allowInsecureFetch
-                                      startStatus:startStatus
-                               importedPrefixPart:importedPrefixPart
                       fallbackSubscriptionsByURL:fallbackSubscriptionsByURL
                                    allowPlainHTTP:NO];
 }
 
 - (void)startBackgroundSubscriptionImportForURLs:(NSArray *)urlStrings
                               allowInsecureFetch:(BOOL)allowInsecureFetch
-                                     startStatus:(NSString *)startStatus
-                              importedPrefixPart:(NSString *)importedPrefixPart
                      fallbackSubscriptionsByURL:(NSDictionary *)fallbackSubscriptionsByURL
                                   allowPlainHTTP:(BOOL)allowPlainHTTP {
     NSMutableArray *cleanURLs = [NSMutableArray array];
@@ -384,8 +376,6 @@
             [self showPlainHTTPSubscriptionWarningForCount:plainHTTPCount confirmation:^{
                 [self startBackgroundSubscriptionImportForURLs:cleanURLs
                                            allowInsecureFetch:allowInsecureFetch
-                                                  startStatus:startStatus
-                                           importedPrefixPart:importedPrefixPart
                                   fallbackSubscriptionsByURL:fallbackSubscriptionsByURL
                                                allowPlainHTTP:YES];
             }];
@@ -398,22 +388,24 @@
         return;
     }
 
-    _launchAutoUpdateInProgress = YES;
+    VCSubscriptionTask *task=[self beginSubscriptionTaskWithKind:VCSubscriptionTaskAddition];
+    if (!task) return;
     NSTimeInterval diagnosticStarted = [NSDate timeIntervalSinceReferenceDate];
     VCRecordAppEvent(@"import", @"Batch subscription import started",
                      [NSString stringWithFormat:@"requested=%lu insecure=%d",
                       (unsigned long)[cleanURLs count], allowInsecureFetch ? 1 : 0]);
-    NSString *startText = ([startStatus isKindOfClass:[NSString class]] && [startStatus length] > 0)
-                              ? startStatus
-                              : @"Importing subscriptions...";
-    [self showStatus:startText ok:YES];
 
     NSArray *urlsToImport = [[NSArray alloc] initWithArray:cleanURLs];
-    NSString *prefixPart = [importedPrefixPart copy];
+    NSArray *sourceSubscriptions=[_subscriptions copy];
+    NSUInteger sourceRevision=_configurationRevision;
     NSDictionary *fallbackSubscriptions = [fallbackSubscriptionsByURL copy];
 
     dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_DEFAULT, 0), ^{
         NSAutoreleasePool *pool = [[NSAutoreleasePool alloc] init];
+        VCSubscriptionTask *previous=[VCSetCurrentSubscriptionTask(task) retain];
+        @try {
+        NSMutableDictionary *sources=[NSMutableDictionary dictionary];
+        for (NSDictionary *source in sourceSubscriptions) if ([source objectForKey:@"url"]) [sources setObject:source forKey:[source objectForKey:@"url"]];
 
         NSMutableArray *importedSubs = [[NSMutableArray alloc] init];
         NSMutableArray *insecureURLs = [[NSMutableArray alloc] init];
@@ -423,6 +415,7 @@
         NSUInteger fallbackCount = 0;
 
         for (NSString *urlString in urlsToImport) {
+            if (task.isCancelled) break;
             NSAutoreleasePool *entryPool=[[NSAutoreleasePool alloc] init];
             @try {
             BOOL happAddSource = [self isHappAddLink:urlString];
@@ -442,6 +435,13 @@
                                                      allowPlainHTTP:(allowPlainHTTP && !happSource &&
                                                                      URLStringUsesPlainHTTP(subscriptionURL))
                                                          happSource:happSource];
+            if ([sources objectForKey:subscriptionURL]) {
+                NSMutableDictionary *source=[NSMutableDictionary dictionaryWithDictionary:[sources objectForKey:subscriptionURL]];
+                if (allowInsecureFetch) [source setObject:@(YES) forKey:kSubscriptionAllowInsecureFetchKey];
+                if (happSource) [source setObject:@(YES) forKey:kSubscriptionHappSourceKey];
+                if (allowPlainHTTP && !happSource && URLStringUsesPlainHTTP(subscriptionURL)) [source setObject:@(YES) forKey:kSubscriptionAllowPlainHTTPKey];
+                sub=source;
+            }
             NSString *errorText = nil;
             BOOL insecureRetryAvailable = NO;
             NSDictionary *updated = [self updatedSubscriptionDictionaryFromSource:sub
@@ -460,6 +460,7 @@
                     fallback = approvedFallback;
                 }
                 [importedSubs addObject:fallback];
+                [task addAccepted:[[fallback objectForKey:@"items"] count] skipped:[[fallback objectForKey:@"import_skipped"] unsignedIntegerValue]];
                 fallbackCount++;
             } else {
                 failedCount++;
@@ -470,6 +471,12 @@
         }
 
         dispatch_async(dispatch_get_main_queue(), ^{
+            if (task != _subscriptionTask || task.isCancelled || sourceRevision != _configurationRevision) {
+                if (!task.isCancelled && task == _subscriptionTask) [self showStatus:@"Import skipped: configurations changed" ok:NO];
+                [self finishSubscriptionTask:task success:NO];
+                [importedSubs release]; [insecureURLs release]; [failureTexts release]; [failureCategories release];
+                [urlsToImport release]; [fallbackSubscriptions release]; return;
+            }
             NSMutableArray *draft=[NSMutableArray arrayWithArray:_subscriptions];
             NSMutableDictionary *indices=[NSMutableDictionary dictionary];
             for (NSUInteger i=0;i<[draft count];i++) {
@@ -477,6 +484,7 @@
                 if (url) [indices setObject:@(i) forKey:url];
             }
             NSUInteger addedCount = 0;
+            NSUInteger replacedCount=0;
             NSInteger lastAddedIndex = -1;
             BOOL savedPlainHTTPApproval = NO;
             for (NSDictionary *sub in importedSubs) {
@@ -486,6 +494,10 @@
                 NSInteger existingIndex=existingNumber ? [existingNumber integerValue] : -1;
                 if (existingIndex >= 0) {
                     NSDictionary *existingSub = [draft objectAtIndex:existingIndex];
+                    if (allowInsecureFetch || ![[existingSub objectForKey:@"items"] count]) {
+                        [draft replaceObjectAtIndex:existingIndex withObject:sub];
+                        replacedCount++; lastAddedIndex=existingIndex; continue;
+                    }
                     if (SubscriptionDictionaryAllowsPlainHTTP(sub) &&
                         !SubscriptionDictionaryAllowsPlainHTTP(existingSub)) {
                         NSMutableDictionary *approved = [NSMutableDictionary dictionaryWithDictionary:existingSub];
@@ -506,15 +518,16 @@
             void (^finishImport)(BOOL)=^(BOOL saved) {
             _launchAutoUpdateInProgress=NO;
             if (!saved) {
+                [self finishSubscriptionTask:task success:NO];
                 [importedSubs release]; [insecureURLs release]; [failureTexts release];
-                [failureCategories release]; [urlsToImport release]; [prefixPart release]; [fallbackSubscriptions release];
+                [failureCategories release]; [urlsToImport release]; [fallbackSubscriptions release];
                 return;
             }
-            if (addedCount > 0 || savedPlainHTTPApproval) {
+            if (addedCount > 0 || replacedCount > 0 || savedPlainHTTPApproval) {
                 [self saveData];
                 [self showProfileImportWarnings:importedSubs];
             }
-            if (addedCount > 0) {
+            if (addedCount > 0 || replacedCount > 0) {
                 [self selectSubscriptionAtIndex:lastAddedIndex];
             } else {
                 [self normalizeSelection];
@@ -522,12 +535,10 @@
             }
 
             NSMutableArray *parts = [NSMutableArray array];
-            if ([prefixPart isKindOfClass:[NSString class]] && [prefixPart length] > 0) {
-                [parts addObject:prefixPart];
-            }
             if (addedCount > 0) {
                 [parts addObject:[self subscriptionImportCountText:addedCount]];
             }
+            if (replacedCount) [parts addObject:[NSString stringWithFormat:@"%@ updated",[self subscriptionImportCountText:replacedCount]]];
 
             NSString *status = nil;
             if ([parts count] > 0) {
@@ -577,19 +588,19 @@
                               (unsigned long)[insecureURLs count],
                               ([NSDate timeIntervalSinceReferenceDate] - diagnosticStarted) * 1000.0]);
 
+            [self finishSubscriptionTask:task success:YES];
             [importedSubs release];
             [insecureURLs release];
             [failureTexts release];
             [failureCategories release];
             [urlsToImport release];
-            [prefixPart release];
             [fallbackSubscriptions release];
             };
-            if (addedCount > 0 || savedPlainHTTPApproval) [self commitConfigurations:_configs subscriptions:draft completion:finishImport];
+            if (addedCount > 0 || replacedCount > 0 || savedPlainHTTPApproval) [self commitConfigurations:_configs subscriptions:draft completion:finishImport];
             else finishImport(YES);
         });
 
-        [pool drain];
+        } @finally { [sourceSubscriptions release]; VCSetCurrentSubscriptionTask(previous); [previous release]; [pool drain]; }
     });
 }
 
@@ -649,131 +660,43 @@
            allowInsecureFetch:(BOOL)allowInsecureFetch
                allowPlainHTTP:(BOOL)allowPlainHTTP
                    happSource:(BOOL)happSource {
-    NSTimeInterval diagnosticStarted = [NSDate timeIntervalSinceReferenceDate];
-    VCRecordAppEvent(@"import", @"Subscription import started",
-                     [NSString stringWithFormat:@"happ=%d insecure=%d plain_http=%d",
-                      happSource ? 1 : 0, allowInsecureFetch ? 1 : 0, allowPlainHTTP ? 1 : 0]);
-    NSString *normalizedURL = [self safeTrim:urlString];
-    if (![normalizedURL isKindOfClass:[NSString class]] || [normalizedURL length] == 0) {
-        VCRecordAppEvent(@"import", @"Subscription import failed", @"reason=empty");
-        [self showStatus:@"Invalid subscription URL" ok:NO];
-        return;
+    if ([self configurationMutationBlocked] || _subscriptionTask || _configurationDraft) {
+        [self showStatus:@"Another import or update is already running" ok:NO]; return;
     }
-
-    NSInteger existing = [self existingSubscriptionIndexForURL:normalizedURL];
+    NSString *normalizedURL=[self safeTrim:urlString];
+    if (![normalizedURL length]) { [self showStatus:@"Invalid subscription URL" ok:NO]; return; }
+    NSInteger existing=[self existingSubscriptionIndexForURL:normalizedURL];
     if (!happSource && URLStringUsesPlainHTTP(normalizedURL) && !allowPlainHTTP) {
-        if (existing >= 0 &&
-            SubscriptionDictionaryAllowsPlainHTTP([_subscriptions objectAtIndex:existing])) {
-            allowPlainHTTP = YES;
-        } else {
-            VCRecordAppEvent(@"import", @"Subscription import paused", @"reason=plain_http_confirmation");
+        if (existing >= 0 && SubscriptionDictionaryAllowsPlainHTTP([_subscriptions objectAtIndex:existing])) allowPlainHTTP=YES;
+        else {
             [self showPlainHTTPSubscriptionWarningForCount:1 confirmation:^{
-                [self importSubscriptionURL:normalizedURL
-                         allowInsecureFetch:allowInsecureFetch
-                             allowPlainHTTP:YES
-                                  happSource:NO];
+                [self importSubscriptionURL:normalizedURL allowInsecureFetch:allowInsecureFetch allowPlainHTTP:YES happSource:NO];
             }];
             return;
         }
     }
-
-    if (existing >= 0) {
-        NSArray *items = [self subscriptionItemsAtIndex:existing];
-        if (!allowInsecureFetch && [items count] > 0) {
-            NSDictionary *existingSubscription = [_subscriptions objectAtIndex:existing];
-            BOOL needsHappFlag = happSource && !SubscriptionDictionaryUsesHappHeaders(existingSubscription);
-            BOOL needsPlainHTTPFlag = allowPlainHTTP && !happSource &&
-                                      URLStringUsesPlainHTTP(normalizedURL) &&
-                                      !SubscriptionDictionaryAllowsPlainHTTP(existingSubscription);
-            if (needsHappFlag || needsPlainHTTPFlag) {
-                NSMutableDictionary *stored = [NSMutableDictionary dictionaryWithDictionary:existingSubscription];
-                if (needsHappFlag) {
-                    [stored setObject:[NSNumber numberWithBool:YES] forKey:kSubscriptionHappSourceKey];
-                }
-                if (needsPlainHTTPFlag) {
-                    [stored setObject:[NSNumber numberWithBool:YES] forKey:kSubscriptionAllowPlainHTTPKey];
-                }
-                [_subscriptions replaceObjectAtIndex:existing withObject:stored];
-                [self saveData];
-            }
+    if (existing >= 0 && !allowInsecureFetch && [[self subscriptionItemsAtIndex:existing] count]) {
+        NSDictionary *previous=[_subscriptions objectAtIndex:existing];
+        BOOL happ=happSource && !SubscriptionDictionaryUsesHappHeaders(previous);
+        BOOL plain=allowPlainHTTP && !happSource && URLStringUsesPlainHTTP(normalizedURL) && !SubscriptionDictionaryAllowsPlainHTTP(previous);
+        if (happ || plain) {
+            NSMutableDictionary *updated=[NSMutableDictionary dictionaryWithDictionary:previous];
+            if (happ) [updated setObject:@(YES) forKey:kSubscriptionHappSourceKey];
+            if (plain) [updated setObject:@(YES) forKey:kSubscriptionAllowPlainHTTPKey];
+            NSMutableArray *draft=[NSMutableArray arrayWithArray:_subscriptions];
+            [draft replaceObjectAtIndex:existing withObject:updated];
+            [self commitConfigurations:_configs subscriptions:draft completion:^(BOOL saved) {
+                if (saved) { [self selectSubscriptionAtIndex:existing]; [self showStatus:@"Subscription already exists (skipped)" ok:YES]; }
+            }];
+        } else {
             [self selectSubscriptionAtIndex:existing];
-            VCRecordAppEvent(@"import", @"Subscription import skipped", @"reason=duplicate");
             [self showStatus:@"Subscription already exists (skipped)" ok:YES];
-            return;
         }
-
-        NSMutableDictionary *sub = [NSMutableDictionary dictionaryWithDictionary:[_subscriptions objectAtIndex:existing]];
-        [sub setObject:normalizedURL forKey:@"url"];
-        if (allowInsecureFetch) {
-            [sub setObject:[NSNumber numberWithBool:YES] forKey:kSubscriptionAllowInsecureFetchKey];
-        }
-        if (allowPlainHTTP && !happSource && URLStringUsesPlainHTTP(normalizedURL)) {
-            [sub setObject:[NSNumber numberWithBool:YES] forKey:kSubscriptionAllowPlainHTTPKey];
-        }
-        if (happSource) {
-            [sub setObject:[NSNumber numberWithBool:YES] forKey:kSubscriptionHappSourceKey];
-        }
-
-        NSString *errorText = nil;
-        BOOL insecureRetryAvailable = NO;
-        NSDictionary *updated = [self updatedSubscriptionDictionaryFromSource:sub
-                                                                    errorText:&errorText
-                                                       insecureRetryAvailable:&insecureRetryAvailable];
-        if ([updated isKindOfClass:[NSDictionary class]]) {
-            VCRecordAppEvent(@"import", @"Subscription fetched",
-                             [NSString stringWithFormat:@"result=update configs=%lu duration_ms=%.0f",
-                              (unsigned long)[[updated objectForKey:@"items"] count],
-                              ([NSDate timeIntervalSinceReferenceDate] - diagnosticStarted) * 1000.0]);
-            [self commitUpdatedSubscription:updated existingIndex:existing];
-            return;
-        }
-
-        if (!allowInsecureFetch &&
-            !SubscriptionDictionaryAllowsInsecureFetch(sub) &&
-            insecureRetryAvailable) {
-            VCRecordAppEvent(@"import", @"Subscription import paused", @"reason=insecure_confirmation");
-            [self showInsecureSubscriptionImportPromptForURL:normalizedURL
-                                                  happSource:SubscriptionDictionaryUsesHappHeaders(sub)];
-            return;
-        }
-
-        VCRecordAppEvent(@"import", @"Subscription import failed",
-                         [NSString stringWithFormat:@"stage=fetch error=%@ duration_ms=%.0f",
-                          VCDiagnosticErrorSummary(errorText),
-                          ([NSDate timeIntervalSinceReferenceDate] - diagnosticStarted) * 1000.0]);
-        [self showStatus:([errorText length] > 0 ? errorText : @"Subscription import failed") ok:NO];
         return;
     }
-
-    NSDictionary *sub = [self subscriptionDictionaryForURL:normalizedURL
-                                         allowInsecureFetch:allowInsecureFetch
-                                             allowPlainHTTP:allowPlainHTTP
-                                                 happSource:happSource];
-    NSString *errorText = nil;
-    BOOL insecureRetryAvailable = NO;
-    NSDictionary *updated = [self updatedSubscriptionDictionaryFromSource:sub
-                                                                errorText:&errorText
-                                                   insecureRetryAvailable:&insecureRetryAvailable];
-    if ([updated isKindOfClass:[NSDictionary class]]) {
-        VCRecordAppEvent(@"import", @"Subscription fetched",
-                         [NSString stringWithFormat:@"result=new configs=%lu duration_ms=%.0f",
-                          (unsigned long)[[updated objectForKey:@"items"] count],
-                          ([NSDate timeIntervalSinceReferenceDate] - diagnosticStarted) * 1000.0]);
-        [self commitUpdatedSubscription:updated existingIndex:-1];
-        return;
-    }
-
-    if (!allowInsecureFetch && insecureRetryAvailable) {
-        VCRecordAppEvent(@"import", @"Subscription import paused", @"reason=insecure_confirmation");
-        [self showInsecureSubscriptionImportPromptForURL:normalizedURL happSource:happSource];
-        return;
-    }
-
-    VCRecordAppEvent(@"import", @"Subscription import failed",
-                     [NSString stringWithFormat:@"stage=fetch error=%@ duration_ms=%.0f",
-                      VCDiagnosticErrorSummary(errorText),
-                      ([NSDate timeIntervalSinceReferenceDate] - diagnosticStarted) * 1000.0]);
-    [self showStatus:([errorText length] > 0 ? errorText : @"Subscription import failed") ok:NO];
+    NSString *link=happSource && ![self isHappEncryptedLink:normalizedURL] ? [kHappAddPrefix stringByAppendingString:normalizedURL] : normalizedURL;
+    [self startBackgroundSubscriptionImportForURLs:@[link] allowInsecureFetch:allowInsecureFetch
+                       fallbackSubscriptionsByURL:nil allowPlainHTTP:allowPlainHTTP];
 }
 
 - (void)importSubscriptionURL:(NSString *)urlString
@@ -894,225 +817,19 @@
 }
 
 - (void)importTextEntry:(NSString *)rawText {
-    NSString *text = [self safeTrim:rawText];
-    if ([text length] == 0) {
-        VCRecordAppEvent(@"import", @"Import rejected", @"reason=empty_text");
-        [self showStatus:@"Import text is empty" ok:NO];
+    NSString *text=[self safeTrim:rawText];
+    if (![text length]) { [self showStatus:@"Import text is empty" ok:NO]; return; }
+    if ([text rangeOfString:@"karing://" options:NSCaseInsensitiveSearch|NSAnchoredSearch].location == 0) {
+        NSString *error=nil;
+        NSDictionary *descriptor=VCKaringLANDownloadDescriptor(text,&error);
+        if (descriptor) [self receiveKaringBackupWithDescriptor:descriptor];
+        else [self showStatus:error ?: @"Invalid Karing import link" ok:NO];
         return;
     }
-    if ([text hasPrefix:@"{"] || [text hasPrefix:@"["]) {
-        NSDictionary *report=[VCProfiles() importReportFromHappJSONData:[text dataUsingEncoding:NSUTF8StringEncoding]];
-        NSArray *uris=[report objectForKey:@"uris"];
-        if ([uris count]) [self importTextEntry:[uris componentsJoinedByString:@"\n"]];
-        else [self showStatus:@"JSON contains no supported configurations" ok:NO];
-        [self showProfileImportWarnings:@[report]];
-        return;
-    }
-
-    NSString *karingError = nil;
-    NSDictionary *karingDescriptor = VCKaringLANDownloadDescriptor(text, &karingError);
-    if ([karingDescriptor isKindOfClass:[NSDictionary class]]) {
-        VCRecordAppEvent(@"import", @"Karing LAN import recognized", nil);
-        [self receiveKaringBackupWithDescriptor:karingDescriptor];
-        return;
-    }
-    if ([karingError length] > 0) {
-        VCRecordAppEvent(@"import", @"Import rejected", @"type=karing reason=invalid_descriptor");
-        [self showStatus:karingError ok:NO];
-        return;
-    }
-
-    if ([self isHappEncryptedLink:text]) {
-        VCRecordAppEvent(@"import", @"HAPP encrypted import recognized", nil);
-        [self importHappEncryptedLink:text];
-        return;
-    }
-
-    if ([self isHappAddLink:text]) {
-        VCRecordAppEvent(@"import", @"HAPP add import recognized", nil);
-        [self importHappAddLink:text];
-        return;
-    }
-
-    if ([[text lowercaseString] hasPrefix:@"happ://"]) {
-        VCRecordAppEvent(@"import", @"Import rejected", @"type=happ reason=unsupported_format");
-        [self showStatus:@"Unsupported HAPP link format (use happ://add/, crypt4/ or crypt5/)" ok:NO];
-        return;
-    }
-
-    BOOL hasWhitespace = ([text rangeOfCharacterFromSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]].location != NSNotFound);
-    if (!hasWhitespace && [self isDirectConfigURI:text]) {
-        [self importDirectURI:text];
-        return;
-    }
-
-    if (!hasWhitespace && [self isSubscriptionURL:text]) {
-        [self importSubscriptionURL:text];
-        return;
-    }
-
-    NSArray *links = [self extractImportLinksFromText:text];
-    if ([links count] > 0) {
-        if ([links count] == 1) {
-            NSString *single = [links objectAtIndex:0];
-            if ([self isHappEncryptedLink:single]) {
-                [self importHappEncryptedLink:single];
-            } else if ([self isHappAddLink:single]) {
-                [self importHappAddLink:single];
-            } else if ([self isDirectConfigURI:single]) {
-                [self importDirectURI:single];
-            } else if ([self isSubscriptionURL:single]) {
-                [self importSubscriptionURL:single];
-            } else {
-                [self showStatus:@"No importable links found" ok:NO];
-            }
-            return;
-        }
-
-        NSInteger importedConfigs = 0;
-        NSInteger pendingSubs = 0;
-        NSInteger skippedConfigs = 0;
-        NSInteger skippedSubs = 0;
-        NSMutableArray *subscriptionURLsToImport = [NSMutableArray array];
-
-        for (NSString *link in links) {
-            NSString *importLink = link;
-            BOOL happEncryptedLink = [self isHappEncryptedLink:link];
-            BOOL happAddLink = [self isHappAddLink:link];
-            BOOL happLink = happEncryptedLink || happAddLink;
-            if (happEncryptedLink) {
-                NSString *decryptError = nil;
-                NSString *decoded = [self decryptedHappLink:link errorText:&decryptError];
-                if ([self isDirectConfigURI:decoded]) {
-                    importLink = decoded;
-                } else if ([self isSubscriptionURL:decoded]) {
-                    importLink = link;
-                } else {
-                    skippedSubs++;
-                    continue;
-                }
-            } else if (happAddLink) {
-                NSString *target = [self targetFromHappAddLink:link];
-                if ([self isDirectConfigURI:target] || [self isSubscriptionURL:target]) {
-                    importLink = target;
-                } else {
-                    skippedSubs++;
-                    continue;
-                }
-            }
-
-            if ([self isDirectConfigURI:importLink]) {
-                if (![self isSupportedConfigTupleForURI:importLink]) {
-                    skippedConfigs++;
-                    continue;
-                }
-                if ([self existingConfigIndexForURI:importLink] >= 0) {
-                    skippedConfigs++;
-                    continue;
-                }
-
-                NSString *name = [self displayNameForURI:importLink index:[_configs count]];
-                NSDictionary *cfg = [NSDictionary dictionaryWithObjectsAndKeys:
-                                     name, @"name",
-                                     importLink, @"uri",
-                                     nil];
-                [_configs addObject:cfg];
-                importedConfigs++;
-            } else if ([self isSubscriptionURL:importLink] || happLink) {
-                if ([self existingSubscriptionIndexForURL:importLink] >= 0) {
-                    skippedSubs++;
-                    continue;
-                }
-
-                NSString *queuedLink = happAddLink ? link : importLink;
-                if (![subscriptionURLsToImport containsObject:queuedLink]) {
-                    [subscriptionURLsToImport addObject:queuedLink];
-                    pendingSubs++;
-                }
-            }
-        }
-
-        if (importedConfigs > 0 || pendingSubs > 0) {
-            if (importedConfigs > 0) {
-                _configurationsSectionExpanded = YES;
-                _subscriptionsSectionExpanded = NO;
-                _selectedConfigIndex = [_configs count] - 1;
-                _selectedSubIndex = -1;
-                _selectedSubItemIndex = -1;
-                [self normalizeSelection];
-                [self saveData];
-                [_tableView reloadData];
-            }
-        }
-
-        NSMutableArray *parts = [NSMutableArray array];
-        if (importedConfigs > 0) {
-            [parts addObject:[NSString stringWithFormat:@"%ld config%@", (long)importedConfigs, (importedConfigs == 1 ? @"" : @"s")]];
-        }
-        if (pendingSubs > 0) {
-            [parts addObject:[NSString stringWithFormat:@"%ld subscription%@", (long)pendingSubs, (pendingSubs == 1 ? @"" : @"s")]];
-        }
-
-        if ([parts count] > 0) {
-            VCRecordAppEvent(@"import", @"Text import parsed",
-                             [NSString stringWithFormat:@"configs=%ld subscriptions=%ld skipped_configs=%ld skipped_subscriptions=%ld",
-                              (long)importedConfigs,
-                              (long)pendingSubs,
-                              (long)skippedConfigs,
-                              (long)skippedSubs]);
-            NSString *importText = [NSString stringWithFormat:@"Imported %@", [parts componentsJoinedByString:@", "]];
-            if (skippedConfigs > 0 || skippedSubs > 0) {
-                NSMutableArray *skippedParts = [NSMutableArray array];
-                if (skippedConfigs > 0) {
-                    [skippedParts addObject:[NSString stringWithFormat:@"%ld config%@", (long)skippedConfigs, (skippedConfigs == 1 ? @"" : @"s")]];
-                }
-                if (skippedSubs > 0) {
-                    [skippedParts addObject:[NSString stringWithFormat:@"%ld subscription%@", (long)skippedSubs, (skippedSubs == 1 ? @"" : @"s")]];
-                }
-                importText = [NSString stringWithFormat:@"%@ (skipped duplicates: %@)",
-                              importText,
-                              [skippedParts componentsJoinedByString:@", "]];
-            }
-
-            if ([subscriptionURLsToImport count] > 0) {
-                NSString *configPart = nil;
-                if (importedConfigs > 0) {
-                    configPart = [NSString stringWithFormat:@"%ld config%@",
-                                  (long)importedConfigs,
-                                  (importedConfigs == 1 ? @"" : @"s")];
-                }
-                [self startBackgroundSubscriptionImportForURLs:subscriptionURLsToImport
-                                            allowInsecureFetch:NO
-                                                   startStatus:@"Importing subscriptions from file..."
-                                            importedPrefixPart:configPart];
-            } else {
-                [self showStatus:importText ok:YES];
-            }
-        } else {
-            VCRecordAppEvent(@"import", @"Text import produced no new entries",
-                             [NSString stringWithFormat:@"skipped_configs=%ld skipped_subscriptions=%ld",
-                              (long)skippedConfigs,
-                              (long)skippedSubs]);
-            if (skippedConfigs > 0 || skippedSubs > 0) {
-                NSMutableArray *skippedParts = [NSMutableArray array];
-                if (skippedConfigs > 0) {
-                    [skippedParts addObject:[NSString stringWithFormat:@"%ld config%@", (long)skippedConfigs, (skippedConfigs == 1 ? @"" : @"s")]];
-                }
-                if (skippedSubs > 0) {
-                    [skippedParts addObject:[NSString stringWithFormat:@"%ld subscription%@", (long)skippedSubs, (skippedSubs == 1 ? @"" : @"s")]];
-                }
-                [self showStatus:[NSString stringWithFormat:@"Nothing imported: all links already exist (%@)",
-                                  [skippedParts componentsJoinedByString:@", "]]
-                             ok:YES];
-            } else {
-                [self showStatus:@"No importable links found" ok:NO];
-            }
-        }
-        return;
-    }
-
-    VCRecordAppEvent(@"import", @"Import rejected", @"reason=unsupported_format");
-    [self showStatus:@"Unsupported import format (use vless://, trojan://, vmess://, ss://, socks5://, happ://, karing://sync-download/, or an HTTP(S) subscription)" ok:NO];
+    if ([text length] <= kVCMaximumSubscriptionURLBytes &&
+        [text rangeOfCharacterFromSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]].location == NSNotFound &&
+        [self isSubscriptionURL:text]) { [self importSubscriptionURL:text]; return; }
+    [self startTextImport:text filePath:nil];
 }
 
 - (void)showProfileImportWarnings:(NSArray *)reports {
@@ -1137,28 +854,27 @@
     }
 
     NSMutableArray *urls = [NSMutableArray array];
+    NSMutableSet *seenURLs = [NSMutableSet set];
+    NSMutableSet *existingURLs = [NSMutableSet set];
+    for (NSDictionary *subscription in _subscriptions) {
+        NSString *url=[subscription objectForKey:@"url"];
+        if (url) [existingURLs addObject:url];
+    }
     NSMutableDictionary *cachedSubscriptions = [NSMutableDictionary dictionary];
     NSUInteger duplicateCount = 0;
     for (id value in entries) {
         if (![value isKindOfClass:[NSDictionary class]]) continue;
         NSString *url = [self safeTrim:[value objectForKey:@"url"]];
-        if (![self isSubscriptionURL:url] || [urls containsObject:url]) continue;
-        if ([self existingSubscriptionIndexForURL:url] >= 0) {
+        if (![self isSubscriptionURL:url] || [seenURLs containsObject:url]) continue;
+        [seenURLs addObject:url];
+        if ([existingURLs containsObject:url]) {
             duplicateCount++;
             continue;
         }
         [urls addObject:url];
 
         NSArray *storedItems = [value objectForKey:@"items"];
-        NSMutableArray *supportedItems = [NSMutableArray array];
-        if ([storedItems isKindOfClass:[NSArray class]]) {
-            for (id item in storedItems) {
-                if (![item isKindOfClass:[NSString class]]) continue;
-                if ([self isSupportedConfigTupleForURI:item] && ![supportedItems containsObject:item]) {
-                    [supportedItems addObject:item];
-                }
-            }
-        }
+        NSArray *supportedItems=[storedItems isKindOfClass:[NSArray class]] ? storedItems : @[];
         if ([supportedItems count] > 0) {
             NSMutableDictionary *subscription =
                 [NSMutableDictionary dictionaryWithDictionary:
@@ -1170,6 +886,7 @@
     }
 
     if ([urls count] == 0) {
+        @synchronized(self) { [_pendingProfileMetadata release]; _pendingProfileMetadata=nil; }
         VCRecordAppEvent(@"import", @"Karing backup produced no new subscriptions",
                          [NSString stringWithFormat:@"entries=%lu duplicates=%lu",
                           (unsigned long)[entries count],
@@ -1189,8 +906,6 @@
                       (unsigned long)[cachedSubscriptions count]]);
     [self startBackgroundSubscriptionImportForURLs:urls
                                allowInsecureFetch:NO
-                                      startStatus:@"Importing Karing subscriptions..."
-                               importedPrefixPart:nil
                       fallbackSubscriptionsByURL:cachedSubscriptions];
 }
 
@@ -1205,21 +920,32 @@
         return;
     }
 
-    _launchAutoUpdateInProgress = YES;
+    VCSubscriptionTask *task=[self beginSubscriptionTaskWithKind:VCSubscriptionTaskAddition];
+    if (!task) return;
+    NSUInteger revision=_configurationRevision;
     NSTimeInterval diagnosticStarted = [NSDate timeIntervalSinceReferenceDate];
     VCRecordAppEvent(@"import", @"Karing backup parsing started",
                      [NSString stringWithFormat:@"bytes=%lu", (unsigned long)[data length]]);
-    [self showStatus:@"Reading Karing backup..." ok:YES];
+    [task setPhase:@"Reading backup"];
+    [self subscriptionTaskProgress:task];
     NSData *copiedData = [data copy];
     dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_DEFAULT, 0), ^{
         NSAutoreleasePool *pool = [[NSAutoreleasePool alloc] init];
+        VCSubscriptionTask *previous=[VCSetCurrentSubscriptionTask(task) retain];
+        @try {
         NSString *errorText = nil;
         NSArray *entries = VCKaringSubscriptionsFromBackupData(copiedData, &errorText);
         NSArray *copiedEntries = [entries copy];
         NSString *copiedError = [errorText copy];
 
         dispatch_async(dispatch_get_main_queue(), ^{
-            _launchAutoUpdateInProgress = NO;
+            if (task != _subscriptionTask || task.isCancelled || revision != _configurationRevision) {
+                [self finishSubscriptionTask:task success:NO]; [copiedEntries release]; [copiedError release]; [copiedData release]; return;
+            }
+            NSDictionary *metadata=[[task takePreparedMetadata] retain];
+            [self finishSubscriptionTask:task success:NO];
+            if ([copiedEntries isKindOfClass:[NSArray class]]) [self profileMetadataPrepared:metadata];
+            [metadata release];
             if ([copiedEntries isKindOfClass:[NSArray class]]) {
                 VCRecordAppEvent(@"import", @"Karing backup parsed",
                                  [NSString stringWithFormat:@"entries=%lu duration_ms=%.0f",
@@ -1240,7 +966,7 @@
             [copiedError release];
             [copiedData release];
         });
-        [pool drain];
+        } @finally { VCSetCurrentSubscriptionTask(previous); [previous release]; [pool drain]; }
     });
 }
 
@@ -1258,20 +984,26 @@
         return;
     }
 
-    _launchAutoUpdateInProgress = YES;
+    VCSubscriptionTask *task=[self beginSubscriptionTaskWithKind:VCSubscriptionTaskAddition];
+    if (!task) return;
+    NSUInteger revision=_configurationRevision;
     NSTimeInterval diagnosticStarted = [NSDate timeIntervalSinceReferenceDate];
     VCRecordAppEvent(@"import", @"Karing LAN sync started",
                      [NSString stringWithFormat:@"candidate_hosts=%lu", (unsigned long)[hosts count]]);
-    [self showStatus:@"Receiving Karing backup..." ok:YES];
+    [task setPhase:@"Receiving backup"];
+    [self subscriptionTaskProgress:task];
     NSDictionary *copiedDescriptor = [descriptor copy];
     dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_DEFAULT, 0), ^{
         NSAutoreleasePool *pool = [[NSAutoreleasePool alloc] init];
+        VCSubscriptionTask *previous=[VCSetCurrentSubscriptionTask(task) retain];
+        @try {
         NSArray *downloadHosts = [copiedDescriptor objectForKey:@"hosts"];
         NSInteger downloadPort = [[copiedDescriptor objectForKey:@"port"] integerValue];
         NSArray *entries = nil;
         NSString *lastError = nil;
 
         for (NSString *host in downloadHosts) {
+            if (task.isCancelled) break;
             NSString *routeAdd = [NSString stringWithFormat:@"ROUTE_DIRECT_ADD\t%@\n", host];
             NSString *routeRemove = [NSString stringWithFormat:@"ROUTE_DIRECT_REMOVE\t%@\n", host];
             (void)SendCommand(routeAdd);
@@ -1287,9 +1019,7 @@
 
             NSURLResponse *response = nil;
             NSError *requestError = nil;
-            (void)[NSURLConnection sendSynchronousRequest:probe
-                                         returningResponse:&response
-                                                     error:&requestError];
+            (void)VCFetchSubscriptionRequest(probe,3,&response,&requestError);
             NSInteger probeStatus = 0;
             if ([response isKindOfClass:[NSHTTPURLResponse class]]) {
                 probeStatus = [(NSHTTPURLResponse *)response statusCode];
@@ -1311,9 +1041,7 @@
             [request setValue:@"close" forHTTPHeaderField:@"Connection"];
             response = nil;
             requestError = nil;
-            NSData *data = [NSURLConnection sendSynchronousRequest:request
-                                                 returningResponse:&response
-                                                             error:&requestError];
+            NSData *data=VCFetchSubscriptionRequest(request,20,&response,&requestError);
             (void)SendCommand(routeRemove);
 
             NSInteger statusCode = 0;
@@ -1344,7 +1072,13 @@
         NSArray *copiedEntries = [entries copy];
         NSString *copiedError = [lastError copy];
         dispatch_async(dispatch_get_main_queue(), ^{
-            _launchAutoUpdateInProgress = NO;
+            if (task != _subscriptionTask || task.isCancelled || revision != _configurationRevision) {
+                [self finishSubscriptionTask:task success:NO]; [copiedEntries release]; [copiedError release]; [copiedDescriptor release]; return;
+            }
+            NSDictionary *metadata=[[task takePreparedMetadata] retain];
+            [self finishSubscriptionTask:task success:NO];
+            if ([copiedEntries isKindOfClass:[NSArray class]]) [self profileMetadataPrepared:metadata];
+            [metadata release];
             if ([copiedEntries isKindOfClass:[NSArray class]]) {
                 VCRecordAppEvent(@"import", @"Karing LAN sync finished",
                                  [NSString stringWithFormat:@"entries=%lu duration_ms=%.0f",
@@ -1365,7 +1099,7 @@
             [copiedError release];
             [copiedDescriptor release];
         });
-        [pool drain];
+        } @finally { VCSetCurrentSubscriptionTask(previous); [previous release]; [pool drain]; }
     });
 }
 
@@ -1374,55 +1108,11 @@
 }
 
 - (void)importTextFileAtPath:(NSString *)rawPath {
-    VCRecordAppEvent(@"import", @"File import started", nil);
-    NSString *path = [self safeTrim:rawPath];
-    if ([path hasPrefix:@"\""] && [path hasSuffix:@"\""] && [path length] >= 2) {
-        path = [path substringWithRange:NSMakeRange(1, [path length] - 2)];
-        path = [self safeTrim:path];
-    }
-    path = [path stringByExpandingTildeInPath];
-    if ([path length] == 0) {
-        VCRecordAppEvent(@"import", @"File import failed", @"stage=path_validation");
-        [self showStatus:@"File path is empty" ok:NO];
-        return;
-    }
-
-    BOOL isDir = NO;
-    BOOL exists = [[NSFileManager defaultManager] fileExistsAtPath:path isDirectory:&isDir];
-    if (exists && isDir) {
-        VCRecordAppEvent(@"import", @"File import failed", @"stage=file_selection");
-        [self showStatus:@"Import file not found" ok:NO];
-        return;
-    }
-
-    [self showStatus:@"Importing data from file..." ok:YES];
-
-    NSData *data = [NSData dataWithContentsOfFile:path];
-    if (!data || [data length] == 0) {
-        if (!exists) {
-            VCRecordAppEvent(@"import", @"File import failed", @"stage=file_missing");
-            [self showStatus:@"Import file not found" ok:NO];
-            return;
-        }
-        VCRecordAppEvent(@"import", @"File import failed", @"stage=file_read");
-        [self showStatus:@"Failed to read import file" ok:NO];
-        return;
-    }
-
-    if (VCKaringBackupDataLooksLikeZip(data)) {
-        VCRecordAppEvent(@"import", @"Karing backup detected", nil);
-        [self importKaringBackupData:data];
-        return;
-    }
-
-    NSString *text = [self decodeImportTextData:data];
-    if (![text isKindOfClass:[NSString class]] || [text length] == 0) {
-        VCRecordAppEvent(@"import", @"File import failed", @"stage=text_decode");
-        [self showStatus:@"Unsupported text encoding" ok:NO];
-        return;
-    }
-
-    [self importTextEntry:text];
+    NSString *path=[self safeTrim:rawPath];
+    if ([path hasPrefix:@"\""] && [path hasSuffix:@"\""] && [path length] >= 2) path=[self safeTrim:[path substringWithRange:NSMakeRange(1,[path length]-2)]];
+    path=[path stringByExpandingTildeInPath];
+    if (![path length]) { [self showStatus:@"File path is empty" ok:NO]; return; }
+    [self startTextImport:nil filePath:path];
 }
 
 - (void)importFileAtURL:(NSURL *)url {
@@ -1644,6 +1334,7 @@
             confirmation();
         } else {
             VCRecordAppEvent(@"import", @"Plain HTTP subscription declined", nil);
+            @synchronized(self) { [_pendingProfileMetadata release]; _pendingProfileMetadata=nil; }
             if (cancellation) cancellation();
             [self showStatus:@"HTTP subscription canceled" ok:YES];
         }
@@ -1682,8 +1373,6 @@
                 }
                 [self startBackgroundSubscriptionImportForURLs:urlStrings
                                             allowInsecureFetch:YES
-                                                   startStatus:@"Importing insecure subscriptions..."
-                                            importedPrefixPart:nil
                                    fallbackSubscriptionsByURL:nil
                                                 allowPlainHTTP:includesPlainHTTP];
             }

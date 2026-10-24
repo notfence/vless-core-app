@@ -275,6 +275,14 @@
     [super viewWillAppear:animated];
 }
 
+- (void)didReceiveMemoryWarning {
+    [super didReceiveMemoryWarning];
+    if ([_subscriptionTask cancelWithReason:[_subscriptionTask.cancellationReason stringByAppendingString:@": low memory"]]) {
+        _refreshBtn.enabled=NO;
+        [self subscriptionTaskProgress:_subscriptionTask];
+    }
+}
+
 - (void)viewDidAppear:(BOOL)animated {
     [super viewDidAppear:animated];
     [self refreshUpdateIndicatorFromCache];
@@ -331,6 +339,8 @@
     [_configurationWriter release];
     [_configurationDraft release];
     if (_configurationDraftCompletion) Block_release(_configurationDraftCompletion);
+    [_subscriptionTask finish]; [_subscriptionTask release];
+    [_connectAfterSubscriptionURL release];
     [[NSNotificationCenter defaultCenter] removeObserver:self];
     [NSObject cancelPreviousPerformRequestsWithTarget:self
                                              selector:@selector(startLaunchAutoUpdateIfNeeded)
@@ -380,7 +390,6 @@
     [_logTexts[0] release];
     [_logTexts[1] release];
     [_mainSwitchView release];
-    [_pendingImportDoneStatus release];
     [_pendingImportRefreshIndices release];
     [_pendingInsecureImportURLs release];
     if (_pendingPlainHTTPConfirmation) Block_release(_pendingPlainHTTPConfirmation);

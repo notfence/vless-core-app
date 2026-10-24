@@ -34,7 +34,6 @@
     NSTimer *_uptimeTimer;
     NSTimeInterval _connectedSince;
     NSString *_statusBaseText;
-    NSString *_pendingImportDoneStatus;
     NSArray *_pendingImportRefreshIndices;
     NSArray *_pendingInsecureImportURLs;
     void (^_pendingPlainHTTPConfirmation)(void);
@@ -63,6 +62,9 @@
     NSDictionary *_configurationDraft;
     void (^_configurationDraftCompletion)(BOOL);
     UIBackgroundTaskIdentifier _configurationBackgroundTask;
+    VCSubscriptionTask *_subscriptionTask;
+    VCSubscriptionTask *_connectAfterSubscriptionTask;
+    NSString *_connectAfterSubscriptionURL;
     NSMutableDictionary *_pingDisplayByURI;
     NSString *_pingNetworkSignature;
     NSTimer *_pingNetworkTimer;
@@ -192,6 +194,15 @@
 - (NSString *)unsupportedConfigStatusTextForURI:(NSString *)uri;
 @end
 
+@interface MainVC (VCSubscriptionWork)
+- (VCSubscriptionTask *)beginSubscriptionTask;
+- (VCSubscriptionTask *)beginSubscriptionTaskWithKind:(VCSubscriptionTaskKind)kind;
+- (void)finishSubscriptionTask:(VCSubscriptionTask *)task success:(BOOL)success;
+- (void)subscriptionTaskProgress:(VCSubscriptionTask *)task;
+- (void)cancelSubscriptionTask;
+- (void)startTextImport:(NSString *)text filePath:(NSString *)path;
+@end
+
 @interface MainVC (VCMainConnection)
 - (NSString *)sanitizeDaemonText:(NSString *)text;
 - (NSString *)formatDuration:(NSTimeInterval)seconds;
@@ -261,12 +272,11 @@
 - (NSDictionary *)updatedSubscriptionDictionaryFromSource:(NSDictionary *)sub errorText:(NSString **)errorTextOut insecureRetryAvailable:(BOOL *)insecureRetryAvailableOut;
 - (NSDictionary *)updatedSubscriptionDictionaryFromSource:(NSDictionary *)sub errorText:(NSString **)errorTextOut;
 - (BOOL)subscriptionNeedsPlainHTTPApproval:(NSDictionary *)sub;
-- (BOOL)approvePlainHTTPForSubscriptionAtIndex:(NSInteger)index;
 - (BOOL)refreshSubscriptionAtIndex:(NSInteger)idx showStatus:(BOOL)showStatus;
 - (BOOL)subscriptionsMatchSnapshotForLaunchAutoUpdate:(NSArray *)snapshot;
-- (void)startBackgroundSubscriptionRefreshWithStatus:(NSString *)startStatus;
+- (void)startBackgroundSubscriptionRefresh;
+- (void)startBackgroundSubscriptionRefreshAllowPlainHTTP:(BOOL)allowPlainHTTP;
 - (void)startLaunchAutoUpdateIfNeeded;
-- (void)refreshAllSubscriptions:(BOOL)showStatus;
 - (void)openSubscriptionProviderURLAtIndex:(NSInteger)index
                                metadataKey:(NSString *)metadataKey
                                  eventName:(NSString *)eventName;
@@ -275,6 +285,7 @@
 - (void)subscriptionInfoButtonPressed:(UIButton *)sender;
 - (void)refreshPresentedSubscriptionInfoIfNeeded;
 - (void)subscriptionInfoVCRequestedRefresh:(SubscriptionInfoVC *)vc atIndex:(NSInteger)index;
+- (void)subscriptionInfoVCRequestedRefresh:(SubscriptionInfoVC *)vc atIndex:(NSInteger)index allowPlainHTTP:(BOOL)allowPlainHTTP;
 - (void)subscriptionInfoVC:(SubscriptionInfoVC *)vc requestedRenameTo:(NSString *)name atIndex:(NSInteger)index;
 - (BOOL)deleteSubscriptionAtIndex:(NSInteger)subIdx;
 - (void)subscriptionInfoVCRequestedDelete:(SubscriptionInfoVC *)vc atIndex:(NSInteger)index;
@@ -326,18 +337,12 @@
 - (void)showSubscriptionImportFailures:(NSArray *)failureTexts;
 - (void)showSubscriptionUpdateFailures:(NSArray *)failureTexts;
 - (void)startBackgroundSubscriptionImportForURLs:(NSArray *)urlStrings
-                              allowInsecureFetch:(BOOL)allowInsecureFetch
-                                     startStatus:(NSString *)startStatus
-                              importedPrefixPart:(NSString *)importedPrefixPart;
+                              allowInsecureFetch:(BOOL)allowInsecureFetch;
 - (void)startBackgroundSubscriptionImportForURLs:(NSArray *)urlStrings
                               allowInsecureFetch:(BOOL)allowInsecureFetch
-                                     startStatus:(NSString *)startStatus
-                              importedPrefixPart:(NSString *)importedPrefixPart
                      fallbackSubscriptionsByURL:(NSDictionary *)fallbackSubscriptionsByURL;
 - (void)startBackgroundSubscriptionImportForURLs:(NSArray *)urlStrings
                               allowInsecureFetch:(BOOL)allowInsecureFetch
-                                     startStatus:(NSString *)startStatus
-                              importedPrefixPart:(NSString *)importedPrefixPart
                      fallbackSubscriptionsByURL:(NSDictionary *)fallbackSubscriptionsByURL
                                   allowPlainHTTP:(BOOL)allowPlainHTTP;
 - (void)importDirectURI:(NSString *)uri;

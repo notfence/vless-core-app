@@ -9,57 +9,25 @@ NSArray *VCSubscriptionItemsAtIndex(NSArray *subscriptions, NSInteger subIdx) {
 }
 
 NSInteger VCSubscriptionRowCount(NSArray *subscriptions, NSInteger expandedIndex) {
-    NSInteger rows = 0;
-    for (NSInteger i = 0; i < (NSInteger)[subscriptions count]; i++) {
-        rows += 1;
-        if (i == expandedIndex) {
-            rows += (NSInteger)[VCSubscriptionItemsAtIndex(subscriptions, i) count];
-        }
-    }
-    return rows;
+    return (NSInteger)[subscriptions count]+(NSInteger)[VCSubscriptionItemsAtIndex(subscriptions,expandedIndex) count];
 }
 
 BOOL VCMapSubscriptionRow(NSArray *subscriptions, NSInteger expandedIndex, NSInteger row, NSInteger *subIndex, NSInteger *itemIndex, BOOL *isHeader) {
-    NSInteger cursor = 0;
-    for (NSInteger i = 0; i < (NSInteger)[subscriptions count]; i++) {
-        if (row == cursor) {
-            if (subIndex) *subIndex = i;
-            if (itemIndex) *itemIndex = -1;
-            if (isHeader) *isHeader = YES;
-            return YES;
-        }
-        cursor += 1;
-
-        if (i == expandedIndex) {
-            NSArray *items = VCSubscriptionItemsAtIndex(subscriptions, i);
-            NSInteger cnt = (NSInteger)[items count];
-            if (row < cursor + cnt) {
-                if (subIndex) *subIndex = i;
-                if (itemIndex) *itemIndex = row - cursor;
-                if (isHeader) *isHeader = NO;
-                return YES;
-            }
-            cursor += cnt;
-        }
-    }
-    return NO;
+    if (row < 0) return NO;
+    NSInteger count=(NSInteger)[subscriptions count];
+    NSInteger extra=(NSInteger)[VCSubscriptionItemsAtIndex(subscriptions,expandedIndex) count];
+    if (row >= count+extra) return NO;
+    BOOL item=expandedIndex >= 0 && expandedIndex < count && row > expandedIndex && row <= expandedIndex+extra;
+    NSInteger index=item ? expandedIndex : row-((expandedIndex >= 0 && row > expandedIndex+extra) ? extra : 0);
+    if (subIndex) *subIndex=index;
+    if (itemIndex) *itemIndex=item ? row-expandedIndex-1 : -1;
+    if (isHeader) *isHeader=!item;
+    return YES;
 }
 
 NSInteger VCSubscriptionHeaderRow(NSArray *subscriptions, NSInteger expandedIndex, NSInteger subIdx) {
     if (subIdx < 0 || subIdx >= (NSInteger)[subscriptions count]) return -1;
-
-    NSInteger row = 0;
-    for (NSInteger i = 0; i < (NSInteger)[subscriptions count]; i++) {
-        if (i == subIdx) {
-            return row;
-        }
-        row += 1;
-        if (i == expandedIndex) {
-            row += (NSInteger)[VCSubscriptionItemsAtIndex(subscriptions, i) count];
-        }
-    }
-
-    return -1;
+    return subIdx+((expandedIndex >= 0 && expandedIndex < subIdx) ? (NSInteger)[VCSubscriptionItemsAtIndex(subscriptions,expandedIndex) count] : 0);
 }
 
 void VCNormalizeSelection(NSUInteger configCount, NSArray *subscriptions, NSInteger *configIndex, NSInteger *subIndex, NSInteger *itemIndex) {

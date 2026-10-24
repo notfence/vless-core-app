@@ -1,6 +1,7 @@
 #import "profile_logic.h"
 #import "foundation_logic.h"
 #import "app_constants.h"
+#import "subscription_task.h"
 #include <arpa/inet.h>
 #include <errno.h>
 #include <ctype.h>
@@ -15,6 +16,49 @@ static id VCProfileAlias(NSDictionary *object, NSArray *names, BOOL *valid) {
         if (value) result = value;
     }
     return result;
+}
+
+static NSDictionary *VCSubscriptionCancelledReport(VCSubscriptionTask *task) {
+    return @{@"uris":@[],@"skipped":@0,@"issues":@[],@"error":task.cancellationReason};
+}
+
+static NSString *VCSubscriptionCompactBase64(NSString *text) {
+    NSCharacterSet *spaces=[NSCharacterSet whitespaceAndNewlineCharacterSet];
+    if ([text rangeOfCharacterFromSet:spaces].location == NSNotFound) return text;
+    NSMutableString *result=[NSMutableString string];
+    NSUInteger cursor=0;
+    while (cursor < [text length]) {
+        if (VCCurrentSubscriptionTask().isCancelled) return nil;
+        NSAutoreleasePool *pool=[[NSAutoreleasePool alloc] init];
+        NSRange separator=[text rangeOfCharacterFromSet:spaces options:0 range:NSMakeRange(cursor,[text length]-cursor)];
+        NSUInteger end=separator.location == NSNotFound ? [text length] : separator.location;
+        if (end > cursor) [result appendString:[text substringWithRange:NSMakeRange(cursor,end-cursor)]];
+        cursor=separator.location == NSNotFound ? end : NSMaxRange(separator);
+        [pool drain];
+    }
+    return result;
+}
+
+static NSString *VCSubscriptionMetadataText(VCProfileLogic *profiles, NSString *text) {
+    NSMutableDictionary *fields=[NSMutableDictionary dictionary];
+    NSArray *known=@[@"subscription-userinfo",@"announce",@"profile-description",@"support-url",@"profile-web-page-url",@"profile-update-interval",@"subscription-refill-date"];
+    NSUInteger cursor=0;
+    while (cursor < [text length]) {
+        if (VCCurrentSubscriptionTask().isCancelled) return nil;
+        NSAutoreleasePool *pool=[[NSAutoreleasePool alloc] init];
+        NSUInteger end=0,contentsEnd=0;
+        [text getLineStart:NULL end:&end contentsEnd:&contentsEnd forRange:NSMakeRange(cursor,0)];
+        NSString *line=[profiles safeTrim:[text substringWithRange:NSMakeRange(cursor,contentsEnd-cursor)]];
+        if ([line hasPrefix:@"#"]) line=[profiles safeTrim:[line substringFromIndex:1]];
+        NSRange colon=[line rangeOfString:@":"];
+        if (colon.location != NSNotFound) {
+            NSString *key=[[profiles safeTrim:[line substringToIndex:colon.location]] lowercaseString];
+            if ([known containsObject:key] && [[profiles safeTrim:[line substringFromIndex:colon.location+1]] length]) [fields setObject:line forKey:key];
+        }
+        if ([line rangeOfString:@"profile-title" options:NSCaseInsensitiveSearch|NSAnchoredSearch].location == 0 && [[profiles subscriptionTitleFromMetadataText:line] length]) [fields setObject:line forKey:@"profile-title"];
+        cursor=end; [pool drain];
+    }
+    return [[fields allValues] componentsJoinedByString:@"\n"];
 }
 
 static BOOL VCProfileText(id value) {
@@ -493,6 +537,8 @@ static NSDictionary *VCProfileSSMetadata(NSString *uri) {
         NSDictionary *cached=[_profileMetadata objectForKey:uri];
         if (cached) return [[cached retain] autorelease];
     }
+    NSDictionary *prepared=[VCCurrentSubscriptionTask() preparedMetadataForURI:uri];
+    if (prepared) return prepared;
     return [self uncachedMetadataForURI:uri];
 }
 
@@ -509,6 +555,7 @@ static NSDictionary *VCProfileSSMetadata(NSString *uri) {
     NSDictionary *previous=nil;
     @synchronized(self) { previous=[_profileMetadata retain]; }
     for (NSString *uri in uris) {
+        if (VCCurrentSubscriptionTask().isCancelled) { [previous release]; return nil; }
         NSAutoreleasePool *pool=[[NSAutoreleasePool alloc] init];
         NSDictionary *entry=[additional objectForKey:uri] ?: [previous objectForKey:uri];
         [metadata setObject:entry ?: [self metadataForURI:uri] forKey:uri];
@@ -519,6 +566,7 @@ static NSDictionary *VCProfileSSMetadata(NSString *uri) {
 }
 
 - (void)installPreparedMetadata:(NSDictionary *)metadata {
+    if (![metadata isKindOfClass:[NSDictionary class]]) return;
     NSDictionary *snapshot=[metadata copy];
     @synchronized(self) { [_profileMetadata release]; _profileMetadata=snapshot; }
 }
@@ -788,20 +836,20 @@ static NSDictionary *VCProfileSSMetadata(NSString *uri) {
                                        hostName:(NSString *)hostName
                                         options:(id<VCSubscriptionUpdateOptions>)options
                                       errorText:(NSString **)errorTextOut {
-    if ([nameFromMeta length] == 0) {
-        nameFromMeta = [self subscriptionTitleFromData:data];
-    }
-    if ([userInfoFromMeta count] == 0) {
-        userInfoFromMeta = [self subscriptionUserInfoFromData:data];
-    }
-    if ([metadataFromMeta count] == 0) {
-        metadataFromMeta = [self subscriptionMetadataFromData:data];
-    }
-
     NSDictionary *importReport=[self subscriptionImportReportFromData:data];
     if ([importReport objectForKey:@"error"]) {
         if (errorTextOut) *errorTextOut=[importReport objectForKey:@"error"];
         return nil;
+    }
+    NSString *metadataText=[importReport objectForKey:@"metadata_text"];
+    if ([nameFromMeta length] == 0) {
+        nameFromMeta = [self subscriptionTitleFromMetadataText:metadataText];
+    }
+    if ([userInfoFromMeta count] == 0) {
+        userInfoFromMeta = [self subscriptionUserInfoFromMetadataText:metadataText];
+    }
+    if ([metadataFromMeta count] == 0) {
+        metadataFromMeta = [self subscriptionMetadataFromMetadataText:metadataText];
     }
     NSArray *uris = [importReport objectForKey:@"uris"];
     if ([options respondsToSelector:@selector(profileMetadataPrepared:)]) [options profileMetadataPrepared:[importReport objectForKey:@"metadata"]];
@@ -1008,6 +1056,7 @@ static NSDictionary *VCProfileSSMetadata(NSString *uri) {
     for (NSUInteger pass=0;pass<2;pass++) {
         NSUInteger cursor=0;
         while (cursor < [text length]) {
+            if (VCCurrentSubscriptionTask().isCancelled) return @[];
             NSAutoreleasePool *pool=[[NSAutoreleasePool alloc] init];
             NSUInteger end=0,contentsEnd=0;
             [text getLineStart:NULL end:&end contentsEnd:&contentsEnd forRange:NSMakeRange(cursor,0)];
@@ -1016,16 +1065,22 @@ static NSDictionary *VCProfileSSMetadata(NSString *uri) {
             BOOL direct=[self isConfigurationURI:trimmed];
             if (pass == 0 && direct && ![seen containsObject:trimmed]) {
                 [seen addObject:trimmed]; [out addObject:trimmed];
+            } else if (pass == 0 && direct) {
+                [VCCurrentSubscriptionTask() recordDuplicate];
             } else if (pass == 1 && !direct) {
                 NSUInteger position=0;
                 while (position < [line length]) {
+                    if (VCCurrentSubscriptionTask().isCancelled) break;
                     NSAutoreleasePool *matchPool=[[NSAutoreleasePool alloc] init];
                     NSTextCheckingResult *match=[expression firstMatchInString:line options:0 range:NSMakeRange(position,[line length]-position)];
                     if (!match || !match.range.length) { [matchPool drain]; break; }
                     position=NSMaxRange(match.range);
                     NSString *uri=[line substringWithRange:match.range];
                     while ([uri length] > 1 && ([uri hasSuffix:@","] || [uri hasSuffix:@";"] || [uri hasSuffix:@")"] || [uri hasSuffix:@"]"])) uri=[uri substringToIndex:[uri length]-1];
-                    if ([self isConfigurationURI:uri] && ![seen containsObject:uri]) { [seen addObject:uri]; [out addObject:uri]; }
+                    if ([self isConfigurationURI:uri]) {
+                        if (![seen containsObject:uri]) { [seen addObject:uri]; [out addObject:uri]; }
+                        else [VCCurrentSubscriptionTask() recordDuplicate];
+                    }
                     [matchPool drain];
                 }
             }
@@ -1053,6 +1108,7 @@ static NSDictionary *VCProfileSSMetadata(NSString *uri) {
     NSCharacterSet *trailSet = [NSCharacterSet characterSetWithCharactersInString:@",;)]}>\"'"];
     NSUInteger cursor=0;
     while (cursor < [text length]) {
+        if (VCCurrentSubscriptionTask().isCancelled) return @[];
         NSAutoreleasePool *pool=[[NSAutoreleasePool alloc] init];
         NSTextCheckingResult *m=[re firstMatchInString:text options:0 range:NSMakeRange(cursor,[text length]-cursor)];
         if (!m || !m.range.length) { [pool drain]; break; }
@@ -1078,13 +1134,16 @@ static NSDictionary *VCProfileSSMetadata(NSString *uri) {
 
         if (![seen containsObject:link]) {
             [seen addObject:link]; [out addObject:link];
-        }
+        } else [VCCurrentSubscriptionTask() recordDuplicate];
         [pool drain];
     }
     return out;
 }
 
 - (NSDictionary *)importReportFromHappJSONData:(NSData *)data {
+    VCSubscriptionTask *task=VCCurrentSubscriptionTask();
+    if (task.isCancelled) return VCSubscriptionCancelledReport(task);
+    [task setPhase:@"Processing"];
     if ([data length] > kVCMaximumSubscriptionBytes) return @{@"uris":@[],@"skipped":@0,@"issues":@[],@"error":@"Subscription response exceeds 32 MiB"};
     NSMutableArray *uris=[NSMutableArray array],*issues=[NSMutableArray array];
     NSMutableDictionary *metadata=[NSMutableDictionary dictionary];
@@ -1096,7 +1155,9 @@ static NSDictionary *VCProfileSSMetadata(NSString *uri) {
         configs=[self happJSONArrayValue:[root objectForKey:@"configs"]];
         if (!configs && [root objectForKey:@"outbounds"]) configs=@[root];
     }
+    NSUInteger processed=0;
     for (id value in configs) {
+        if (task.isCancelled) return VCSubscriptionCancelledReport(task);
         NSAutoreleasePool *pool=[[NSAutoreleasePool alloc] init];
         NSDictionary *entry=nil;
         NSString *uri=[self URIFromHappJSONConfig:[self happJSONDictionaryValue:value] metadata:&entry];
@@ -1104,8 +1165,12 @@ static NSDictionary *VCProfileSSMetadata(NSString *uri) {
             skipped++;
             if ([issues count] < 16) [issues addObject:@"configs[]: invalid or unsupported profile settings"];
         } else if (![seen containsObject:uri]) { [seen addObject:uri]; [uris addObject:uri]; [metadata setObject:entry forKey:uri]; }
+        else [task recordDuplicate];
+        [task processed:++processed total:[configs count]];
         [pool drain];
     }
+    if (task.isCancelled) return VCSubscriptionCancelledReport(task);
+    [task addAccepted:[uris count] skipped:skipped];
     return @{@"uris":uris,@"skipped":@(skipped),@"issues":issues,@"metadata":metadata};
 }
 
@@ -1114,6 +1179,9 @@ static NSDictionary *VCProfileSSMetadata(NSString *uri) {
 }
 
 - (NSDictionary *)subscriptionImportReportFromData:(NSData *)data {
+    VCSubscriptionTask *task=VCCurrentSubscriptionTask();
+    if (task.isCancelled) return VCSubscriptionCancelledReport(task);
+    [task setPhase:@"Processing"];
     if (!data || ![data length]) return @{@"uris":@[],@"skipped":@0,@"issues":@[]};
     if ([data length] > kVCMaximumSubscriptionBytes) return @{@"uris":@[],@"skipped":@0,@"issues":@[],@"error":@"Subscription response exceeds 32 MiB"};
     NSString *raw=[[[NSString alloc] initWithData:data encoding:NSUTF8StringEncoding] autorelease];
@@ -1121,26 +1189,35 @@ static NSDictionary *VCProfileSSMetadata(NSString *uri) {
     NSString *trim=[self safeTrim:raw];
     if ([trim hasPrefix:@"{"] || [trim hasPrefix:@"["]) return [self importReportFromHappJSONData:data];
     NSArray *uris=[self extractConfigURIsFromText:raw];
+    if (task.isCancelled) return VCSubscriptionCancelledReport(task);
     if (![uris count]) {
-        NSString *base64=[[raw componentsSeparatedByCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]] componentsJoinedByString:@""];
+        NSString *base64=VCSubscriptionCompactBase64(raw);
         NSData *decoded=DecodeBase64String(base64);
         NSString *text=[[[NSString alloc] initWithData:decoded encoding:NSUTF8StringEncoding] autorelease];
         if (!text) text=[[[NSString alloc] initWithData:decoded encoding:NSISOLatin1StringEncoding] autorelease];
         NSString *trimmed=[self safeTrim:text];
         if ([trimmed hasPrefix:@"{"] || [trimmed hasPrefix:@"["]) return [self importReportFromHappJSONData:decoded];
         uris=[self extractConfigURIsFromText:text];
+        raw=text;
     }
     NSMutableArray *accepted=[NSMutableArray array],*issues=[NSMutableArray array]; NSUInteger skipped=0;
     NSMutableDictionary *metadata=[NSMutableDictionary dictionary];
+    NSUInteger processed=0;
     for (NSString *uri in uris) {
+        if (task.isCancelled) return VCSubscriptionCancelledReport(task);
         NSAutoreleasePool *pool=[[NSAutoreleasePool alloc] init];
         NSDictionary *entry=[self metadataForURI:uri];
         NSString *reason=[entry objectForKey:@"reason"];
         if (reason) { skipped++; if ([issues count] < 16) [issues addObject:reason]; }
         else { [accepted addObject:uri]; [metadata setObject:entry forKey:uri]; }
+        [task processed:++processed total:[uris count]];
         [pool drain];
     }
-    return @{@"uris":[self sanitizeSubscriptionURIs:accepted],@"skipped":@(skipped),@"issues":issues,@"metadata":metadata};
+    if (task.isCancelled) return VCSubscriptionCancelledReport(task);
+    [task addAccepted:[accepted count] skipped:skipped];
+    NSString *metadataText=VCSubscriptionMetadataText(self,raw);
+    if (task.isCancelled) return VCSubscriptionCancelledReport(task);
+    return @{@"uris":[self sanitizeSubscriptionURIs:accepted],@"skipped":@(skipped),@"issues":issues,@"metadata":metadata,@"metadata_text":metadataText ?: @""};
 }
 
 - (NSArray *)parseSubscriptionData:(NSData *)data {
@@ -1341,6 +1418,7 @@ static NSDictionary *VCProfileSSMetadata(NSString *uri) {
     NSDictionary *entry=[self metadataForURI:uri];
     if ([entry objectForKey:@"reason"]) return nil;
     if (metadata) *metadata=entry;
+    [VCCurrentSubscriptionTask() profileMetadataPrepared:@{uri:entry}];
     return uri;
 }
 

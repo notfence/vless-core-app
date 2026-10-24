@@ -1,4 +1,5 @@
 #import "karing_backup.h"
+#import "../../common/subscription_task.h"
 #import "../../common/profile_logic.h"
 
 #include <arpa/inet.h>
@@ -193,7 +194,11 @@ static NSArray *VCConfigURIsFromKaringGroup(NSDictionary *item, NSMutableArray *
 
     NSMutableArray *uris = [NSMutableArray array];
     NSMutableSet *seen = [NSMutableSet set];
+    VCSubscriptionTask *task=VCCurrentSubscriptionTask();
+    [task setPhase:@"Processing"];
+    NSUInteger processed=0,originalSkipped=*skipped;
     for (id value in (NSArray *)serversValue) {
+        if (VCCurrentSubscriptionTask().isCancelled) return nil;
         NSAutoreleasePool *pool=[[NSAutoreleasePool alloc] init];
         NSString *error=nil;
         NSString *uri = [VCProfiles() URIFromKaringServer:value error:&error];
@@ -201,9 +206,15 @@ static NSArray *VCConfigURIsFromKaringGroup(NSDictionary *item, NSMutableArray *
             (*skipped)++;
             if ([issues count] < 16) [issues addObject:error ?: @"servers[]: invalid profile"];
         }
-        if ([uri length] > 0 && ![seen containsObject:uri]) { [seen addObject:uri]; [uris addObject:uri]; }
+        if ([uri length] > 0 && ![seen containsObject:uri]) {
+            [seen addObject:uri]; [uris addObject:uri];
+            NSDictionary *metadata=[task preparedMetadataForURI:uri] ?: [VCProfiles() metadataForURI:uri];
+            [task profileMetadataPrepared:@{uri:metadata}];
+        } else if ([uri length]) [task recordDuplicate];
+        [task processed:++processed total:[serversValue count]];
         [pool drain];
     }
+    [task addAccepted:[uris count] skipped:*skipped-originalSkipped];
     return uris;
 }
 
@@ -233,6 +244,7 @@ NSArray *VCKaringSubscriptionsFromBackupData(NSData *data, NSString **errorText)
     NSMutableArray *subscriptions = [NSMutableArray array];
     NSMutableSet *seenURLs = [NSMutableSet set];
     for (id value in (NSArray *)itemsValue) {
+        if (VCCurrentSubscriptionTask().isCancelled) { VCSetError(errorText,VCCurrentSubscriptionTask().cancellationReason); return nil; }
         NSAutoreleasePool *pool=[[NSAutoreleasePool alloc] init];
         @try {
         if (![value isKindOfClass:[NSDictionary class]]) continue;

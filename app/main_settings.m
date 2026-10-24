@@ -71,11 +71,12 @@
 }
 
 - (void)refreshPressed {
+    if (_subscriptionTask) { [self cancelSubscriptionTask]; return; }
     VCRecordAppEvent(@"ui", @"Refresh subscriptions button pressed", nil);
     if (_reorderingSection >= 0) {
         [self setMainReorderingSection:-1 showStatus:NO];
     }
-    [self startBackgroundSubscriptionRefreshWithStatus:@"Updating subscriptions..."];
+    [self startBackgroundSubscriptionRefresh];
 }
 
 - (void)settingsPressed {

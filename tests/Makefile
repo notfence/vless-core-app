@@ -13,7 +13,7 @@ HOST_OBJCFLAGS := $(shell $(GNUSTEP_CONFIG) --objc-flags 2>/dev/null)
 HOST_LIBS := $(shell $(GNUSTEP_CONFIG) --base-libs 2>/dev/null) -lsqlite3 -lcrypto -lz -lm
 endif
 HOST_CFLAGS := -O1 -g -Wall -Wextra -Wno-unused-const-variable -Wno-incompatible-pointer-types $(SANITIZE)
-APP_SOURCES := test_app_logic.m ../common/foundation_logic.m ../common/profile_logic.m ../common/secure_store.m ../common/connection_logic.m ../common/list_logic.m ../integrations/happ/happ_crypto.c
+APP_SOURCES := test_app_logic.m ../common/foundation_logic.m ../common/profile_logic.m ../common/secure_store.m ../common/connection_logic.m ../common/list_logic.m ../common/subscription_task.m ../integrations/happ/happ_crypto.c
 APP_OBJECTS := $(addprefix $(HOST_BUILD_DIR)/,$(patsubst ../%,%,$(APP_SOURCES:.m=.o)))
 APP_OBJECTS := $(APP_OBJECTS:.c=.o)
 HOST_TESTS := $(HOST_BUILD_DIR)/test_app_logic $(HOST_BUILD_DIR)/test_legacy_loopback_host $(HOST_BUILD_DIR)/test_legacy_dns_host
@@ -157,5 +157,5 @@ sanitizers:
 asan:
 	ASAN_OPTIONS=detect_leaks=0 $(MAKE) test HOST_BUILD_DIR=$(HOST_BUILD_DIR)-asan SANITIZE='-fsanitize=address -fno-omit-frame-pointer'
 
--include $(APP_OBJECTS:.o=.d) $(CORE_PARSE_OBJ:.o=.d) $(HOST_BUILD_DIR)/test_ping.d $(HOST_BUILD_DIR)/test_proxy_probe.d $(HOST_BUILD_DIR)/app/proxy_probe.d $(HOST_BUILD_DIR)/test_import_formats.d $(HOST_BUILD_DIR)/integrations/karing/karing_backup.d
+-include $(APP_OBJECTS:.o=.d) $(CORE_PARSE_OBJ:.o=.d) $(HOST_BUILD_DIR)/test_ping.d $(HOST_BUILD_DIR)/test_proxy_probe.d $(HOST_BUILD_DIR)/app/proxy_probe.d $(HOST_BUILD_DIR)/test_import_formats.d $(HOST_BUILD_DIR)/test_large_subscriptions.d $(HOST_BUILD_DIR)/integrations/karing/karing_backup.d
 .PHONY: test requirements sanitizers asan

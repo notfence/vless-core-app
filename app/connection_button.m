@@ -1,5 +1,7 @@
 #import "connection_button.h"
 
+typedef enum { VCPowerShapePower, VCPowerShapeSpinner, VCPowerShapeProgress } VCPowerShape;
+
 static void VCAddPowerArc(CGMutablePathRef path, CGPoint center, CGFloat radius,
                           CGFloat start, CGFloat end) {
     CGFloat tangent = (4.0f / 3.0f) * tanf((end - start) * 0.25f);
@@ -11,21 +13,27 @@ static void VCAddPowerArc(CGMutablePathRef path, CGPoint center, CGFloat radius,
                          center.x + radius * cosf(end), center.y + radius * sinf(end));
 }
 
-static CGPathRef VCCreatePowerPath(BOOL loading) {
-    CGPoint center = CGPointMake(18.0f, loading ? 18.0f : 19.8f);
+static CGPathRef VCCreatePowerPath(VCPowerShape shape) {
+    BOOL progress=shape == VCPowerShapeProgress;
+    CGPoint center = CGPointMake(18.0f, shape == VCPowerShapePower ? 19.8f : 18.0f);
     CGFloat radius = 12.24f;
-    CGFloat start = -M_PI * 0.25f;
+    CGFloat start = progress ? -M_PI_2 : -M_PI * 0.25f;
+    CGFloat sweep = progress ? M_PI * 2.0f : M_PI * 1.5f;
     CGMutablePathRef path = CGPathCreateMutable();
     CGPathMoveToPoint(path, NULL, center.x + radius * cosf(start), center.y + radius * sinf(start));
     for (NSInteger i = 0; i < 4; i++) {
-        CGFloat a = start + M_PI * 1.5f * i / 4.0f;
-        CGFloat b = start + M_PI * 1.5f * (i + 1) / 4.0f;
+        CGFloat a = start + sweep * i / 4.0f;
+        CGFloat b = start + sweep * (i + 1) / 4.0f;
         VCAddPowerArc(path, center, radius, a, b);
     }
-    if (loading) {
+    if (shape == VCPowerShapeSpinner) {
         CGFloat a = M_PI * 1.25f;
         CGPathMoveToPoint(path, NULL, center.x + radius * cosf(a), center.y + radius * sinf(a));
         VCAddPowerArc(path, center, radius, a, a + M_PI / 6.0f);
+    } else if (progress) {
+        CGFloat x=center.x+radius*cosf(start),y=center.y+radius*sinf(start);
+        CGPathMoveToPoint(path,NULL,x,y);
+        CGPathAddCurveToPoint(path,NULL,x,y,x,y,x,y);
     } else {
         CGPathMoveToPoint(path, NULL, 18.0f, 6.84f);
         CGPathAddCurveToPoint(path, NULL, 18.0f, 10.32f, 18.0f, 13.8f, 18.0f, 17.28f);
@@ -37,13 +45,19 @@ static CFTimeInterval const kVCPowerMorphDuration = 0.28;
 static CFTimeInterval const kVCPowerSpinDuration = 0.85;
 static CFTimeInterval const kVCPowerMinimumLoadingDuration = 0.65;
 
+@interface VCConnectionPowerView ()
+- (void)animatePath:(CGPathRef)path progress:(CGFloat)progress spinning:(BOOL)spinning;
+- (void)animateProgress:(CGFloat)progress duration:(CFTimeInterval)duration;
+@end
+
 @implementation VCConnectionPowerView
 - (id)initWithFrame:(CGRect)frame {
     self = [super initWithFrame:frame];
     if (self) {
         self.userInteractionEnabled = NO;
-        _powerPath = VCCreatePowerPath(NO);
-        _spinnerPath = VCCreatePowerPath(YES);
+        _powerPath = VCCreatePowerPath(VCPowerShapePower);
+        _spinnerPath = VCCreatePowerPath(VCPowerShapeSpinner);
+        _progressPath = VCCreatePowerPath(VCPowerShapeProgress);
         _scaleLayer = [[CALayer alloc] init];
         _scaleLayer.bounds = CGRectMake(0.0f, 0.0f, 36.0f, 36.0f);
         [self.layer addSublayer:_scaleLayer];
@@ -71,7 +85,37 @@ static CFTimeInterval const kVCPowerMinimumLoadingDuration = 0.65;
     [CATransaction commit];
 }
 
+- (void)animateProgress:(CGFloat)progress duration:(CFTimeInterval)duration {
+    CGFloat from=((CAShapeLayer *)(_symbolLayer.presentationLayer ?: _symbolLayer)).strokeEnd;
+    [CATransaction begin];
+    [CATransaction setDisableActions:YES];
+    [_symbolLayer removeAnimationForKey:@"powerProgress"];
+    _symbolLayer.strokeEnd=progress;
+    if (fabs(progress-from) > .0001) {
+        CABasicAnimation *animation=[CABasicAnimation animationWithKeyPath:@"strokeEnd"];
+        animation.fromValue=@(from); animation.toValue=@(progress); animation.duration=duration;
+        animation.timingFunction=[CAMediaTimingFunction functionWithName:kCAMediaTimingFunctionEaseInEaseOut];
+        [_symbolLayer addAnimation:animation forKey:@"powerProgress"];
+    }
+    [CATransaction commit];
+}
+
+- (void)setProgress:(CGFloat)progress {
+    CGFloat fraction=isfinite(progress) ? VCClampUnit(progress) : 0;
+    BOOL entering=!_progressRequested;
+    if (!entering && _symbolLayer.strokeEnd == fraction) return;
+    _progressRequested=YES; _loadingRequested=NO; ++_transitionGeneration;
+    if (entering) [self animatePath:_progressPath progress:fraction spinning:NO];
+    else [self animateProgress:fraction duration:.16];
+}
+
 - (void)setLoading:(BOOL)loading {
+    if (_progressRequested) {
+        _progressRequested=NO; _loadingRequested=loading; ++_transitionGeneration;
+        if (loading) _loadingStartedAt=CACurrentMediaTime();
+        [self animateLoading:loading];
+        return;
+    }
     if (_loadingRequested == loading) return;
     _loadingRequested = loading;
     NSUInteger generation = ++_transitionGeneration;
@@ -84,7 +128,7 @@ static CFTimeInterval const kVCPowerMinimumLoadingDuration = 0.65;
     if (remaining > 0.0) {
         dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(remaining * NSEC_PER_SEC)),
                        dispatch_get_main_queue(), ^{
-            if (generation == _transitionGeneration && !_loadingRequested) [self animateLoading:NO];
+            if (generation == _transitionGeneration && !_loadingRequested && !_progressRequested) [self animateLoading:NO];
         });
     } else {
         [self animateLoading:NO];
@@ -92,17 +136,22 @@ static CFTimeInterval const kVCPowerMinimumLoadingDuration = 0.65;
 }
 
 - (void)animateLoading:(BOOL)loading {
+    [self animatePath:(loading ? _spinnerPath : _powerPath) progress:1 spinning:loading];
+}
+
+- (void)animatePath:(CGPathRef)path progress:(CGFloat)progress spinning:(BOOL)spinning {
     CAShapeLayer *visible = (CAShapeLayer *)(_symbolLayer.presentationLayer ?: _symbolLayer);
     CGPathRef fromPath = CGPathCreateCopy(visible.path ?: _symbolLayer.path);
     CGFloat angle = [[visible valueForKeyPath:@"transform.rotation.z"] floatValue];
 
     [CATransaction begin];
     [CATransaction setDisableActions:YES];
+    [self animateProgress:progress duration:kVCPowerMorphDuration];
     [_symbolLayer removeAnimationForKey:@"powerMorph"];
     [_symbolLayer removeAnimationForKey:@"powerSpin"];
     [_symbolLayer removeAnimationForKey:@"powerSettle"];
-    _symbolLayer.path = loading ? _spinnerPath : _powerPath;
-    _symbolLayer.transform = loading ? CATransform3DMakeRotation(angle, 0.0f, 0.0f, 1.0f) : CATransform3DIdentity;
+    _symbolLayer.path = path;
+    _symbolLayer.transform = spinning ? CATransform3DMakeRotation(angle, 0.0f, 0.0f, 1.0f) : CATransform3DIdentity;
 
     CABasicAnimation *morph = [CABasicAnimation animationWithKeyPath:@"path"];
     morph.fromValue = (id)fromPath;
@@ -113,7 +162,7 @@ static CFTimeInterval const kVCPowerMinimumLoadingDuration = 0.65;
 
     CABasicAnimation *rotation = [CABasicAnimation animationWithKeyPath:@"transform.rotation.z"];
     rotation.fromValue = [NSNumber numberWithFloat:angle];
-    if (loading) {
+    if (spinning) {
         rotation.toValue = [NSNumber numberWithFloat:angle + M_PI * 2.0f];
         rotation.duration = kVCPowerSpinDuration;
         rotation.beginTime = [_symbolLayer convertTime:CACurrentMediaTime() fromLayer:nil] + morph.duration;
@@ -133,6 +182,7 @@ static CFTimeInterval const kVCPowerMinimumLoadingDuration = 0.65;
 - (void)dealloc {
     CGPathRelease(_powerPath);
     CGPathRelease(_spinnerPath);
+    CGPathRelease(_progressPath);
     [_symbolLayer release];
     [_scaleLayer release];
     [super dealloc];

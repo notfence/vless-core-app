@@ -60,6 +60,9 @@ NSData *FetchURLViaVlessCoreCurl(NSString *urlString,
     if (errOut) *errOut = nil;
     if (headersOut) *headersOut = nil;
     if (exitCodeOut) *exitCodeOut = -1;
+    VCSubscriptionTask *task=VCCurrentSubscriptionTask();
+    if (task.isCancelled) { if (errOut) *errOut=task.cancellationReason; return nil; }
+    [task setPhase:@"Downloading"];
 
     if (!urlString || [urlString length] == 0) {
         if (errOut) *errOut = @"Invalid subscription URL";
@@ -283,41 +286,9 @@ NSData *FetchURLViaVlessCoreCurl(NSString *urlString,
     if (curl_config_fd >= 0) close(curl_config_fd);
 
     int status = 0;
-    int waited_ms = 0;
-    const int timeout_ms = 30000;
-    while (1) {
-        pid_t wr = waitpid(pid, &status, WNOHANG);
-        if (wr == pid) break;
-        if (wr < 0) {
-            if (errno == EINTR) continue;
-            kill(pid, SIGKILL);
-            waitpid(pid, &status, 0);
-            CleanupSubscriptionFetchTempFiles(out_tmpl, err_tmpl, hdr_tmpl);
-            if (errOut) *errOut = [NSString stringWithFormat:@"waitpid failed: %s", strerror(errno)];
-            return nil;
-        }
-
-        if (waited_ms >= timeout_ms) {
-            kill(pid, SIGKILL);
-            waitpid(pid, &status, 0);
-            CleanupSubscriptionFetchTempFiles(out_tmpl, err_tmpl, hdr_tmpl);
-            if (errOut) *errOut = @"vless-core-curl timed out";
-            return nil;
-        }
-
-        struct stat partialBodyStat;
-        if (lstat(out_tmpl, &partialBodyStat) == 0 &&
-            S_ISREG(partialBodyStat.st_mode) &&
-            (uint64_t)partialBodyStat.st_size > kVCMaximumSubscriptionBytes) {
-            kill(pid, SIGKILL);
-            waitpid(pid, &status, 0);
-            CleanupSubscriptionFetchTempFiles(out_tmpl, err_tmpl, hdr_tmpl);
-            if (errOut) *errOut = @"Subscription response exceeds 32 MiB";
-            return nil;
-        }
-
-        usleep(100 * 1000);
-        waited_ms += 100;
+    if (!VCWaitSubscriptionProcess(pid,&status,out_tmpl,kVCMaximumSubscriptionBytes,30,task,errOut)) {
+        CleanupSubscriptionFetchTempFiles(out_tmpl,err_tmpl,hdr_tmpl);
+        return nil;
     }
 
     NSString *out_path = [NSString stringWithUTF8String:out_tmpl];
