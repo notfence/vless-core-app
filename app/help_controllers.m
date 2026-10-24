@@ -529,6 +529,9 @@
     NSString *opensslPatchStatus = DetectOpenSSLPatchStatus();
 
     NSArray *libraries = [NSArray arrayWithObjects:
+                          [self licensedRowWithTitle:@"Twemoji flags"
+                                              detail:@"Flag graphics 17.0.3 by Twitter and contributors. License: CC BY 4.0. Unicode Emoji 17.0 data."
+                                              marker:@"Twemoji 17.0.3 flag graphics"],
                           [self licensedRowWithTitle:@"curl"
                                               detail:[NSString stringWithFormat:@"HTTP client library, version %@. License: curl license.", [deps objectForKey:@"curl"]]
                                               marker:@"curl 8.21.0"],

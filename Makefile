@@ -57,11 +57,11 @@ ZBAR_LIB := $(BUILD_DIR)/libzbar-qr.a
 ZBAR_ARM64_OBJ := $(patsubst $(ZBAR_DIR)/%.c,$(BUILD_DIR)/arm64/zbar/%.o,$(ZBAR_SRC))
 ZBAR_ARM64_LIB := $(BUILD_DIR)/arm64/libzbar-qr.a
 
-COMMON_APP_SRC := common/foundation_logic.m common/profile_logic.m common/secure_store.m common/connection_logic.m common/main_geometry.c common/list_logic.m common/subscription_task.m
+COMMON_APP_SRC := common/foundation_logic.m common/profile_logic.m common/secure_store.m common/connection_logic.m common/main_geometry.c common/list_logic.m common/subscription_task.m common/flag_logic.c
 COMMON_APP_HEADERS := $(wildcard common/*.h)
 APP_SCREEN_SRC := app/main.m app/main_screen.m app/main_state.m app/main_connection.m app/main_ping.m app/main_subscriptions.m app/main_import.m app/main_layout.m app/main_settings.m app/main_terminal.m app/main_table.m app/subscription_work.m
 APP_SUPPORT_SRC := app/app_support.m app/daemon_client.m app/network_ping.m app/proxy_probe.m app/runtime_info.m app/subscription_fetch.m app/update_checker.m app/diagnostics.m app/appearance.m app/connection_button.m app/main_cells.m app/settings.m app/help_controllers.m app/routing.m app/qr_scanner.m app/subscription_info.m app/import_browser.m
-APP_SRC := $(APP_SCREEN_SRC) $(APP_SUPPORT_SRC) $(COMMON_APP_SRC) integrations/happ/happ_crypto.c integrations/karing/karing_backup.m
+APP_SRC := $(APP_SCREEN_SRC) $(APP_SUPPORT_SRC) app/flag_label.m $(COMMON_APP_SRC) integrations/happ/happ_crypto.c integrations/karing/karing_backup.m
 APP_HEADERS := $(wildcard app/*.h) integrations/happ/happ_crypto.h integrations/karing/karing_backup.h daemon/vpnctld_protocol.h $(COMMON_APP_HEADERS)
 APP_OBJ := \
 	$(patsubst %.m,$(BUILD_DIR)/app/%.o,$(filter %.m,$(APP_SRC))) \
@@ -78,6 +78,8 @@ APP_LDFLAGS := -Wl,-pie -Wl,-platform_version,ios,$(LEGACY_IOS_MIN_VERSION),$(AP
 ZBAR_CFLAGS := -w -O2 -arch armv7 -miphoneos-version-min=$(LEGACY_IOS_MIN_VERSION) -isysroot $(APP_IOS_SDK) -I$(ZBAR_DIR)
 APP_ARM64_CFLAGS := -fno-objc-arc -Wall -Wextra -O2 -arch arm64 -miphoneos-version-min=$(ARM64_IOS_MIN_VERSION) -isysroot $(ARM64_IOS_SDK) -Iintegrations/happ -Iintegrations/karing -I$(ZBAR_DIR) -I$(OPENSSL_IOS_ARM64_INCLUDE)
 APP_ARM64_LDFLAGS := -Wl,-pie -framework UIKit -framework Foundation -framework CoreGraphics -framework QuartzCore -framework AVFoundation -framework CoreMedia -framework CoreVideo -framework SystemConfiguration -liconv -lsqlite3 -lz $(OPENSSL_IOS_ARM64_CRYPTO_LIB)
+APP_LDFLAGS += -framework CoreText
+APP_ARM64_LDFLAGS += -framework CoreText
 ZBAR_ARM64_CFLAGS := -w -O2 -arch arm64 -miphoneos-version-min=$(ARM64_IOS_MIN_VERSION) -isysroot $(ARM64_IOS_SDK) -I$(ZBAR_DIR)
 ARM64_RUNTIME_DEFINES := -DVC_CORE_EXECUTABLE_PATH='"/usr/bin/vless-core-darwin-arm64"' -DVC_CORE_EXECUTABLE_NAME='"vless-core-darwin-arm64"'
 APP_ARM64_CFLAGS += $(ARM64_RUNTIME_DEFINES)
@@ -207,7 +209,7 @@ $(BUILD_DIR)/app/%.o: %.m $(APP_HEADERS) | preflight
 	mkdir -p $(dir $@)
 	PATH="$(IOS_BIN):$$PATH" $(IOS_RUNTIME_ENV) $(IOS_CC) $(APP_CFLAGS) -c $< -o $@
 
-$(BUILD_DIR)/app/%.o: %.c $(APP_HEADERS) | preflight
+$(BUILD_DIR)/app/%.o: %.c $(APP_HEADERS) common/flag_data.h | preflight
 	mkdir -p $(dir $@)
 	PATH="$(IOS_BIN):$$PATH" $(IOS_RUNTIME_ENV) $(IOS_CC) $(APP_CFLAGS) -c $< -o $@
 
@@ -215,7 +217,7 @@ $(BUILD_DIR)/arm64/app/%.o: %.m $(APP_HEADERS) | preflight
 	mkdir -p $(dir $@)
 	PATH="$(IOS_BIN):$$PATH" $(IOS_RUNTIME_ENV) $(IOS_CC) $(APP_ARM64_CFLAGS) -c $< -o $@
 
-$(BUILD_DIR)/arm64/app/%.o: %.c $(APP_HEADERS) | preflight
+$(BUILD_DIR)/arm64/app/%.o: %.c $(APP_HEADERS) common/flag_data.h | preflight
 	mkdir -p $(dir $@)
 	PATH="$(IOS_BIN):$$PATH" $(IOS_RUNTIME_ENV) $(IOS_CC) $(APP_ARM64_CFLAGS) -c $< -o $@
 
@@ -288,6 +290,7 @@ package-root: check-package-inputs $(APP_ARMV7_BIN) $(APP_ARM64_BIN) $(DAEMON_AR
 	cp app/icons/icon-ping.png $(PKG_ROOT)/Applications/vless-core.app/icon-ping.png
 	cp app/icons/icon-flashlight.png $(PKG_ROOT)/Applications/vless-core.app/icon-flashlight.png
 	cp app/icons/info.png $(PKG_ROOT)/Applications/vless-core.app/info.png
+	cp -a app/icons/flags $(PKG_ROOT)/Applications/vless-core.app/flags
 	cp app/icons/update-dark.png $(PKG_ROOT)/Applications/vless-core.app/update-dark.png
 	cp app/icons/update-white.png $(PKG_ROOT)/Applications/vless-core.app/update-white.png
 	cp $(ROOT)/LICENSE $(PKG_ROOT)/Applications/vless-core.app/LICENSE

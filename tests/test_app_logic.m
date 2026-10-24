@@ -413,6 +413,18 @@ static void metadataTests(void) {
     CHECK("profiles/metadata-ipv6", [[m objectForKey:@"host"] isEqual:@"::1"] && [[m objectForKey:@"port"] intValue] == 443);
     CHECK("profiles/metadata-canonical-transport", [[m objectForKey:@"transport"] isEqual:@"tcp"] && [[m objectForKey:@"security"] isEqual:@"tls"]);
     CHECK("profiles/metadata-title", [[m objectForKey:@"title"] isEqual:@"Test name"]);
+    NSString *flagURI=@"vless://11111111-2222-4333-8444-555555555555@example.test:443?security=tls#%F0%9F%87%B3%F0%9F%87%B1%20NL%20%F0%9F%8F%B4%E2%80%8D%E2%98%A0%EF%B8%8F";
+    NSString *original=[flagURI copy];
+    NSString *flagName=@"\U0001F1F3\U0001F1F1 NL \U0001F3F4\u200D\u2620\uFE0F";
+    CHECK("profiles/flags-preserve-title",[[[p metadataForURI:flagURI] objectForKey:@"title"] isEqual:flagName]);
+    CHECK("profiles/flags-preserve-import",[[[p parseSubscriptionData:[flagURI dataUsingEncoding:NSUTF8StringEncoding]] firstObject] isEqual:original]);
+    [p prepareMetadataForConfigurations:@[@{@"uri":flagURI,@"name":flagName}] subscriptions:@[]];
+    CHECK("profiles/flags-preserve-cached-title",[[[p metadataForURI:flagURI] objectForKey:@"title"] isEqual:flagName]);
+    unsigned char flagKey[32]={7};
+    NSData *serialized=[NSPropertyListSerialization dataFromPropertyList:@{@"uri":flagURI,@"name":flagName} format:NSPropertyListBinaryFormat_v1_0 errorDescription:NULL];
+    NSData *encrypted=VCEncryptSecureStorePayload(serialized,flagKey);
+    CHECK("profiles/flags-preserve-storage",[VCDecryptSecureStorePayload(encrypted,flagKey) isEqual:serialized] && [flagURI isEqual:original]);
+    [original release];
     CHECK("profiles/metadata-no-credentials", ![m objectForKey:@"uuid"] && ![m objectForKey:@"password"] && ![m objectForKey:@"uri"] && ![m objectForKey:@"encryption"]);
     [p prepareMetadataForConfigurations:@[@{@"uri":uri}] subscriptions:@[]];
     CHECK("profiles/metadata-is-reused", [p metadataForURI:uri] == [p metadataForURI:uri]);

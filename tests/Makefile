@@ -27,6 +27,8 @@ HOST_TESTS += $(HOST_BUILD_DIR)/test_ping
 HOST_TESTS += $(HOST_BUILD_DIR)/test_proxy_probe
 HOST_TESTS += $(HOST_BUILD_DIR)/test_core_config
 HOST_TESTS += $(HOST_BUILD_DIR)/test_large_subscriptions
+HOST_TESTS += $(HOST_BUILD_DIR)/test_flags
+HOST_TESTS += $(HOST_BUILD_DIR)/test_flag_profiles
 CORE_PARSE_SRC := uri utils xhttp_config xhttp_download xhttp_payload buffer_budget websocket grpc http_headers json core_log
 CORE_PARSE_SRC += vmess_uri shadowsocks_uri shadowsocks_crypto blake3 trojan core_random deadline socket_util relay_memory connection_trace resolver
 CORE_PARSE_OBJ := $(addprefix $(HOST_BUILD_DIR)/core-parser/,$(addsuffix .o,$(CORE_PARSE_SRC)))
@@ -37,6 +39,9 @@ HOST_ZBAR_HEADERS := $(shell find $(ROOT)/$(ZBAR_DIR) -name '*.h')
 test: requirements $(HOST_TESTS)
 	$(HOST_BUILD_DIR)/test_app_logic
 	$(HOST_BUILD_DIR)/test_large_subscriptions
+	$(HOST_BUILD_DIR)/test_flags
+	$(HOST_BUILD_DIR)/test_flag_profiles 1000 scan
+	python3 $(ROOT)/tests/test_flag_assets.py
 	$(HOST_BUILD_DIR)/test_legacy_loopback_host
 	$(HOST_BUILD_DIR)/test_legacy_dns_host
 	$(HOST_BUILD_DIR)/test_main_geometry
@@ -83,6 +88,13 @@ $(HOST_BUILD_DIR)/test_app_logic: $(APP_OBJECTS)
 $(HOST_BUILD_DIR)/test_large_subscriptions: $(HOST_BUILD_DIR)/test_large_subscriptions.o $(filter-out $(HOST_BUILD_DIR)/test_app_logic.o,$(APP_OBJECTS))
 	$(HOST_CC) $(SANITIZE) $^ -o $@ $(HOST_LIBS)
 
+$(HOST_BUILD_DIR)/test_flag_profiles: $(HOST_BUILD_DIR)/test_flag_profiles.o $(HOST_BUILD_DIR)/common/flag_logic.o $(filter-out $(HOST_BUILD_DIR)/test_app_logic.o,$(APP_OBJECTS))
+	$(HOST_CC) $(SANITIZE) $^ -o $@ $(HOST_LIBS)
+
+$(HOST_BUILD_DIR)/common/flag_logic.o: ../common/flag_logic.c ../common/flag_logic.h ../common/flag_data.h | requirements
+	mkdir -p $(dir $@)
+	$(HOST_CC) $(HOST_CPPFLAGS) $(HOST_CFLAGS) -MMD -MP -c $< -o $@
+
 $(HOST_BUILD_DIR)/test_ping: $(HOST_BUILD_DIR)/test_ping.o $(HOST_BUILD_DIR)/common/connection_logic.o
 	$(HOST_CC) $(SANITIZE) $^ -o $@ $(HOST_LIBS) -Wl,--wrap=kill,--wrap=waitpid,--wrap=select
 
@@ -104,6 +116,10 @@ $(HOST_BUILD_DIR)/test_legacy_dns_host: test_legacy_dns_host.m legacy_dns_test.c
 $(HOST_BUILD_DIR)/test_main_geometry: test_main_geometry.c ../common/main_geometry.c ../common/main_geometry.h check.h | requirements
 	mkdir -p $(dir $@)
 	$(HOST_CC) $(HOST_CPPFLAGS) $(HOST_CFLAGS) test_main_geometry.c ../common/main_geometry.c -o $@ -lm $(SANITIZE)
+
+$(HOST_BUILD_DIR)/test_flags: test_flags.c ../common/flag_logic.c ../common/flag_logic.h ../common/flag_data.h check.h | requirements
+	mkdir -p $(dir $@)
+	$(HOST_CC) $(HOST_CPPFLAGS) $(HOST_CFLAGS) test_flags.c ../common/flag_logic.c -o $@ $(SANITIZE)
 
 $(HOST_BUILD_DIR)/test_daemon_policy: test_daemon_policy.c ../common/daemon_policy.c ../common/daemon_policy.h check.h | requirements
 	mkdir -p $(dir $@)
@@ -157,5 +173,5 @@ sanitizers:
 asan:
 	ASAN_OPTIONS=detect_leaks=0 $(MAKE) test HOST_BUILD_DIR=$(HOST_BUILD_DIR)-asan SANITIZE='-fsanitize=address -fno-omit-frame-pointer'
 
--include $(APP_OBJECTS:.o=.d) $(CORE_PARSE_OBJ:.o=.d) $(HOST_BUILD_DIR)/test_ping.d $(HOST_BUILD_DIR)/test_proxy_probe.d $(HOST_BUILD_DIR)/app/proxy_probe.d $(HOST_BUILD_DIR)/test_import_formats.d $(HOST_BUILD_DIR)/test_large_subscriptions.d $(HOST_BUILD_DIR)/integrations/karing/karing_backup.d
+-include $(APP_OBJECTS:.o=.d) $(CORE_PARSE_OBJ:.o=.d) $(HOST_BUILD_DIR)/test_ping.d $(HOST_BUILD_DIR)/test_proxy_probe.d $(HOST_BUILD_DIR)/app/proxy_probe.d $(HOST_BUILD_DIR)/test_import_formats.d $(HOST_BUILD_DIR)/test_large_subscriptions.d $(HOST_BUILD_DIR)/integrations/karing/karing_backup.d $(HOST_BUILD_DIR)/test_flag_profiles.d $(HOST_BUILD_DIR)/common/flag_logic.d
 .PHONY: test requirements sanitizers asan

@@ -1,5 +1,6 @@
 #import "main_screen.h"
 #import "connection_button.h"
+#import "flag_label.h"
 
 @implementation MainVC
 
@@ -134,7 +135,7 @@
     _connectionStateLabel.autoresizingMask = UIViewAutoresizingFlexibleWidth;
     [self.view addSubview:_connectionStateLabel];
 
-    _selectionLabel = [[UILabel alloc] initWithFrame:CGRectZero];
+    _selectionLabel = [[VCFlagLabel alloc] initWithFrame:CGRectZero];
     _selectionLabel.font = [UIFont systemFontOfSize:13.0f];
     _selectionLabel.backgroundColor = [UIColor clearColor];
     _selectionLabel.adjustsFontSizeToFitWidth = YES;
@@ -152,7 +153,7 @@
     _uptimeLabel.autoresizingMask = UIViewAutoresizingFlexibleWidth;
     [self.view addSubview:_uptimeLabel];
 
-    _statusLabel = [[UILabel alloc] initWithFrame:CGRectMake(16.0f, topInset + 237.0f,
+    _statusLabel = [[VCFlagLabel alloc] initWithFrame:CGRectMake(16.0f, topInset + 237.0f,
                                                             b.size.width - 32.0f, 30.0f)];
     _statusLabel.font = [UIFont systemFontOfSize:12.5f];
     _statusLabel.numberOfLines = 2;

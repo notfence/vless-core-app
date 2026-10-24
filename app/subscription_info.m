@@ -1,4 +1,5 @@
 #import "subscription_info.h"
+#import "flag_label.h"
 
 @class SubscriptionInfoVC;
 
@@ -265,9 +266,9 @@
 
     NSString *detail = [row objectForKey:@"detail"];
     CGFloat width = tableView.bounds.size.width - 52.0f;
-    CGSize detailSize = [detail sizeWithFont:[UIFont systemFontOfSize:13.0f]
-                          constrainedToSize:CGSizeMake(width, 1000.0f)
-                              lineBreakMode:NSLineBreakByWordWrapping];
+    CGSize detailSize = [[row objectForKey:@"title"] isEqualToString:@"Name"]
+        ? VCFlagTextSize(detail,[UIFont systemFontOfSize:13.0f],CGSizeMake(width,1000.0f),NSLineBreakByWordWrapping)
+        : [detail sizeWithFont:[UIFont systemFontOfSize:13.0f] constrainedToSize:CGSizeMake(width,1000.0f) lineBreakMode:NSLineBreakByWordWrapping];
     CGFloat height = 28.0f + detailSize.height + 16.0f;
     return (height < 58.0f) ? 58.0f : height;
 }
@@ -275,11 +276,13 @@
 - (UITableViewCell *)tableView:(UITableView *)tableView cellForRowAtIndexPath:(NSIndexPath *)indexPath {
     NSDictionary *row = [self rowForIndexPath:indexPath];
     NSString *action = [row objectForKey:@"action"];
-    NSString *reuseID = action ? @"SubscriptionActionCell" : @"SubscriptionInfoCell";
+    BOOL nameRow=!action && [[row objectForKey:@"title"] isEqualToString:@"Name"];
+    NSString *reuseID = action ? @"SubscriptionActionCell" : nameRow ? @"SubscriptionNameCell" : @"SubscriptionInfoCell";
     UITableViewCell *cell = [tableView dequeueReusableCellWithIdentifier:reuseID];
     if (!cell) {
         UITableViewCellStyle style = action ? UITableViewCellStyleDefault : UITableViewCellStyleSubtitle;
-        cell = [[[UITableViewCell alloc] initWithStyle:style reuseIdentifier:reuseID] autorelease];
+        Class cellClass=nameRow ? [VCFlagTableCell class] : [UITableViewCell class];
+        cell = [[[cellClass alloc] initWithStyle:style reuseIdentifier:reuseID] autorelease];
     }
 
     cell.accessoryView = nil;

@@ -1,4 +1,5 @@
 #import "app_support.h"
+#import "flag_label.h"
 
 @class VCMainListCellBackgroundView, VCMainListCell, VCDirectTouchHighlightButton, VCSubscriptionHeaderCell;
 
@@ -29,7 +30,7 @@ typedef NS_ENUM(NSInteger, VCMainListCellKind) {
         selectedStyle:(BOOL)selectedStyle;
 @end
 
-@interface VCMainListCell : UITableViewCell {
+@interface VCMainListCell : VCFlagTableCell {
     VCMainListCellKind _visualKind;
     BOOL _visualExpanded;
     BOOL _visualFirstItem;

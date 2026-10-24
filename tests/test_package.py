@@ -8,6 +8,7 @@ import re
 import stat
 import struct
 import subprocess
+import sys
 import tarfile
 import tempfile
 import zlib
@@ -62,6 +63,9 @@ def png_contract(name, data):
     check(f"launch/{name}/no-transparent-key", b"tRNS" not in types)
 
 def source_contracts():
+    sys.dont_write_bytecode=True
+    from test_flag_assets import validate
+    validate()
     info = plistlib.loads((ROOT / "app/Info.plist").read_bytes())
     control = control_fields((ROOT / "packaging/DEBIAN/control").read_bytes())
     check("plist/minimum-ios-5.0", info["MinimumOSVersion"] == "5.0")
@@ -196,6 +200,9 @@ def deb_contract(path):
     info = plistlib.loads(files[("data.tar.gz", "Applications/vless-core.app/Info.plist")][1])
     check("deb/ios5-and-build-metadata", info["MinimumOSVersion"] == "5.0" and info["VCBuildDate"] != "development build")
     for name in LAUNCHES: png_contract(name, files[("data.tar.gz", "Applications/vless-core.app/" + name)][1])
+    flag_members={name.removeprefix("Applications/vless-core.app/flags/"):data for (archive,name),(_,data) in files.items() if archive=="data.tar.gz" and name.startswith("Applications/vless-core.app/flags/")}
+    expected_flags={p.name:p.read_bytes() for p in (ROOT/"app/icons/flags").glob("*.png")}
+    check("deb/flag-graphics-complete-and-identical",flag_members==expected_flags and len(flag_members)==268)
     for name in ("postinst", "prerm", "postrm"):
         item, data = files[("control.tar.gz", name)]
         check(f"deb/{name}/executable-and-current", item.mode == 0o755 and data == (ROOT / "packaging/DEBIAN" / name).read_bytes())
