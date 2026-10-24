@@ -7,6 +7,7 @@ static NSString *const kDefaultsSubsKey = @"vlesscore.subscriptions";
 static NSString *const kDefaultsAutoUpdateSubsKey = @"vlesscore.auto_update_subs";
 static NSString *const kDefaultsPreserveCustomSubscriptionNamesKey = @"vlesscore.preserve_custom_subscription_names";
 static NSString *const kDefaultsSortSubscriptionsByPingKey = @"vlesscore.sort_subscriptions_by_ping";
+static NSString *const kDefaultsUseXmuxKey = @"vlesscore.use_xmux";
 static NSString *const kDefaultsStealthModeKey = @"vlesscore.stealth_mode";
 static NSString *const kDefaultsDarkThemeKey = @"vlesscore.dark_theme";
 static NSString *const kDefaultsAccentColorKey = @"vlesscore.accent_color";

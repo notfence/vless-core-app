@@ -31,6 +31,51 @@ with tempfile.TemporaryDirectory(prefix="vless-app-bridge-", dir=private_parent)
     decryption = f"mlkem768x25519plus.native.600s.{f.KEY}"
     flow = "xtls-rprx-vision"
     cert, _ = f.certificate()
+    for protocol in ("vless", "trojan", "vmess", "shadowsocks"):
+        for enabled in (False, True):
+            for mode, security in (("stream-one", "reality"), ("stream-up", "tls"), ("packet-up", "none")):
+                with contextlib.ExitStack() as stack:
+                    target = stack.enter_context(f.Server())
+                    reference = stack.enter_context(f.xray_server("xhttp", security, mode=mode, protocol=protocol))
+                    proxy = stack.enter_context(f.CountingProxy(reference.port))
+                    original = f.uri(proxy.port, "xhttp", security, protocol=protocol, mode=mode,
+                                     extra=json.dumps({"xmux": {"maxConnections": 1, "maxConcurrency": ""}}))
+                    prepared = subprocess.run([str(BUILD / "test_runtime_uri"), "--runtime-on" if enabled else "--runtime-off"],
+                                              input=original, text=True, capture_output=True, timeout=5, check=True).stdout.strip()
+                    if enabled and prepared != original:
+                        raise AssertionError("enabled XMUX rewrote the original URI")
+                    with f.cli(prepared, environment={"VLESS_CA_BUNDLE": str(cert)}) as client:
+                        for index in range(3):
+                            with f.socks_connect(client.port, target.port) as connection:
+                                f.exchange(connection, b"\x00\x00" + bytes(range(256)) * 1024 + bytes([index]))
+                        if mode == "stream-one" and len(proxy.connections) != (1 if enabled else 3):
+                            raise AssertionError("Use XMUX did not control physical connection sharing")
+                    if target.errors:
+                        raise AssertionError("XMUX toggle damaged the application exchange")
+                print(f"PASS app/core/Xray: Use-XMUX/{int(enabled)}/{protocol}/{mode}/{security}")
+        for enabled in (False, True):
+            with contextlib.ExitStack() as stack:
+                target = stack.enter_context(f.Server())
+                shared = {"sessionIDPlacement": "header", "sessionIDKey": "X-vless-core-session", "seqPlacement": "header"}
+                reference = stack.enter_context(f.xray_server("xhttp", "tls", mode="stream-up", protocol=protocol, path="/", **shared))
+                upload = stack.enter_context(f.CountingProxy(reference.port))
+                download = stack.enter_context(f.CountingProxy(reference.port, address="127.0.0.2"))
+                down = {"address": "download.invalid", "port": download.port, "network": "xhttp", "security": "tls",
+                        "tlsSettings": {"serverName": "vless-core.test"},
+                        "xhttpSettings": {"path": "/download", "extra": {**shared, "xmux": {"maxConnections": 1}}}}
+                original = f.uri(upload.port, "xhttp", "tls", protocol=protocol, mode="stream-up", path="/upload",
+                                 extra=json.dumps({**shared, "xmux": {"maxConnections": 1}, "downloadSettings": down}))
+                prepared = subprocess.run([str(BUILD / "test_runtime_uri"), "--runtime-on" if enabled else "--runtime-off"],
+                                          input=original, text=True, capture_output=True, timeout=5, check=True).stdout.strip()
+                pins = ["--server-ips", "127.0.0.1", "--download-server-ips", "127.0.0.3,127.0.0.2"]
+                with f.cli(prepared, extra=pins, environment={"VLESS_CA_BUNDLE": str(cert)}) as client:
+                    for index in range(3):
+                        with f.socks_connect(client.port, target.port) as connection:
+                            f.exchange(connection, b"\x00\x00" + bytes(range(256)) * 512 + bytes([index]))
+                    expected = 1 if enabled else 3
+                    if len(upload.connections) != expected or len(download.connections) != expected or target.errors:
+                        raise AssertionError("XMUX toggle damaged independent channels or their physical connection sharing")
+            print(f"PASS app/core/Xray: Use-XMUX/{int(enabled)}/{protocol}/independent-download")
     for protocol, transport, security in (("vless", "tcp", "none"), ("trojan", "ws", "tls"),
                                           ("vmess", "grpc", "tls"), ("shadowsocks", "xhttp", "reality")):
         requests = []

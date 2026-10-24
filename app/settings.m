@@ -585,6 +585,7 @@ static void VCApplySettingsCell(UITableViewCell *cell, NSString *title, NSString
 @synthesize autoUpdate = _autoUpdate;
 @synthesize preserveCustomNames = _preserveCustomNames;
 @synthesize sortSubscriptionsByPing = _sortSubscriptionsByPing;
+@synthesize useXmux = _useXmux;
 @synthesize stealthMode = _stealthMode;
 @synthesize darkTheme = _darkTheme;
 @synthesize automaticUpdateChecks = _automaticUpdateChecks;
@@ -620,6 +621,13 @@ static void VCApplySettingsCell(UITableViewCell *cell, NSString *title, NSString
     _sortSubscriptionsByPing = [sw isOn];
     if ([_delegate respondsToSelector:@selector(settingsVC:didChangeSortSubscriptionsByPing:)]) {
         [_delegate settingsVC:self didChangeSortSubscriptionsByPing:_sortSubscriptionsByPing];
+    }
+}
+
+- (void)useXmuxSwitchChanged:(UISwitch *)sw {
+    _useXmux = [sw isOn];
+    if ([_delegate respondsToSelector:@selector(settingsVC:didChangeUseXmux:)]) {
+        [_delegate settingsVC:self didChangeUseXmux:_useXmux];
     }
 }
 
@@ -758,6 +766,7 @@ static void VCApplySettingsCell(UITableViewCell *cell, NSString *title, NSString
     _autoUpdateSwitch.onTintColor = VCAccentColor();
     _preserveCustomNamesSwitch.onTintColor = VCAccentColor();
     _sortSubscriptionsByPingSwitch.onTintColor = VCAccentColor();
+    _useXmuxSwitch.onTintColor = VCAccentColor();
     _stealthSwitch.onTintColor = VCAccentColor();
     _automaticUpdateChecksSwitch.onTintColor = VCAccentColor();
     _preferGitHubLegacySwitch.onTintColor = VCAccentColor();
@@ -813,6 +822,10 @@ static void VCApplySettingsCell(UITableViewCell *cell, NSString *title, NSString
     [_sortSubscriptionsByPingSwitch setOn:_sortSubscriptionsByPing animated:NO];
     [_sortSubscriptionsByPingSwitch addTarget:self action:@selector(sortSubscriptionsByPingSwitchChanged:) forControlEvents:UIControlEventValueChanged];
 
+    _useXmuxSwitch = [[UISwitch alloc] initWithFrame:CGRectZero];
+    [_useXmuxSwitch setOn:_useXmux animated:NO];
+    [_useXmuxSwitch addTarget:self action:@selector(useXmuxSwitchChanged:) forControlEvents:UIControlEventValueChanged];
+
     _automaticUpdateChecksSwitch = [[UISwitch alloc] initWithFrame:CGRectZero];
     [_automaticUpdateChecksSwitch setOn:_automaticUpdateChecks animated:NO];
     [_automaticUpdateChecksSwitch addTarget:self
@@ -860,7 +873,7 @@ static void VCApplySettingsCell(UITableViewCell *cell, NSString *title, NSString
 - (NSInteger)tableView:(UITableView *)tableView numberOfRowsInSection:(NSInteger)section {
     (void)tableView;
     if (section == 0) return 4;
-    if (section == 1) return 3;
+    if (section == 1) return 4;
     if (section == 2) return 3;
     if (section == 3) return 2;
     if (section == 4 || section == 5) return 1;
@@ -905,6 +918,9 @@ static void VCApplySettingsCell(UITableViewCell *cell, NSString *title, NSString
     }
     if (indexPath.section == 1 && indexPath.row == 2) {
         return @"Xray version spoof";
+    }
+    if (indexPath.section == 1 && indexPath.row == 3) {
+        return @"Use XMUX";
     }
     if (indexPath.section == 2 && indexPath.row == 0) {
         return @"Light";
@@ -963,6 +979,9 @@ static void VCApplySettingsCell(UITableViewCell *cell, NSString *title, NSString
     }
     if (indexPath.section == 1 && indexPath.row == 2) {
         return VCSelectedXrayVersionText();
+    }
+    if (indexPath.section == 1 && indexPath.row == 3) {
+        return @"Use XMUX for supported configs";
     }
     if (indexPath.section == 2 && indexPath.row == 0) {
         return @"Use the light color scheme";
@@ -1056,6 +1075,17 @@ static void VCApplySettingsCell(UITableViewCell *cell, NSString *title, NSString
         cell.selectionStyle = UITableViewCellSelectionStyleNone;
         [_sortSubscriptionsByPingSwitch setOn:_sortSubscriptionsByPing animated:NO];
         cell.accessoryView = _sortSubscriptionsByPingSwitch;
+        [self applySettingsMarqueesToCell:cell title:[self settingsTitleTextForIndexPath:indexPath] detail:[self settingsDetailTextForIndexPath:indexPath]];
+        return cell;
+    }
+
+    if (indexPath.section == 1 && indexPath.row == 3) {
+        static NSString *identifier = @"SettingsUseXmuxCell";
+        UITableViewCell *cell = [tableView dequeueReusableCellWithIdentifier:identifier];
+        if (!cell) cell = [[[UITableViewCell alloc] initWithStyle:UITableViewCellStyleSubtitle reuseIdentifier:identifier] autorelease];
+        cell.selectionStyle = UITableViewCellSelectionStyleNone;
+        [_useXmuxSwitch setOn:_useXmux animated:NO];
+        cell.accessoryView = _useXmuxSwitch;
         [self applySettingsMarqueesToCell:cell title:[self settingsTitleTextForIndexPath:indexPath] detail:[self settingsDetailTextForIndexPath:indexPath]];
         return cell;
     }
@@ -1345,6 +1375,7 @@ static void VCApplySettingsCell(UITableViewCell *cell, NSString *title, NSString
     [_autoUpdateSwitch release];
     [_preserveCustomNamesSwitch release];
     [_sortSubscriptionsByPingSwitch release];
+    [_useXmuxSwitch release];
     [_stealthSwitch release];
     [_automaticUpdateChecksSwitch release];
     [_preferGitHubLegacySwitch release];

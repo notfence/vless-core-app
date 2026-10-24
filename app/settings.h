@@ -8,6 +8,7 @@
 - (void)settingsVC:(SettingsVC *)vc didChangeAutomaticUpdateChecks:(BOOL)enabled;
 - (void)settingsVC:(SettingsVC *)vc didChangePreserveCustomSubscriptionNames:(BOOL)enabled;
 - (void)settingsVC:(SettingsVC *)vc didChangeSortSubscriptionsByPing:(BOOL)enabled;
+- (void)settingsVC:(SettingsVC *)vc didChangeUseXmux:(BOOL)enabled;
 - (void)settingsVCDidChangePingSettings:(SettingsVC *)vc;
 - (void)settingsVC:(SettingsVC *)vc didChangeStealthMode:(BOOL)enabled;
 - (void)settingsVC:(SettingsVC *)vc didChangeDarkTheme:(BOOL)enabled;
@@ -41,6 +42,7 @@
     UISwitch *_autoUpdateSwitch;
     UISwitch *_preserveCustomNamesSwitch;
     UISwitch *_sortSubscriptionsByPingSwitch;
+    UISwitch *_useXmuxSwitch;
     UISwitch *_stealthSwitch;
     UISwitch *_automaticUpdateChecksSwitch;
     UISwitch *_preferGitHubLegacySwitch;
@@ -49,6 +51,7 @@
     BOOL _autoUpdate;
     BOOL _preserveCustomNames;
     BOOL _sortSubscriptionsByPing;
+    BOOL _useXmux;
     BOOL _stealthMode;
     BOOL _darkTheme;
     BOOL _automaticUpdateChecks;
@@ -58,6 +61,7 @@
 @property (nonatomic, assign) BOOL autoUpdate;
 @property (nonatomic, assign) BOOL preserveCustomNames;
 @property (nonatomic, assign) BOOL sortSubscriptionsByPing;
+@property (nonatomic, assign) BOOL useXmux;
 @property (nonatomic, assign) BOOL stealthMode;
 @property (nonatomic, assign) BOOL darkTheme;
 @property (nonatomic, assign) BOOL automaticUpdateChecks;

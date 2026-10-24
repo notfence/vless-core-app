@@ -14,6 +14,7 @@
     NSDictionary *_profileMetadata;
 }
 - (NSDictionary *)metadataForURI:(NSString *)uri;
+- (NSString *)runtimeURI:(NSString *)uri useXmux:(BOOL)useXmux error:(NSString **)error;
 - (BOOL)isConfigurationURI:(NSString *)uri;
 - (void)prepareMetadataForConfigurations:(NSArray *)configs subscriptions:(NSArray *)subscriptions;
 - (NSDictionary *)preparedMetadataForConfigurations:(NSArray *)configs subscriptions:(NSArray *)subscriptions additionalMetadata:(NSDictionary *)additional;

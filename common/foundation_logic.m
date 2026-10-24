@@ -21,6 +21,11 @@ BOOL VCAppearanceIsDarkInDefaults(id defaults) {
     return [defaults boolForKey:kDefaultsDarkThemeKey];
 }
 
+BOOL VCUseXmuxInDefaults(id defaults) {
+    id value=[defaults objectForKey:kDefaultsUseXmuxKey];
+    return !value || [value boolValue];
+}
+
 NSInteger VCNormalizedPingTimeoutSeconds(double seconds) {
     if (!isfinite(seconds)) return kVCPingTimeoutDefaultSeconds;
     if (seconds <= kVCPingTimeoutMinimumSeconds) return kVCPingTimeoutMinimumSeconds;

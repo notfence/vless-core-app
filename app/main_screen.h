@@ -43,6 +43,7 @@
     NSString *_availableReleaseURL;
     NSString *_availableUpdateVersion;
     NSString *_pendingReconnectURI;
+    NSString *_pendingReconnectRuntimeURI;
 
     NSMutableArray *_configs;
     NSMutableArray *_subscriptions;

@@ -44,7 +44,8 @@
 
         if (pingType == VCPingTypeProxyGET) {
             NSString *xrayVersion = VCActiveXrayVersion();
-            rc = ProxyGetViaTempCoreMs([uri UTF8String], [xrayVersion UTF8String],
+            NSString *runtimeURI = [VCProfiles() runtimeURI:uri useXmux:[[payload objectForKey:@"use_xmux"] boolValue] error:NULL];
+            if (runtimeURI) rc = ProxyGetViaTempCoreMs([runtimeURI UTF8String], [xrayVersion UTF8String],
                                        timeoutMs, 2, &latencyMs, cancellation, [payload objectForKey:@"probe_url"]);
         } else if (pingType == VCPingTypeTCP) {
             rc = ConnectLatencyBestOfNMs([host UTF8String], port, timeoutMs, 2, &latencyMs, cancellation);
@@ -148,7 +149,10 @@
                                     nil];
     [payload setObject:[NSNumber numberWithUnsignedInteger:_pingNetworkGeneration] forKey:@"network_generation"];
     [payload setObject:@(VCPingTimeoutSecondsInDefaults([NSUserDefaults standardUserDefaults])*1000) forKey:@"timeout_ms"];
-    if (pingType == VCPingTypeProxyGET) [payload setObject:[[VCSelectedProxyPingURL() copy] autorelease] forKey:@"probe_url"];
+    if (pingType == VCPingTypeProxyGET) {
+        [payload setObject:[[VCSelectedProxyPingURL() copy] autorelease] forKey:@"probe_url"];
+        [payload setObject:@(VCUseXmuxInDefaults([NSUserDefaults standardUserDefaults])) forKey:@"use_xmux"];
+    }
     if (batchIdentifier && batchToken) {
         [payload setObject:batchIdentifier forKey:@"batch_identifier"];
         [payload setObject:batchToken forKey:@"batch_token"];

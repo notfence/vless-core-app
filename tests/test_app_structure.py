@@ -71,7 +71,7 @@ def main():
         raise AssertionError('app/ping-type-and-url-must-have-a-dedicated-ping-menu')
     ping_settings = settings_source.split('@implementation VCPingSettingsVC', 1)[1].split('@end', 1)[0]
     parent_settings = settings_source.split('@implementation SettingsVC', 1)[1].split('@end', 1)[0]
-    if 'return @"Ping";' not in parent_settings or 'if (section == 1) return 3;' not in parent_settings or 'VCPingSettingsVC alloc' not in parent_settings:
+    if 'return @"Ping";' not in parent_settings or 'if (section == 1) return 4;' not in parent_settings or 'VCPingSettingsVC alloc' not in parent_settings:
         raise AssertionError('app/network-must-open-ping-menu-instead-of-exposing-its-fields')
     if 'kVCSettingsProxyPingURLAlertTag' in parent_settings or 'otherButtonTitles:@"Proxy GET"' in parent_settings:
         raise AssertionError('app/ping-editors-must-not-remain-in-parent-settings')
@@ -155,7 +155,23 @@ def main():
         if required not in apply_sort:
             raise AssertionError('app/ping-sort-must-wait-for-batch-and-interactions-and-only-reload-on-change')
     ping_source = (ROOT / 'app/main_ping.m').read_text()
+    for required in ('return @"Use XMUX";', 'return @"Use XMUX for supported configs";', 'SettingsUseXmuxCell', 'cell.accessoryView = _useXmuxSwitch;', '[_useXmuxSwitch release]'):
+        if required not in parent_settings:
+            raise AssertionError('app/xmux-must-use-the-requested-title-description-and-shared-settings-style')
+    xmux_setting = main_settings.split('- (void)settingsVC:(SettingsVC *)vc didChangeUseXmux:', 1)[1].split('\n}', 1)[0]
+    if '[defaults setBool:enabled forKey:kDefaultsUseXmuxKey]' not in xmux_setting or 'VCSelectedPingType() == VCPingTypeProxyGET' not in xmux_setting or 'saveData' in xmux_setting or 'SendCommand' in xmux_setting:
+        raise AssertionError('app/xmux-setting-must-save-without-rewriting-profiles-or-interrupting-vpn-and-tcp-icmp')
+    reconnect_prepare = connection.split('- (void)reconnectToURIIfNeededFrom:', 1)[1].split('- (void)beginPendingReconnect', 1)[0]
+    if reconnect_prepare.index('runtimeURI:newURI') > reconnect_prepare.index('_pendingReconnectURI = [newURI copy]') or '_pendingReconnectRuntimeURI = [runtimeURI copy]' not in reconnect_prepare:
+        raise AssertionError('app/reconnect-must-prepare-and-snapshot-xmux-before-queuing-disconnect')
+    reconnect = connection.split('- (void)beginPendingReconnect {', 1)[1].split('- (void)togglePressed', 1)[0]
+    if 'ConnectCommandForURI(runtimeURI, protectLogs)' not in reconnect or 'ConnectCommandForURI(uri, protectLogs)' in connection or '[_pendingReconnectRuntimeURI isEqualToString:runtimeURI]' not in reconnect:
+        raise AssertionError('app/connect-and-reconnect-must-use-the-prepared-uri-without-losing-new-settings')
+    if '[payload setObject:@(VCUseXmuxInDefaults([NSUserDefaults standardUserDefaults])) forKey:@"use_xmux"]' not in ping_source:
+        raise AssertionError('app/proxy-get-must-snapshot-xmux-before-enqueuing')
     worker = ping_source.split('- (void)pingWorker:', 1)[1].split('- (void)pingResultOnMain:', 1)[0]
+    if 'runtimeURI:uri useXmux:[[payload objectForKey:@"use_xmux"] boolValue]' not in worker or 'if (runtimeURI) rc = ProxyGetViaTempCoreMs([runtimeURI UTF8String]' not in worker or '[out setObject:([uri isKindOfClass:[NSString class]] ? uri : @"") forKey:@"uri"]' not in worker:
+        raise AssertionError('app/proxy-get-must-use-runtime-settings-but-report-the-original-profile-and-not-fallback-on-failure')
     if '[payload objectForKey:@"timeout_ms"]' not in worker or 'VCPingTimeoutSecondsInDefaults' not in ping_source:
         raise AssertionError('app/ping-timeout-must-be-snapshotted-before-enqueuing')
     if '3500, 2' in worker or '5000, 2' in worker or worker.count('timeoutMs, 2, &latencyMs') != 3:

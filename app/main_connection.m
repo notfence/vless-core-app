@@ -296,9 +296,18 @@
         return;
     }
 
+    NSString *preparationError = nil;
+    NSString *runtimeURI = [VCProfiles() runtimeURI:newURI useXmux:VCUseXmuxInDefaults([NSUserDefaults standardUserDefaults]) error:&preparationError];
+    if (!runtimeURI) {
+        [self showStatus:preparationError ok:NO];
+        return;
+    }
+
     [self stopAllPings];
     [_pendingReconnectURI release];
     _pendingReconnectURI = [newURI copy];
+    [_pendingReconnectRuntimeURI release];
+    _pendingReconnectRuntimeURI = [runtimeURI copy];
     _pendingReconnectProtectLogs = protectLogs;
     VCRecordAppEvent(@"connection", @"Configuration switch queued", protectLogs ? @"protected_logs=1" : @"protected_logs=0");
     [NSObject cancelPreviousPerformRequestsWithTarget:self
@@ -316,15 +325,18 @@
     VCRecordAppEvent(@"connection", @"Configuration switch started", nil);
 
     NSString *uri = [_pendingReconnectURI copy];
+    NSString *runtimeURI = [_pendingReconnectRuntimeURI copy];
     BOOL protectLogs = _pendingReconnectProtectLogs;
     [_pendingReconnectURI release];
     _pendingReconnectURI = nil;
+    [_pendingReconnectRuntimeURI release];
+    _pendingReconnectRuntimeURI = nil;
     _pendingReconnectProtectLogs = NO;
     _reconnectInProgress = YES;
     ++_connectionActionGeneration;
 
     NSString *routingCommand = [[NSString stringWithFormat:@"ROUTING\t%@\n", RoutingPolicyText()] copy];
-    NSString *connectCommand = [ConnectCommandForURI(uri, protectLogs) copy];
+    NSString *connectCommand = [ConnectCommandForURI(runtimeURI, protectLogs) copy];
 
     dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_DEFAULT, 0), ^{
         NSAutoreleasePool *pool = [[NSAutoreleasePool alloc] init];
@@ -368,9 +380,12 @@
 
             _reconnectInProgress = NO;
             if ([_pendingReconnectURI isEqualToString:uri] &&
+                [_pendingReconnectRuntimeURI isEqualToString:runtimeURI] &&
                 _pendingReconnectProtectLogs == protectLogs) {
                 [_pendingReconnectURI release];
                 _pendingReconnectURI = nil;
+                [_pendingReconnectRuntimeURI release];
+                _pendingReconnectRuntimeURI = nil;
                 _pendingReconnectProtectLogs = NO;
             }
             if ([_pendingReconnectURI length]) {
@@ -385,6 +400,7 @@
             [connectResponse release];
             [routingCommand release];
             [connectCommand release];
+            [runtimeURI release];
             [uri release];
         });
         [pool drain];
@@ -413,10 +429,13 @@
                                                    object:nil];
         [_pendingReconnectURI release];
         _pendingReconnectURI = nil;
+        [_pendingReconnectRuntimeURI release];
+        _pendingReconnectRuntimeURI = nil;
         _pendingReconnectProtectLogs = NO;
     }
     BOOL disconnecting = _connected;
     NSString *uri = nil;
+    NSString *runtimeURI = nil;
     BOOL protectLogs = NO;
     if (!disconnecting) {
         uri = [self uriForCurrentSelection];
@@ -437,10 +456,16 @@
         }
 
         protectLogs = [self selectedSubscriptionIsHappEncrypted];
+        NSString *preparationError = nil;
+        runtimeURI = [VCProfiles() runtimeURI:uri useXmux:VCUseXmuxInDefaults([NSUserDefaults standardUserDefaults]) error:&preparationError];
+        if (!runtimeURI) {
+            [self showStatus:preparationError ok:NO];
+            return;
+        }
     }
 
     NSString *routingCommand = disconnecting ? nil : [NSString stringWithFormat:@"ROUTING\t%@\n", RoutingPolicyText()];
-    NSString *command = disconnecting ? @"DISCONNECT\n" : ConnectCommandForURI(uri, protectLogs);
+    NSString *command = disconnecting ? @"DISCONNECT\n" : ConnectCommandForURI(runtimeURI, protectLogs);
     _connectionActionInProgress = YES;
     ++_connectionActionGeneration;
     [self updateConnectButton];

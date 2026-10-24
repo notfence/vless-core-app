@@ -2,6 +2,7 @@
 #import "foundation_logic.h"
 #import "app_constants.h"
 #import "subscription_task.h"
+#include "../../vless-core-cli/include/json.h"
 #include <arpa/inet.h>
 #include <errno.h>
 #include <ctype.h>
@@ -367,7 +368,209 @@ static NSDictionary *VCProfileSSMetadata(NSString *uri) {
     VCProfileClear(data); return result;
 }
 
+typedef enum { VCRuntimeExtra, VCRuntimeVMess, VCRuntimeDownload, VCRuntimeSettings } VCRuntimeJSONScope;
+
+static id VCProfileJSONValue(NSString *text) {
+    NSMutableData *data=[NSMutableData dataWithBytes:"[" length:1];
+    [data appendData:[text dataUsingEncoding:NSUTF8StringEncoding]];
+    [data appendBytes:"]" length:1];
+    id values=[NSJSONSerialization JSONObjectWithData:data options:0 error:NULL];
+    VCProfileClear(data);
+    return [values isKindOfClass:[NSArray class]] && [values count] == 1 ? [values objectAtIndex:0] : nil;
+}
+
+static NSArray *VCProfileJSONMembers(NSString *text) {
+    if (![text isKindOfClass:[NSString class]]) return nil;
+    NSMutableData *data=[[text dataUsingEncoding:NSUTF8StringEncoding] mutableCopy];
+    if (!data) return nil;
+    if (memchr([data bytes],0,[data length])) { VCProfileClear(data); [data release]; return nil; }
+    uint8_t zero=0; [data appendBytes:&zero length:1];
+    core_json_t *root=core_json_parse([data bytes],NULL,0);
+    BOOL valid=root && root->type == CORE_JSON_OBJECT;
+    core_json_free(root); VCProfileClear(data); [data release];
+    if (!valid) return nil;
+    NSMutableArray *members=[NSMutableArray array];
+    NSUInteger start=0,colon=NSNotFound; unsigned depth=0; BOOL quoted=NO,escape=NO;
+    NSCharacterSet *spaces=[NSCharacterSet characterSetWithCharactersInString:@" \t\r\n"];
+    for (NSUInteger i=0;i<[text length];i++) {
+        unichar c=[text characterAtIndex:i];
+        if (quoted) { if (escape) escape=NO; else if (c == '\\') escape=YES; else if (c == '"') quoted=NO; continue; }
+        if (c == '"') { quoted=YES; continue; }
+        if (c == '{' || c == '[') { depth++; if (depth == 1) start=i+1; continue; }
+        if (depth == 1 && c == ':' && colon == NSNotFound) colon=i;
+        if (depth == 1 && (c == ',' || c == '}')) {
+            NSString *entry=[text substringWithRange:NSMakeRange(start,i-start)];
+            if (![[entry stringByTrimmingCharactersInSet:spaces] length]) {
+                if (c != '}' || [members count]) return nil;
+            } else {
+                if (colon == NSNotFound || colon < start) return nil;
+                NSString *key=VCProfileJSONValue([text substringWithRange:NSMakeRange(start,colon-start)]);
+                if (![key isKindOfClass:[NSString class]]) return nil;
+                NSString *value=[[text substringWithRange:NSMakeRange(colon+1,i-colon-1)] stringByTrimmingCharactersInSet:spaces];
+                id object=VCProfileJSONValue(value);
+                if (!object) return nil;
+                [members addObject:@{@"key":key,@"raw":value,@"value":object,@"start":@(start),@"end":@(i),@"colon":@(colon)}];
+            }
+            start=i+1; colon=NSNotFound;
+        }
+        if (c == '}' || c == ']') { if (!depth) return nil; depth--; }
+    }
+    return members;
+}
+
+static NSArray *VCProfileXmuxSignature(NSString *text) {
+    NSArray *members=VCProfileJSONMembers(text);
+    if (!members) return nil;
+    NSArray *names=@[@"maxconcurrency",@"maxconnections",@"cmaxreusetimes",@"hmaxrequesttimes",@"hmaxreusablesecs",@"hkeepaliveperiod"];
+    NSMutableArray *values=[NSMutableArray arrayWithObjects:@[@0,@0],@[@0,@0],@[@0,@0],@[@0,@0],@[@0,@0],@[@0,@0],nil];
+    unsigned seen=0;
+    for (NSDictionary *member in members) {
+        NSUInteger index=[names indexOfObject:[[member objectForKey:@"key"] lowercaseString]];
+        if (index == NSNotFound) continue;
+        id value=[member objectForKey:@"value"];
+        BOOL number=[value isKindOfClass:[NSNumber class]] && !VCProfileBoolean(value);
+        if (![value isKindOfClass:[NSString class]] && !number) return nil;
+        if (index == 5 && !number) return nil;
+        NSString *range=number ? [member objectForKey:@"raw"] : value;
+        unsigned low=0,high=0;
+        NSArray *parsed=nil;
+        if (index == 5 && [range isEqual:@"-1"]) parsed=@[@(-1),@(-1)];
+        else if (![range length] && index != 5) parsed=@[@0,@0];
+        else {
+            NSArray *parts=[range componentsSeparatedByString:@"-"];
+            if ([parts count] > (index == 5 ? 1U : 2U) || !VCProfileUnsignedScalar([parts objectAtIndex:0],INT_MAX,&low) ||
+                !VCProfileUnsignedScalar([parts lastObject],INT_MAX,&high) || low > high) return nil;
+            parsed=@[@(low),@(high)];
+        }
+        if ((seen & (1U<<index)) && ![[values objectAtIndex:index] isEqual:parsed]) return nil;
+        [values replaceObjectAtIndex:index withObject:parsed]; seen|=1U<<index;
+    }
+    if ([[[values objectAtIndex:0] lastObject] intValue] && [[[values objectAtIndex:1] lastObject] intValue]) return nil;
+    BOOL any=NO;
+    for (NSArray *range in values) if ([[range lastObject] intValue]) any=YES;
+    if (!any) {
+        [values replaceObjectAtIndex:1 withObject:@[@6,@6]];
+        [values replaceObjectAtIndex:3 withObject:@[@600,@900]];
+        [values replaceObjectAtIndex:4 withObject:@[@1800,@3000]];
+    }
+    return values;
+}
+
+static NSString *VCProfileJSONString(NSString *text) {
+    NSMutableData *data=[[NSJSONSerialization dataWithJSONObject:@[text] options:0 error:NULL] mutableCopy];
+    NSString *array=[[[NSString alloc] initWithData:data encoding:NSUTF8StringEncoding] autorelease];
+    NSString *result=[array length] >= 2 ? [array substringWithRange:NSMakeRange(1,[array length]-2)] : nil;
+    VCProfileClear(data); [data release]; return result;
+}
+
+static NSString *VCProfileRuntimeJSON(NSString *text,VCRuntimeJSONScope scope,unsigned level,id *signature) {
+    if (level > 16) return nil;
+    NSArray *members=VCProfileJSONMembers(text);
+    if (!members) return nil;
+    NSMutableDictionary *seen=[NSMutableDictionary dictionary],*original=[NSMutableDictionary dictionary];
+    NSMutableSet *modified=[NSMutableSet set];
+    NSMutableArray *pieces=[NSMutableArray array];
+    BOOL changed=NO;
+    for (NSDictionary *member in members) {
+        NSString *key=[[member objectForKey:@"key"] lowercaseString],*canonical=key;
+        NSString *raw=[member objectForKey:@"raw"],*replacement=raw;
+        id value=[member objectForKey:@"value"],childSignature=value;
+        BOOL remove=NO,childChanged=NO;
+        if ((scope == VCRuntimeExtra || scope == VCRuntimeSettings || scope == VCRuntimeVMess) && [key isEqual:@"xmux"]) {
+            childSignature=VCProfileXmuxSignature(raw);
+            if (!childSignature) return nil;
+            remove=YES;
+        } else {
+            VCRuntimeJSONScope childScope=VCRuntimeExtra; BOOL descend=NO,asString=NO;
+            if ((scope == VCRuntimeVMess || scope == VCRuntimeSettings) && [key isEqual:@"extra"]) {
+                descend=YES; asString=scope == VCRuntimeVMess && [value isKindOfClass:[NSString class]];
+            } else if ((scope == VCRuntimeExtra || scope == VCRuntimeVMess) && [key isEqual:@"downloadsettings"]) {
+                descend=YES; childScope=VCRuntimeDownload; asString=scope == VCRuntimeVMess && [value isKindOfClass:[NSString class]];
+            } else if (scope == VCRuntimeDownload && ([key isEqual:@"xhttpsettings"] || [key isEqual:@"splithttpsettings"])) {
+                descend=YES; childScope=VCRuntimeSettings; canonical=@"xhttpsettings";
+            }
+            if (descend) {
+                NSString *input=asString ? value : raw;
+                NSString *output=VCProfileRuntimeJSON(input,childScope,level+1,&childSignature);
+                if (!output) return nil;
+                childChanged=output != input;
+                if (childChanged) replacement=asString ? VCProfileJSONString(output) : output;
+                if (!replacement) return nil;
+            }
+        }
+        id previous=[seen objectForKey:canonical];
+        if (previous && (remove || childChanged || [modified containsObject:canonical]) && ![previous isEqual:childSignature]) return nil;
+        [seen setObject:childSignature forKey:canonical];
+        [original setObject:childSignature forKey:[member objectForKey:@"key"]];
+        if (remove || childChanged) { [modified addObject:canonical]; changed=YES; }
+        if (!remove) {
+            NSUInteger start=[[member objectForKey:@"start"] unsignedIntegerValue],end=[[member objectForKey:@"end"] unsignedIntegerValue];
+            NSString *piece=[text substringWithRange:NSMakeRange(start,end-start)];
+            if (childChanged) {
+                NSUInteger colon=[[member objectForKey:@"colon"] unsignedIntegerValue];
+                piece=[[text substringWithRange:NSMakeRange(start,colon+1-start)] stringByAppendingString:replacement];
+            }
+            [pieces addObject:piece];
+        }
+    }
+    if (signature) *signature=original;
+    if (!changed) return text;
+    return [NSString stringWithFormat:@"{%@}",[pieces componentsJoinedByString:@","]];
+}
+
 @implementation VCProfileLogic
+
+- (NSString *)runtimeURI:(NSString *)uri useXmux:(BOOL)useXmux error:(NSString **)error {
+    if (error) *error=nil;
+    NSString *result=nil;
+    if (![uri isKindOfClass:[NSString class]] || ![uri length] || [uri lengthOfBytesUsingEncoding:NSUTF8StringEncoding] > kVCMaximumConfigURIBytes) goto failure;
+    if (useXmux) return uri;
+    NSDictionary *metadata=[self metadataForURI:uri];
+    if ([metadata objectForKey:@"reason"]) goto failure;
+    if (![[metadata objectForKey:@"transport"] isEqual:@"xhttp"]) return uri;
+    NSRange hash=[uri rangeOfString:@"#"];
+    NSUInteger end=hash.location == NSNotFound ? [uri length] : hash.location;
+    NSString *body=[uri substringToIndex:end];
+    if ([[self schemeFromURIString:uri] isEqual:@"vmess"] && [body rangeOfString:@"@"].location == NSNotFound) {
+        NSMutableData *data=VCProfileBase64([body substringFromIndex:8]);
+        NSString *text=data ? [[[NSString alloc] initWithData:data encoding:NSUTF8StringEncoding] autorelease] : nil;
+        NSString *prepared=text ? VCProfileRuntimeJSON(text,VCRuntimeVMess,0,NULL) : nil;
+        VCProfileClear(data);
+        if (!prepared) goto failure;
+        if (prepared == text) return uri;
+        data=[[prepared dataUsingEncoding:NSUTF8StringEncoding] mutableCopy];
+        NSString *encoded=[data base64EncodedStringWithOptions:0];
+        VCProfileClear(data); [data release];
+        if (!encoded) goto failure;
+        result=[NSString stringWithFormat:@"%@%@%@",[uri substringToIndex:8],encoded,[uri substringFromIndex:end]];
+    } else {
+        NSRange question=[body rangeOfString:@"?"];
+        if (question.location == NSNotFound) return uri;
+        NSArray *pairs=[[body substringFromIndex:question.location+1] componentsSeparatedByString:@"&"];
+        NSMutableArray *prepared=[NSMutableArray arrayWithCapacity:[pairs count]]; BOOL changed=NO;
+        for (NSString *pair in pairs) {
+            NSRange equal=[pair rangeOfString:@"="];
+            NSString *key=equal.location == NSNotFound ? nil : [self canonicalConfigQueryKey:[pair substringToIndex:equal.location]];
+            NSString *next=pair;
+            if ([key isEqual:@"extra"] || [key isEqual:@"downloadsettings"]) {
+                NSString *value=[self strictDecodedConfigQueryComponent:[pair substringFromIndex:equal.location+1]];
+                NSString *output=value ? VCProfileRuntimeJSON(value,[key isEqual:@"extra"] ? VCRuntimeExtra : VCRuntimeDownload,0,NULL) : nil;
+                if (!output) goto failure;
+                if (output != value) {
+                    next=[[pair substringToIndex:equal.location+1] stringByAppendingString:[self percentEncodedHappURIValue:output]];
+                    changed=YES;
+                }
+            }
+            [prepared addObject:next];
+        }
+        if (!changed) return uri;
+        result=[NSString stringWithFormat:@"%@?%@%@",[uri substringToIndex:question.location],[prepared componentsJoinedByString:@"&"],[uri substringFromIndex:end]];
+    }
+    if (result && [result lengthOfBytesUsingEncoding:NSUTF8StringEncoding] <= kVCMaximumConfigURIBytes) return result;
+failure:
+    if (error) *error=@"Unable to prepare XMUX settings for this configuration";
+    return nil;
+}
 
 - (void)dealloc {
     [_profileMetadata release];

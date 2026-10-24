@@ -362,6 +362,7 @@
     [_availableReleaseURL release];
     [_availableUpdateVersion release];
     [_pendingReconnectURI release];
+    [_pendingReconnectRuntimeURI release];
     [_logTimer invalidate];
     [_logTimer release];
     [_uptimeTimer invalidate];

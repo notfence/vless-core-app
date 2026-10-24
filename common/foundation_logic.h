@@ -12,6 +12,7 @@ NSString *RoutingPolicyTextInDefaults(id defaults);
 NSString *TrimSimpleString(NSString *s);
 NSInteger VCNormalizedPingTimeoutSeconds(double seconds);
 NSInteger VCPingTimeoutSecondsInDefaults(id defaults);
+BOOL VCUseXmuxInDefaults(id defaults);
 
 BOOL VCIsASCIIHexDigit(unichar value);
 NSData *VCEncryptSecureStorePayload(NSData *plaintext, const unsigned char key[32]);

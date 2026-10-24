@@ -77,6 +77,15 @@
     [self refreshVisibleSubscriptionHeaderAccessories];
 }
 
+- (void)settingsVC:(SettingsVC *)vc didChangeUseXmux:(BOOL)enabled {
+    NSUserDefaults *defaults = [NSUserDefaults standardUserDefaults];
+    if (VCUseXmuxInDefaults(defaults) == enabled) return;
+    [defaults setBool:enabled forKey:kDefaultsUseXmuxKey];
+    [defaults synchronize];
+    if (VCSelectedPingType() == VCPingTypeProxyGET) [self settingsVCDidChangePingSettings:vc];
+    VCRecordAppEvent(@"settings", @"XMUX setting changed", enabled ? @"enabled=1" : @"enabled=0");
+}
+
 - (void)settingsVC:(SettingsVC *)vc didChangeDarkTheme:(BOOL)enabled {
     (void)vc;
     _darkThemeEnabled = enabled;
@@ -108,6 +117,7 @@
     settings.autoUpdate = _autoUpdateSubscriptions;
     settings.preserveCustomNames = _preserveCustomSubscriptionNames;
     settings.sortSubscriptionsByPing = _sortSubscriptionsByPing;
+    settings.useXmux = VCUseXmuxInDefaults([NSUserDefaults standardUserDefaults]);
     settings.stealthMode = _stealthModeEnabled;
     settings.darkTheme = _darkThemeEnabled;
     settings.automaticUpdateChecks = _automaticUpdateChecksEnabled;

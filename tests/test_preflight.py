@@ -14,7 +14,7 @@ def main():
         compiler.chmod(0o755)
         environment = dict(os.environ, VC_TEST_FAIL_SCENARIO="connection/idle-connect-allowed", VC_TEST_COMPILER_MARKER=str(marker))
         build = root / "build"
-        for target in ("app", "daemon", "deb", "tarball", str(build / "app/app/main.o"), str(build / "arm64/zbar/image.o")):
+        for target in ("app", "daemon", "deb", "tarball", str(build / "app/app/main.o"), str(build / "arm64/zbar/image.o"), str(build / "app/core-json.o"), str(build / "arm64/app/core-json.o")):
             result = subprocess.run(["make", "-j8", target, f"BUILD_DIR={build}", f"IOS_CC={compiler}"], cwd=ROOT, env=environment, capture_output=True, text=True, timeout=90)
             output = result.stdout + result.stderr
             if result.returncode == 0 or "FAIL connection/idle-connect-allowed" not in output or marker.exists():

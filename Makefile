@@ -63,12 +63,15 @@ APP_SCREEN_SRC := app/main.m app/main_screen.m app/main_state.m app/main_connect
 APP_SUPPORT_SRC := app/app_support.m app/daemon_client.m app/network_ping.m app/proxy_probe.m app/runtime_info.m app/subscription_fetch.m app/update_checker.m app/diagnostics.m app/appearance.m app/connection_button.m app/main_cells.m app/settings.m app/help_controllers.m app/routing.m app/qr_scanner.m app/subscription_info.m app/import_browser.m
 APP_SRC := $(APP_SCREEN_SRC) $(APP_SUPPORT_SRC) app/flag_label.m $(COMMON_APP_SRC) integrations/happ/happ_crypto.c integrations/karing/karing_backup.m
 APP_HEADERS := $(wildcard app/*.h) integrations/happ/happ_crypto.h integrations/karing/karing_backup.h daemon/vpnctld_protocol.h $(COMMON_APP_HEADERS)
+APP_HEADERS += ../vless-core-cli/include/json.h
 APP_OBJ := \
 	$(patsubst %.m,$(BUILD_DIR)/app/%.o,$(filter %.m,$(APP_SRC))) \
 	$(patsubst %.c,$(BUILD_DIR)/app/%.o,$(filter %.c,$(APP_SRC)))
 APP_ARM64_OBJ := \
 	$(patsubst %.m,$(BUILD_DIR)/arm64/app/%.o,$(filter %.m,$(APP_SRC))) \
 	$(patsubst %.c,$(BUILD_DIR)/arm64/app/%.o,$(filter %.c,$(APP_SRC)))
+APP_OBJ += $(BUILD_DIR)/app/core-json.o
+APP_ARM64_OBJ += $(BUILD_DIR)/arm64/app/core-json.o
 DAEMON_SRC := daemon/vpnctld.c daemon/core_config.c common/daemon_policy.c common/control_auth.c common/helper_monitor.c common/dns_relay.c daemon/socket_peer_pid.c daemon/legacy_loopback.c daemon/legacy_dns.c daemon/vpnicon_statusbar.c daemon/system_proxy.c
 DAEMON_HEADERS := daemon/vpnctld_protocol.h daemon/core_config.h daemon/socket_peer_pid.h daemon/legacy_loopback.h daemon/legacy_dns.h daemon/system_proxy.h common/daemon_policy.h common/control_auth.h common/helper_monitor.h common/dns_relay.h
 BOOTSTRAP_SRC := daemon/vpnctld_bootstrap.c
@@ -188,6 +191,14 @@ check-package-inputs:
 			exit 1; \
 		fi; \
 	done
+
+$(BUILD_DIR)/app/core-json.o: ../vless-core-cli/src/json.c ../vless-core-cli/include/json.h | preflight
+	mkdir -p $(dir $@)
+	PATH="$(IOS_BIN):$$PATH" $(IOS_RUNTIME_ENV) $(IOS_CC) $(APP_CFLAGS) -I../vless-core-cli/include -c $< -o $@
+
+$(BUILD_DIR)/arm64/app/core-json.o: ../vless-core-cli/src/json.c ../vless-core-cli/include/json.h | preflight
+	mkdir -p $(dir $@)
+	PATH="$(IOS_BIN):$$PATH" $(IOS_RUNTIME_ENV) $(IOS_CC) $(APP_ARM64_CFLAGS) -I../vless-core-cli/include -c $< -o $@
 
 $(BUILD_DIR)/zbar/%.o: $(ZBAR_DIR)/%.c $(ZBAR_HEADERS) | preflight
 	mkdir -p $(dir $@)
