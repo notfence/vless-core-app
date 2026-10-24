@@ -251,6 +251,10 @@ int main(int argc, char **argv) {
         [pool drain]; return result;
     }
     NSAutoreleasePool *pool = [[NSAutoreleasePool alloc] init];
+    NSString *incyAdd = @"incy://add/https://example.test/subscription?token=a%2Bb+%2540";
+    CHECK("incy/import-keeps-whole-wrapper", [[VCProfiles() extractImportLinksFromText:incyAdd] isEqual:@[incyAdd]]);
+    NSString *incyUnsupported = @"incy://routing/onadd/https://example.test/rules";
+    CHECK("incy/unsupported-command-not-unwrapped", [[VCProfiles() extractImportLinksFromText:incyUnsupported] isEqual:@[incyUnsupported]]);
     NSString *fixtures = [NSString stringWithContentsOfFile:@"happ_fixtures.txt" encoding:NSUTF8StringEncoding error:NULL];
     CHECK("happ/golden-fixtures-present", [fixtures length] > 0);
     unsigned count = 0;

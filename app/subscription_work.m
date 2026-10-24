@@ -90,12 +90,9 @@
                 if (!decoded) decoded=[self decodeImportTextData:data];
                 decoded=[self safeTrim:decoded];
                 if (![decoded length]) failure=@"Import data is empty or has unsupported encoding";
-                else if ([decoded hasPrefix:@"{"] || [decoded hasPrefix:@"["]) {
-                    report=[VCProfiles() importReportFromHappJSONData:[decoded dataUsingEncoding:NSUTF8StringEncoding]];
+                else {
+                    report=[VCProfiles() textImportReportFromText:decoded];
                     links=[report objectForKey:@"uris"];
-                } else {
-                    links=[VCProfiles() extractImportLinksFromText:decoded];
-                    if (![links count]) { report=[VCProfiles() subscriptionImportReportFromData:data]; links=[report objectForKey:@"uris"]; }
                 }
                 if ([report objectForKey:@"error"]) failure=[report objectForKey:@"error"];
             }
@@ -122,7 +119,7 @@
                         [draft addObject:@{@"name":name,@"uri":uri}]; [seen addObject:uri]; accepted++;
                         [task profileMetadataPrepared:@{uri:metadata}];
                     } else if (!reason) [task recordDuplicate];
-                } else if ([self isSubscriptionURL:uri]) {
+                } else if ([self isSubscriptionURL:uri] || VCIncyIsCryptLink(uri)) {
                     if (!happ) queued=uri;
                     if (![seenURLs containsObject:uri]) { [urls addObject:queued]; [seenURLs addObject:uri]; }
                     else [task recordDuplicate];
@@ -132,6 +129,7 @@
                 [entryPool drain];
             }
             if (!report) [task addAccepted:accepted skipped:skipped];
+            else [task addAccepted:0 skipped:skipped-[[report objectForKey:@"skipped"] unsignedIntegerValue]];
             NSDictionary *warnings=@{@"skipped":@(skipped),@"issues":issues};
             dispatch_async(dispatch_get_main_queue(), ^{
                 if (task != _subscriptionTask || task.isCancelled || revision != _configurationRevision || failure) {

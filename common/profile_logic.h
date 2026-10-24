@@ -24,6 +24,7 @@
 - (NSString *)URIFromHappJSONConfig:(NSDictionary *)config;
 - (NSDictionary *)importReportFromHappJSONData:(NSData *)data;
 - (NSDictionary *)subscriptionImportReportFromData:(NSData *)data;
+- (NSDictionary *)textImportReportFromText:(NSString *)text;
 - (BOOL)appendTransportSettings:(NSDictionary *)stream query:(NSMutableArray *)query;
 - (NSString *)decodedURLComponent:(NSString *)component;
 - (NSString *)decodedSubscriptionTitleValue:(NSString *)rawValue;

@@ -115,7 +115,7 @@ static BOOL gVCSecureStoreWritable = YES;
     if ([trim length] == 0) return NO;
 
     NSString *lower = [trim lowercaseString];
-    if ([lower hasPrefix:@"http://"] || [lower hasPrefix:@"https://"] || [lower hasPrefix:@"vless://"] || [lower hasPrefix:@"socks5://"] || [lower hasPrefix:@"happ://"]) return YES;
+    if ([lower hasPrefix:@"http://"] || [lower hasPrefix:@"https://"] || [lower hasPrefix:@"vless://"] || [lower hasPrefix:@"socks5://"] || [lower hasPrefix:@"happ://"] || VCIncyIsLink(trim)) return YES;
     if ([trim rangeOfString:@"/"].location != NSNotFound) return YES;
     if ([trim rangeOfString:@"."].location != NSNotFound) return YES;
     if ([trim rangeOfString:@":"].location != NSNotFound) return YES;

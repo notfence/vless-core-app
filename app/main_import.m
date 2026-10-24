@@ -409,6 +409,7 @@
 
         NSMutableArray *importedSubs = [[NSMutableArray alloc] init];
         NSMutableArray *insecureURLs = [[NSMutableArray alloc] init];
+        NSMutableArray *plainHTTPURLs = [NSMutableArray array];
         NSMutableArray *failureTexts = [[NSMutableArray alloc] init];
         NSMutableDictionary *failureCategories = [[NSMutableDictionary alloc] init];
         NSUInteger failedCount = 0;
@@ -421,6 +422,22 @@
             BOOL happAddSource = [self isHappAddLink:urlString];
             BOOL happSource = happAddSource || [self isHappEncryptedLink:urlString];
             NSString *subscriptionURL = happAddSource ? [self targetFromHappAddLink:urlString] : urlString;
+            NSDictionary *incy=nil;
+            if (VCIncyIsLink(subscriptionURL)) {
+                NSString *reason=nil;
+                incy=VCIncySubscriptionDescriptor(subscriptionURL,&reason);
+                if (!incy) {
+                    failedCount++;
+                    VCIncrementDiagnosticCategory(failureCategories,@"invalid INCY link");
+                    [failureTexts addObject:@"INCY: invalid subscription link"];
+                    continue;
+                }
+                BOOL plain=URLStringUsesPlainHTTP([incy objectForKey:@"value"]);
+                if (plain && !allowPlainHTTP && !SubscriptionDictionaryAllowsPlainHTTP([sources objectForKey:subscriptionURL])) {
+                    [plainHTTPURLs addObject:urlString];
+                    continue;
+                }
+            }
             if (happAddSource &&
                 (![subscriptionURL isKindOfClass:[NSString class]] ||
                  ![self isSubscriptionURL:subscriptionURL])) {
@@ -440,6 +457,12 @@
                 if (allowInsecureFetch) [source setObject:@(YES) forKey:kSubscriptionAllowInsecureFetchKey];
                 if (happSource) [source setObject:@(YES) forKey:kSubscriptionHappSourceKey];
                 if (allowPlainHTTP && !happSource && URLStringUsesPlainHTTP(subscriptionURL)) [source setObject:@(YES) forKey:kSubscriptionAllowPlainHTTPKey];
+                sub=source;
+            }
+            if (incy) {
+                NSMutableDictionary *source=[NSMutableDictionary dictionaryWithDictionary:sub];
+                if (![sources objectForKey:subscriptionURL]) [source setObject:[[incy objectForKey:@"name"] length] ? [incy objectForKey:@"name"] : @"INCY subscription" forKey:@"name"];
+                if (allowPlainHTTP && URLStringUsesPlainHTTP([incy objectForKey:@"value"])) [source setObject:@(YES) forKey:kSubscriptionAllowPlainHTTPKey];
                 sub=source;
             }
             NSString *errorText = nil;
@@ -563,7 +586,7 @@
             }
             [self showStatus:status ok:([parts count] > 0 || [insecureURLs count] > 0)];
 
-            if ([insecureURLs count] > 0) {
+            if ([insecureURLs count] > 0 && ![plainHTTPURLs count]) {
                 BOOL allHappSources = YES;
                 for (NSString *urlString in insecureURLs) {
                     if (![self isHappEncryptedLink:urlString] && ![self isHappAddLink:urlString]) {
@@ -589,6 +612,12 @@
                               ([NSDate timeIntervalSinceReferenceDate] - diagnosticStarted) * 1000.0]);
 
             [self finishSubscriptionTask:task success:YES];
+            if ([plainHTTPURLs count]) {
+                NSArray *retry=[plainHTTPURLs arrayByAddingObjectsFromArray:insecureURLs];
+                [self showPlainHTTPSubscriptionWarningForCount:[plainHTTPURLs count] confirmation:^{
+                    [self startBackgroundSubscriptionImportForURLs:retry allowInsecureFetch:allowInsecureFetch fallbackSubscriptionsByURL:nil allowPlainHTTP:YES];
+                }];
+            }
             [importedSubs release];
             [insecureURLs release];
             [failureTexts release];

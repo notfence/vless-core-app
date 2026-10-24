@@ -231,6 +231,16 @@ def main():
     if 'updatedSubscriptionDictionaryFromSource:' in refresh or 'startBackgroundSubscriptionRefresh]' not in refresh:
         raise AssertionError('app/single-refresh-must-be-background')
     work = (ROOT / 'app/subscription_work.m').read_text()
+    if 'incy' in (ROOT / 'app/Info.plist').read_text().lower():
+        raise AssertionError('app/incy-must-not-register-a-third-party-url-scheme')
+    if 'textImportReportFromText:decoded' not in work or 'VCIncyIsCryptLink(uri)' not in work:
+        raise AssertionError('app/incy-must-use-background-import-and-preserve-crypt-wrapper')
+    if 'VCIncySubscriptionDescriptor(urlString,errorTextOut)' not in subscriptions or 'fetchURLString=[incy objectForKey:@"value"]' not in subscriptions:
+        raise AssertionError('app/incy-update-must-resolve-source-without-replacing-stored-wrapper')
+    if 'if (incy) fetchErr=VCIncySafeFetchError(fetchErr)' not in subscriptions or 'if (plain && !allowPlainHTTP && !SubscriptionDictionaryAllowsPlainHTTP' not in imports:
+        raise AssertionError('app/incy-must-redact-fetch-errors-and-preserve-http-approval')
+    if 'plainHTTPURLs arrayByAddingObjectsFromArray:insecureURLs' not in imports:
+        raise AssertionError('app/incy-http-confirmation-must-preserve-pending-tls-prompts')
     if 'task != _subscriptionTask' not in work or 'revision != _configurationRevision' not in work:
         raise AssertionError('app/import-results-must-be-generation-checked')
     progress = work.split('- (void)subscriptionTaskProgress:', 1)[1].split('\n}', 1)[0]

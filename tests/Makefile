@@ -13,7 +13,7 @@ HOST_OBJCFLAGS := $(shell $(GNUSTEP_CONFIG) --objc-flags 2>/dev/null)
 HOST_LIBS := $(shell $(GNUSTEP_CONFIG) --base-libs 2>/dev/null) -lsqlite3 -lcrypto -lz -lm
 endif
 HOST_CFLAGS := -O1 -g -Wall -Wextra -Wno-unused-const-variable -Wno-incompatible-pointer-types $(SANITIZE)
-APP_SOURCES := test_app_logic.m ../common/foundation_logic.m ../common/profile_logic.m ../common/secure_store.m ../common/connection_logic.m ../common/list_logic.m ../common/subscription_task.m ../integrations/happ/happ_crypto.c
+APP_SOURCES := test_app_logic.m ../common/foundation_logic.m ../common/profile_logic.m ../common/secure_store.m ../common/connection_logic.m ../common/list_logic.m ../common/subscription_task.m ../integrations/incy/incy_links.m ../integrations/happ/happ_crypto.c
 APP_OBJECTS := $(addprefix $(HOST_BUILD_DIR)/,$(patsubst ../%,%,$(APP_SOURCES:.m=.o)))
 APP_OBJECTS := $(APP_OBJECTS:.c=.o)
 APP_OBJECTS += $(HOST_BUILD_DIR)/core-parser/json.o
@@ -31,6 +31,7 @@ HOST_TESTS += $(HOST_BUILD_DIR)/test_large_subscriptions
 HOST_TESTS += $(HOST_BUILD_DIR)/test_flags
 HOST_TESTS += $(HOST_BUILD_DIR)/test_flag_profiles
 HOST_TESTS += $(HOST_BUILD_DIR)/test_runtime_uri
+HOST_TESTS += $(HOST_BUILD_DIR)/test_incy
 CORE_PARSE_SRC := uri utils xhttp_config xhttp_download xhttp_payload buffer_budget websocket grpc http_headers core_log
 CORE_PARSE_SRC += vmess_uri shadowsocks_uri shadowsocks_crypto blake3 trojan core_random deadline socket_util relay_memory connection_trace resolver
 CORE_PARSE_OBJ := $(addprefix $(HOST_BUILD_DIR)/core-parser/,$(addsuffix .o,$(CORE_PARSE_SRC)))
@@ -53,6 +54,8 @@ test: requirements $(HOST_TESTS)
 	$(HOST_BUILD_DIR)/test_system_proxy
 	$(HOST_BUILD_DIR)/test_qr
 	$(HOST_BUILD_DIR)/test_import_formats
+	$(HOST_BUILD_DIR)/test_incy
+	VC_HOST_BUILD_DIR="$(HOST_BUILD_DIR)" python3 $(ROOT)/tests/test_incy_loopback.py
 	$(HOST_BUILD_DIR)/test_runtime_uri
 	$(HOST_BUILD_DIR)/test_helper_monitor
 	$(HOST_BUILD_DIR)/test_dns_relay
@@ -84,6 +87,10 @@ $(HOST_BUILD_DIR)/common/%.o: ../common/%.m | requirements
 $(HOST_BUILD_DIR)/integrations/happ/%.o: ../integrations/happ/%.c | requirements
 	mkdir -p $(dir $@)
 	$(HOST_CC) $(HOST_CPPFLAGS) $(HOST_CFLAGS) -MMD -MP -c $< -o $@
+
+$(HOST_BUILD_DIR)/integrations/incy/%.o: ../integrations/incy/%.m | requirements
+	mkdir -p $(dir $@)
+	$(HOST_CC) $(HOST_CPPFLAGS) $(HOST_OBJCFLAGS) $(HOST_CFLAGS) -MMD -MP -c $< -o $@
 
 $(HOST_BUILD_DIR)/test_app_logic: $(APP_OBJECTS)
 	$(HOST_CC) $(SANITIZE) $^ -o $@ $(HOST_LIBS)
@@ -173,11 +180,14 @@ $(HOST_BUILD_DIR)/test_import_formats: $(HOST_BUILD_DIR)/test_import_formats.o $
 $(HOST_BUILD_DIR)/test_runtime_uri: $(HOST_BUILD_DIR)/test_runtime_uri.o $(filter-out $(HOST_BUILD_DIR)/test_app_logic.o,$(APP_OBJECTS)) $(CORE_PARSE_OBJ)
 	$(HOST_CC) $(SANITIZE) $^ -o $@ $(HOST_LIBS)
 
+$(HOST_BUILD_DIR)/test_incy: $(HOST_BUILD_DIR)/test_incy.o $(filter-out $(HOST_BUILD_DIR)/test_app_logic.o,$(APP_OBJECTS))
+	$(HOST_CC) $(SANITIZE) $^ -Wl,--wrap=EVP_CIPHER_CTX_new -Wl,--wrap=EVP_Digest -o $@ $(HOST_LIBS)
+
 sanitizers:
 	ASAN_OPTIONS=detect_leaks=0 UBSAN_OPTIONS=halt_on_error=1 $(MAKE) test HOST_BUILD_DIR=$(HOST_BUILD_DIR)-sanitized SANITIZE='-fsanitize=address,undefined -fno-omit-frame-pointer'
 
 asan:
 	ASAN_OPTIONS=detect_leaks=0 $(MAKE) test HOST_BUILD_DIR=$(HOST_BUILD_DIR)-asan SANITIZE='-fsanitize=address -fno-omit-frame-pointer'
 
--include $(APP_OBJECTS:.o=.d) $(CORE_PARSE_OBJ:.o=.d) $(HOST_BUILD_DIR)/test_ping.d $(HOST_BUILD_DIR)/test_proxy_probe.d $(HOST_BUILD_DIR)/app/proxy_probe.d $(HOST_BUILD_DIR)/test_import_formats.d $(HOST_BUILD_DIR)/test_runtime_uri.d $(HOST_BUILD_DIR)/test_large_subscriptions.d $(HOST_BUILD_DIR)/integrations/karing/karing_backup.d $(HOST_BUILD_DIR)/test_flag_profiles.d $(HOST_BUILD_DIR)/common/flag_logic.d
+-include $(APP_OBJECTS:.o=.d) $(CORE_PARSE_OBJ:.o=.d) $(HOST_BUILD_DIR)/test_ping.d $(HOST_BUILD_DIR)/test_proxy_probe.d $(HOST_BUILD_DIR)/app/proxy_probe.d $(HOST_BUILD_DIR)/test_import_formats.d $(HOST_BUILD_DIR)/test_runtime_uri.d $(HOST_BUILD_DIR)/test_incy.d $(HOST_BUILD_DIR)/test_large_subscriptions.d $(HOST_BUILD_DIR)/integrations/karing/karing_backup.d $(HOST_BUILD_DIR)/test_flag_profiles.d $(HOST_BUILD_DIR)/common/flag_logic.d
 .PHONY: test requirements sanitizers asan

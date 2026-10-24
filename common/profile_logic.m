@@ -2,6 +2,7 @@
 #import "foundation_logic.h"
 #import "app_constants.h"
 #import "subscription_task.h"
+#import "../integrations/incy/incy_links.h"
 #include "../../vless-core-cli/include/json.h"
 #include <arpa/inet.h>
 #include <errno.h>
@@ -1255,7 +1256,7 @@ failure:
     if (!text || [text length] == 0) return [NSArray array];
     NSMutableArray *out=[NSMutableArray array];
     NSMutableSet *seen=[NSMutableSet set];
-    NSRegularExpression *expression=[NSRegularExpression regularExpressionWithPattern:@"(?:vless://|socks5://|trojan://|vmess://|ss://)[^\\s\"'<>]+" options:NSRegularExpressionCaseInsensitive error:NULL];
+    NSRegularExpression *expression=[NSRegularExpression regularExpressionWithPattern:@"(?:incy://|vless://|socks5://|trojan://|vmess://|ss://)[^\\s\"'<>]+" options:NSRegularExpressionCaseInsensitive error:NULL];
     for (NSUInteger pass=0;pass<2;pass++) {
         NSUInteger cursor=0;
         while (cursor < [text length]) {
@@ -1279,6 +1280,7 @@ failure:
                     if (!match || !match.range.length) { [matchPool drain]; break; }
                     position=NSMaxRange(match.range);
                     NSString *uri=[line substringWithRange:match.range];
+                    if (VCIncyIsLink(uri)) { [matchPool drain]; break; }
                     while ([uri length] > 1 && ([uri hasSuffix:@","] || [uri hasSuffix:@";"] || [uri hasSuffix:@")"] || [uri hasSuffix:@"]"])) uri=[uri substringToIndex:[uri length]-1];
                     if ([self isConfigurationURI:uri]) {
                         if (![seen containsObject:uri]) { [seen addObject:uri]; [out addObject:uri]; }
@@ -1299,7 +1301,7 @@ failure:
     }
 
     NSError *reErr = nil;
-    NSRegularExpression *re = [NSRegularExpression regularExpressionWithPattern:@"(?:vless://|socks5://|trojan://|vmess://|ss://|happ://(?:add|crypt4|crypt5)/|https?://)[^\\s\"'<>]+"
+    NSRegularExpression *re = [NSRegularExpression regularExpressionWithPattern:@"(?:incy://|vless://|socks5://|trojan://|vmess://|ss://|happ://(?:add|crypt4|crypt5)/|https?://)[^\\s\"'<>]+"
                                                                          options:NSRegularExpressionCaseInsensitive
                                                                            error:&reErr];
     if (!re || reErr) {
@@ -1317,8 +1319,14 @@ failure:
         if (!m || !m.range.length) { [pool drain]; break; }
         cursor=NSMaxRange(m.range);
         NSString *link = [text substringWithRange:m.range];
+        if (VCIncyIsLink(link)) {
+            NSUInteger end=0,contentsEnd=0;
+            [text getLineStart:NULL end:&end contentsEnd:&contentsEnd forRange:NSMakeRange(m.range.location,0)];
+            link=[text substringWithRange:NSMakeRange(m.range.location,contentsEnd-m.range.location)];
+            cursor=end;
+        }
         link = [self safeTrim:link];
-        while ([link length] > 0) {
+        while ([link length] > 0 && !VCIncyIsLink(link)) {
             unichar c = [link characterAtIndex:([link length] - 1)];
             if (![trailSet characterIsMember:c]) break;
             link = [link substringToIndex:([link length] - 1)];
@@ -1327,6 +1335,7 @@ failure:
 
         NSString *lower = [link lowercaseString];
         if (![self isConfigurationURI:link] &&
+            !VCIncyIsLink(link) &&
             ![lower hasPrefix:kHappAddPrefix] &&
             ![lower hasPrefix:@"happ://crypt4/"] &&
             ![lower hasPrefix:@"happ://crypt5/"] &&
@@ -1341,6 +1350,77 @@ failure:
         [pool drain];
     }
     return out;
+}
+
+- (NSDictionary *)textImportReportFromText:(NSString *)text allowIncy:(BOOL)allowIncy allowBase64:(BOOL)allowBase64 {
+    VCSubscriptionTask *task=VCCurrentSubscriptionTask();
+    if (task.isCancelled) return VCSubscriptionCancelledReport(task);
+    text=[self safeTrim:text];
+    if ([text lengthOfBytesUsingEncoding:NSUTF8StringEncoding] > kVCMaximumSubscriptionBytes)
+        return @{@"uris":@[],@"error":@"Import data exceeds 32 MiB"};
+    if ([text hasPrefix:@"{"] || [text hasPrefix:@"["]) return [self importReportFromHappJSONData:[text dataUsingEncoding:NSUTF8StringEncoding]];
+    BOOL wholeIncy=VCIncyIsLink(text) && [text rangeOfCharacterFromSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]].location == NSNotFound;
+    BOOL incyJSON=[text rangeOfString:@"incy://import/{" options:NSCaseInsensitiveSearch|NSAnchoredSearch].location == 0 ||
+        [text rangeOfString:@"incy://import/[" options:NSCaseInsensitiveSearch|NSAnchoredSearch].location == 0;
+    NSArray *links=wholeIncy || incyJSON ? @[text] : [self extractImportLinksFromText:text];
+    if (![links count] && allowBase64) {
+        NSMutableData *data=VCIncyDecodeBase64(VCSubscriptionCompactBase64(text),NO,kVCMaximumSubscriptionBytes);
+        NSString *decoded=[[NSString alloc] initWithData:data encoding:NSUTF8StringEncoding];
+        NSDictionary *report=decoded ? [self textImportReportFromText:decoded allowIncy:allowIncy allowBase64:NO] : nil;
+        [decoded release]; VCIncyClearData(data);
+        if (report) return report;
+    }
+    NSMutableArray *uris=[NSMutableArray array],*issues=[NSMutableArray array];
+    NSMutableDictionary *metadata=[NSMutableDictionary dictionary];
+    NSMutableSet *seen=[NSMutableSet set];
+    NSUInteger skipped=0,countedSkipped=0,accepted=0,processed=0;
+    for (NSString *link in links) {
+        if (task.isCancelled) return VCSubscriptionCancelledReport(task);
+        NSAutoreleasePool *pool=[[NSAutoreleasePool alloc] init];
+        NSString *value=link,*reason=nil;
+        NSArray *expanded=nil;
+        if (VCIncyIsLink(link)) {
+            NSDictionary *descriptor=allowIncy ? VCIncyImportDescriptor(link,&reason) : nil;
+            if (!allowIncy) reason=@"Nested INCY links are not supported";
+            NSString *kind=[descriptor objectForKey:@"kind"];
+            if ([kind isEqual:@"subscription"]) value=link;
+            else if ([kind isEqual:@"link"]) {
+                value=[descriptor objectForKey:@"value"];
+                NSString *scheme=[self schemeFromURIString:value];
+                if (![self isConfigurationURI:value] && ![scheme isEqual:@"https"] && ![scheme isEqual:@"http"]) reason=@"Invalid INCY add target";
+                else if ([[self extractImportLinksFromText:value] count] != 1 || [value rangeOfCharacterFromSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]].location != NSNotFound) reason=@"Invalid INCY add target";
+            } else if ([kind isEqual:@"data"]) {
+                NSDictionary *nested=[self textImportReportFromText:[descriptor objectForKey:@"value"] allowIncy:NO allowBase64:YES];
+                expanded=[nested objectForKey:@"uris"];
+                [metadata addEntriesFromDictionary:[nested objectForKey:@"metadata"] ?: @{}];
+                NSUInteger rejected=[[nested objectForKey:@"skipped"] unsignedIntegerValue];
+                skipped+=rejected; countedSkipped+=rejected;
+                for (NSString *issue in [nested objectForKey:@"issues"]) if ([issues count] < 16) [issues addObject:issue];
+                reason=[nested objectForKey:@"error"];
+                if (![expanded count] && !reason && !rejected) reason=@"INCY import contains no supported entries";
+            }
+        }
+        if (!reason && !expanded && [self isConfigurationURI:value]) {
+            NSDictionary *entry=[self metadataForURI:value];
+            reason=[entry objectForKey:@"reason"];
+            if (!reason) { [metadata setObject:entry forKey:value]; accepted++; }
+        }
+        if (reason) {
+            skipped++;
+            if ([issues count] < 16) [issues addObject:VCIncyIsLink(link) ? @"Invalid or unsupported INCY import" : @"Invalid or unsupported profile settings"];
+        } else for (NSString *uri in expanded ?: @[value]) {
+            if (![seen containsObject:uri]) { [seen addObject:uri]; [uris addObject:uri]; }
+            else [task recordDuplicate];
+        }
+        [task processed:++processed total:[links count]];
+        [pool drain];
+    }
+    [task addAccepted:accepted skipped:skipped-countedSkipped];
+    return @{@"uris":uris,@"skipped":@(skipped),@"issues":issues,@"metadata":metadata};
+}
+
+- (NSDictionary *)textImportReportFromText:(NSString *)text {
+    return [self textImportReportFromText:text allowIncy:YES allowBase64:YES];
 }
 
 - (NSDictionary *)importReportFromHappJSONData:(NSData *)data {

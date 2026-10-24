@@ -61,8 +61,8 @@ COMMON_APP_SRC := common/foundation_logic.m common/profile_logic.m common/secure
 COMMON_APP_HEADERS := $(wildcard common/*.h)
 APP_SCREEN_SRC := app/main.m app/main_screen.m app/main_state.m app/main_connection.m app/main_ping.m app/main_subscriptions.m app/main_import.m app/main_layout.m app/main_settings.m app/main_terminal.m app/main_table.m app/subscription_work.m
 APP_SUPPORT_SRC := app/app_support.m app/daemon_client.m app/network_ping.m app/proxy_probe.m app/runtime_info.m app/subscription_fetch.m app/update_checker.m app/diagnostics.m app/appearance.m app/connection_button.m app/main_cells.m app/settings.m app/help_controllers.m app/routing.m app/qr_scanner.m app/subscription_info.m app/import_browser.m
-APP_SRC := $(APP_SCREEN_SRC) $(APP_SUPPORT_SRC) app/flag_label.m $(COMMON_APP_SRC) integrations/happ/happ_crypto.c integrations/karing/karing_backup.m
-APP_HEADERS := $(wildcard app/*.h) integrations/happ/happ_crypto.h integrations/karing/karing_backup.h daemon/vpnctld_protocol.h $(COMMON_APP_HEADERS)
+APP_SRC := $(APP_SCREEN_SRC) $(APP_SUPPORT_SRC) app/flag_label.m $(COMMON_APP_SRC) integrations/happ/happ_crypto.c integrations/karing/karing_backup.m integrations/incy/incy_links.m
+APP_HEADERS := $(wildcard app/*.h) integrations/happ/happ_crypto.h integrations/karing/karing_backup.h integrations/incy/incy_links.h daemon/vpnctld_protocol.h $(COMMON_APP_HEADERS)
 APP_HEADERS += ../vless-core-cli/include/json.h
 APP_OBJ := \
 	$(patsubst %.m,$(BUILD_DIR)/app/%.o,$(filter %.m,$(APP_SRC))) \

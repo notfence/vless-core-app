@@ -6,6 +6,7 @@
 #import <SystemConfiguration/SystemConfiguration.h>
 #include "happ_crypto.h"
 #include "karing_backup.h"
+#import "../integrations/incy/incy_links.h"
 #include <zbar.h>
 #include <openssl/crypto.h>
 #include <openssl/evp.h>

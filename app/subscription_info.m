@@ -174,7 +174,7 @@
     [providerRows addObject:[self rowWithTitle:@"Source"
                                        detail:(encryptedHappSubscription
                                                    ? @"HAPP (encrypted)"
-                                                   : (SubscriptionDictionaryUsesHappHeaders(_subscription) ? @"HAPP" : @"URL"))
+                                                   : (VCIncyIsLink(url) ? @"INCY" : (SubscriptionDictionaryUsesHappHeaders(_subscription) ? @"HAPP" : @"URL")))
                                        action:nil]];
     [newSections addObject:[self sectionWithTitle:@"Provider" rows:providerRows]];
 

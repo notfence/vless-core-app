@@ -96,6 +96,12 @@
 
     BOOL useHappHeaders = SubscriptionDictionaryUsesHappHeaders(sub);
     NSString *fetchURLString = urlString;
+    NSDictionary *incy=nil;
+    if (VCIncyIsLink(urlString)) {
+        incy=VCIncySubscriptionDescriptor(urlString,errorTextOut);
+        if (!incy) return nil;
+        fetchURLString=[incy objectForKey:@"value"];
+    }
     if (useHappHeaders && [self isHappEncryptedLink:urlString]) {
         NSString *decryptError = nil;
         fetchURLString = [self decryptedHappLink:urlString errorText:&decryptError];
@@ -113,8 +119,8 @@
         return nil;
     }
 
-    NSString *nameFromURL = useHappHeaders ? @"HAPP subscription" : [self subscriptionNameFromURLString:fetchURLString];
-    NSString *hostName = useHappHeaders ? @"HAPP subscription" : [self hostFromURLString:fetchURLString];
+    NSString *nameFromURL = incy ? ([[incy objectForKey:@"name"] length] ? [incy objectForKey:@"name"] : @"INCY subscription") : (useHappHeaders ? @"HAPP subscription" : [self subscriptionNameFromURLString:fetchURLString]);
+    NSString *hostName = incy ? @"INCY subscription" : (useHappHeaders ? @"HAPP subscription" : [self hostFromURLString:fetchURLString]);
     NSString *nameFromMeta = nil;
     NSDictionary *userInfoFromMeta = nil;
     NSDictionary *metadataFromMeta = nil;
@@ -182,6 +188,7 @@
     }
 
     if (!data) {
+        if (incy) fetchErr=VCIncySafeFetchError(fetchErr);
         if (![fetchErr isKindOfClass:[NSString class]] || [fetchErr length] == 0) {
             fetchErr = @"unknown error";
         }
