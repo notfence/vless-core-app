@@ -397,7 +397,7 @@
     return v;
 }
 
-- (UIView *)accessoryPingWithTag:(NSInteger)tag uri:(NSString *)uri {
+- (UIView *)accessoryPingForURI:(NSString *)uri {
     NSString *display = ([uri isKindOfClass:[NSString class]] ? [_pingDisplayByURI objectForKey:uri] : nil);
     BOOL loading = [display isEqualToString:kVCPingLoadingValue];
     BOOL hasResult = ([display length] > 0 && !loading);
@@ -438,15 +438,10 @@
     btn.frame = CGRectMake(0.0f, 0.0f, 24.0f, 24.0f);
     UIImage *pingIcon = LoadBundledIconTinted(@"icon-ping", 20.0f, VCPrimaryTextColor());
     [btn setImage:(pingIcon ? pingIcon : MakeIconImage(VCIconTypeWifi, 18.0f, NO)) forState:UIControlStateNormal];
-    btn.tag = tag;
     btn.accessibilityLabel = hasResult ? [NSString stringWithFormat:@"Ping result %@", display]
                                        : @"Check ping";
     NSString *pingTypeName = VCPingTypeName(VCSelectedPingType());
-    BOOL subscriptionPingRunning = NO;
-    if (tag >= 20000) {
-        NSInteger subIdx = (tag - 20000) / 1000;
-        subscriptionPingRunning = [self isSubscriptionPingInProgressAtIndex:subIdx];
-    }
+    BOOL subscriptionPingRunning = [self isURIInActiveSubscriptionPing:uri];
     btn.enabled = !subscriptionPingRunning;
     btn.adjustsImageWhenDisabled = YES;
     btn.accessibilityHint = subscriptionPingRunning

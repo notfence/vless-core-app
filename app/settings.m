@@ -311,6 +311,7 @@
 @implementation SettingsVC
 @synthesize autoUpdate = _autoUpdate;
 @synthesize preserveCustomNames = _preserveCustomNames;
+@synthesize sortSubscriptionsByPing = _sortSubscriptionsByPing;
 @synthesize stealthMode = _stealthMode;
 @synthesize darkTheme = _darkTheme;
 @synthesize automaticUpdateChecks = _automaticUpdateChecks;
@@ -339,6 +340,13 @@
     _stealthMode = [sw isOn];
     if ([_delegate respondsToSelector:@selector(settingsVC:didChangeStealthMode:)]) {
         [_delegate settingsVC:self didChangeStealthMode:_stealthMode];
+    }
+}
+
+- (void)sortSubscriptionsByPingSwitchChanged:(UISwitch *)sw {
+    _sortSubscriptionsByPing = [sw isOn];
+    if ([_delegate respondsToSelector:@selector(settingsVC:didChangeSortSubscriptionsByPing:)]) {
+        [_delegate settingsVC:self didChangeSortSubscriptionsByPing:_sortSubscriptionsByPing];
     }
 }
 
@@ -476,6 +484,7 @@
     VCAppearanceApplyTable(_tableView);
     _autoUpdateSwitch.onTintColor = VCAccentColor();
     _preserveCustomNamesSwitch.onTintColor = VCAccentColor();
+    _sortSubscriptionsByPingSwitch.onTintColor = VCAccentColor();
     _stealthSwitch.onTintColor = VCAccentColor();
     _automaticUpdateChecksSwitch.onTintColor = VCAccentColor();
     _preferGitHubLegacySwitch.onTintColor = VCAccentColor();
@@ -521,6 +530,10 @@
     _stealthSwitch = [[UISwitch alloc] initWithFrame:CGRectZero];
     [_stealthSwitch setOn:_stealthMode animated:NO];
     [_stealthSwitch addTarget:self action:@selector(stealthSwitchChanged:) forControlEvents:UIControlEventValueChanged];
+
+    _sortSubscriptionsByPingSwitch = [[UISwitch alloc] initWithFrame:CGRectZero];
+    [_sortSubscriptionsByPingSwitch setOn:_sortSubscriptionsByPing animated:NO];
+    [_sortSubscriptionsByPingSwitch addTarget:self action:@selector(sortSubscriptionsByPingSwitchChanged:) forControlEvents:UIControlEventValueChanged];
 
     _automaticUpdateChecksSwitch = [[UISwitch alloc] initWithFrame:CGRectZero];
     [_automaticUpdateChecksSwitch setOn:_automaticUpdateChecks animated:NO];
@@ -568,7 +581,7 @@
 
 - (NSInteger)tableView:(UITableView *)tableView numberOfRowsInSection:(NSInteger)section {
     (void)tableView;
-    if (section == 0) return 3;
+    if (section == 0) return 4;
     if (section == 1) return 3;
     if (section == 2) return 3;
     if (section == 3) return 2;
@@ -658,6 +671,9 @@
     if (indexPath.section == 0 && indexPath.row == 2) {
         return @"Stealth mode";
     }
+    if (indexPath.section == 0 && indexPath.row == 3) {
+        return @"Sort configs by ping";
+    }
     if (indexPath.section == 1 && indexPath.row == 0) {
         return @"Routing";
     }
@@ -712,6 +728,9 @@
     }
     if (indexPath.section == 0 && indexPath.row == 2) {
         return @"Hide links in configs and subscriptions";
+    }
+    if (indexPath.section == 0 && indexPath.row == 3) {
+        return @"Lowest latency first within each subscription";
     }
     if (indexPath.section == 1 && indexPath.row == 0) {
         return @"Proxy, Direct and Block rules";
@@ -802,6 +821,19 @@
         [self applySettingsMarqueesToCell:cell
                                     title:@"Stealth mode"
                                    detail:@"Hide links in configs and subscriptions"];
+        return cell;
+    }
+
+    if (indexPath.section == 0 && indexPath.row == 3) {
+        static NSString *kPingSortCellId = @"SettingsPingSortCell";
+        UITableViewCell *cell = [tableView dequeueReusableCellWithIdentifier:kPingSortCellId];
+        if (!cell) {
+            cell = [[[UITableViewCell alloc] initWithStyle:UITableViewCellStyleSubtitle reuseIdentifier:kPingSortCellId] autorelease];
+        }
+        cell.selectionStyle = UITableViewCellSelectionStyleNone;
+        [_sortSubscriptionsByPingSwitch setOn:_sortSubscriptionsByPing animated:NO];
+        cell.accessoryView = _sortSubscriptionsByPingSwitch;
+        [self applySettingsMarqueesToCell:cell title:[self settingsTitleTextForIndexPath:indexPath] detail:[self settingsDetailTextForIndexPath:indexPath]];
         return cell;
     }
 
@@ -1122,6 +1154,7 @@
     [_tableView release];
     [_autoUpdateSwitch release];
     [_preserveCustomNamesSwitch release];
+    [_sortSubscriptionsByPingSwitch release];
     [_stealthSwitch release];
     [_automaticUpdateChecksSwitch release];
     [_preferGitHubLegacySwitch release];

@@ -333,6 +333,7 @@
 }
 
 - (void)dealloc {
+    [NSObject cancelPreviousPerformRequestsWithTarget:self selector:@selector(applySubscriptionPingSort) object:nil];
     if (_configurationQueue) dispatch_release(_configurationQueue);
     [_pendingProfileMetadata release];
     [_deferredImportURL release];
@@ -399,6 +400,7 @@
     [_configs release];
     [_subscriptions release];
     [_pingDisplayByURI release];
+    [_subscriptionPingOrder release];
     [_pingNetworkSignature release];
     [_pingNetworkTimer invalidate];
     [_pingNetworkTimer release];

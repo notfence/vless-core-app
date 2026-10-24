@@ -65,6 +65,47 @@ def main():
     if 'generation != _connectionActionGeneration || VCConnectionActionInProgress(_connectionActionInProgress, _reconnectInProgress, [_pendingReconnectURI length] > 0)' not in initial_status or '[self isConnectionActionInProgress]' in initial_status:
         raise AssertionError('app/initial-daemon-status-must-not-be-discarded-during-store-loading')
     state = (ROOT / 'app/main_state.m').read_text()
+    settings_source = (ROOT / 'app/settings.m').read_text()
+    main_settings = (ROOT / 'app/main_settings.m').read_text()
+    if 'if (section == 0) return 4;' not in settings_source or 'SettingsPingSortCell' not in settings_source or 'settings.sortSubscriptionsByPing = _sortSubscriptionsByPing;' not in main_settings:
+        raise AssertionError('app/ping-sort-must-have-a-subscriptions-setting')
+    settings_controller = settings_source.split('@implementation SettingsVC', 1)[1].split('@end', 1)[0]
+    settings_theme = settings_controller.split('- (void)applyTheme {', 1)[1].split('\n}', 1)[0]
+    settings_load = settings_controller.split('- (void)viewDidLoad {', 1)[1].split('\n}', 1)[0]
+    for switch in re.findall(r'(_\w+Switch)\s*=\s*\[\[UISwitch alloc\]', settings_controller):
+        if f'{switch}.onTintColor = VCAccentColor();' not in settings_theme:
+            raise AssertionError(f'app/settings-switch-must-follow-accent:{switch}')
+        if settings_load.index(f'{switch} = [[UISwitch alloc]') > settings_load.index('[self applyTheme];'):
+            raise AssertionError('app/settings-must-apply-accent-after-creating-switches')
+    accent_change = settings_controller.split('- (void)accentColorVCDidChange {', 1)[1].split('\n}', 1)[0]
+    if '[self applyTheme];' not in accent_change:
+        raise AssertionError('app/settings-must-refresh-switches-after-accent-change')
+    sort_setting = main_settings.split('- (void)settingsVC:(SettingsVC *)vc didChangeSortSubscriptionsByPing:', 1)[1].split('\n}', 1)[0]
+    if '[defaults setBool:enabled forKey:kDefaultsSortSubscriptionsByPingKey]' not in sort_setting or 'saveData' in sort_setting:
+        raise AssertionError('app/ping-sort-setting-must-persist-without-reserializing-profiles')
+    if '_sortSubscriptionsByPing=[defaults boolForKey:kDefaultsSortSubscriptionsByPingKey];' not in state or '_sortSubscriptionsByPing = [ud boolForKey:kDefaultsSortSubscriptionsByPingKey];' not in state:
+        raise AssertionError('app/ping-sort-must-default-off-and-reload-saved-setting')
+    mapping = state.split('- (BOOL)mapSubscriptionRow:', 1)[1].split('\n}', 1)[0]
+    if 'matchesItems:items' not in mapping or 'sourceIndexForDisplayIndex:item' not in mapping or '_selectedSubItemIndex' in mapping:
+        raise AssertionError('app/sorted-display-must-cache-and-map-to-original-indices-without-changing-selection')
+    apply_sort = state.split('- (void)applySubscriptionPingSort {', 1)[1].split('\n}', 1)[0]
+    for required in ('isSubscriptionPingInProgressAtIndex:', '_mainSectionTransitionInProgress', '_tableView.dragging', '_tableView.decelerating', '_tableView.editing', 'updateWithDisplays:', 'reloadSections:'):
+        if required not in apply_sort:
+            raise AssertionError('app/ping-sort-must-wait-for-batch-and-interactions-and-only-reload-on-change')
+    ping_source = (ROOT / 'app/main_ping.m').read_text()
+    ping_press = ping_source.split('- (void)pingButtonPressed:', 1)[1].split('\n}', 1)[0]
+    if 'indexPathForCell:' not in ping_press or 'mapSubscriptionRow:' not in ping_press or 'sender.tag' in ping_press or '1000' in ping_press:
+        raise AssertionError('app/ping-buttons-must-resolve-current-sorted-row-without-1000-item-tags')
+    if '_sortSubscriptionsByPing && (!batchIdentifier || completedSubscriptionPing)' not in ping_source:
+        raise AssertionError('app/ping-sort-must-not-reorder-on-every-batch-result')
+    table_source = (ROOT / 'app/main_table.m').read_text()
+    if 'didEndEditingRowAtIndexPath:' not in table_source or '[_subscriptionPingOrder release]; _subscriptionPingOrder=nil;' not in state:
+        raise AssertionError('app/ping-order-must-resume-after-editing-and-release-old-imported-profiles')
+    editing_end = table_source.split('didEndEditingRowAtIndexPath:', 1)[1].split('\n}', 1)[0]
+    if '[self scheduleSubscriptionPingSort];' not in editing_end or 'if (_sortSubscriptionsByPing)' in editing_end:
+        raise AssertionError('app/ending-editing-must-also-apply-pending-sort-disable')
+    if '(mappedItemIdx == 0)' in table_source or '(itemIdx == 0)' in table_source or 'subIdx * 1000' in table_source:
+        raise AssertionError('app/sorted-card-edges-and-buttons-must-use-display-rows')
     save = state.split('- (void)saveData {', 1)[1].split('\n}', 1)[0]
     if 'prepareMetadataForConfigurations:' in save:
         raise AssertionError('app/save-must-not-reparse-all-profiles-on-main')

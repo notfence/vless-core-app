@@ -7,6 +7,7 @@
     if (!signature) return;
     BOOL changed = VCPingUpdateNetwork(self,signature,&_pingNetworkSignature,&_pingNetworkGeneration,_pingDisplayByURI);
     if (changed) {
+        if (_sortSubscriptionsByPing) [self scheduleSubscriptionPingSort];
         [self refreshVisiblePingAccessoriesForURI:nil];
         [self refreshVisibleSubscriptionHeaderAccessories];
         VCRecordAppEvent(@"ping", @"Network changed; ping results cleared", nil);
@@ -125,6 +126,7 @@
     }
 
     [self refreshVisiblePingAccessoriesForURI:uri];
+    if (_sortSubscriptionsByPing && (!batchIdentifier || completedSubscriptionPing)) [self scheduleSubscriptionPingSort];
     if (completedSubscriptionPing) {
         VCRecordAppEvent(@"ping", @"Subscription ping batch finished", nil);
         [self refreshVisibleSubscriptionPingAccessories];
@@ -180,19 +182,23 @@
 }
 
 - (void)pingButtonPressed:(UIButton *)sender {
-    NSInteger tag = sender.tag;
+    UIView *view = sender;
+    while (view && ![view isKindOfClass:[UITableViewCell class]]) view = view.superview;
+    if (!view) return;
+    NSIndexPath *indexPath = [_tableView indexPathForCell:(UITableViewCell *)view];
+    if (!indexPath) return;
     NSString *uri = nil;
 
-    if (tag >= 10000 && tag < 20000) {
-        NSInteger idx = tag - 10000;
+    if (indexPath.section == 0) {
+        NSInteger idx = indexPath.row;
         if (idx >= 0 && idx < (NSInteger)[_configs count]) {
             NSDictionary *cfg = [_configs objectAtIndex:idx];
             uri = [cfg objectForKey:@"uri"];
         }
-    } else if (tag >= 20000) {
-        NSInteger code = tag - 20000;
-        NSInteger subIdx = code / 1000;
-        NSInteger itemIdx = code % 1000;
+    } else if (indexPath.section == 1) {
+        NSInteger subIdx = -1, itemIdx = -1;
+        BOOL isHeader = YES;
+        if (![self mapSubscriptionRow:indexPath.row toSubIndex:&subIdx itemIndex:&itemIdx isHeader:&isHeader] || isHeader) return;
         if ([self isSubscriptionPingInProgressAtIndex:subIdx]) return;
         NSArray *items = [self subscriptionItemsAtIndex:subIdx];
         if (itemIdx >= 0 && itemIdx < (NSInteger)[items count]) {
@@ -309,6 +315,7 @@
     [self refreshVisibleSubscriptionPingAccessories];
     [self refreshVisibleSubscriptionHeaderAccessories];
     [self showStatus:@"Subscription ping stopped" ok:YES];
+    if (_sortSubscriptionsByPing) [self scheduleSubscriptionPingSort];
     VCRecordAppEvent(@"ping", @"Subscription ping batch canceled",
                      [NSString stringWithFormat:@"pending=%lu", (unsigned long)pendingCount]);
 }
@@ -360,6 +367,7 @@
     [self refreshVisibleSubscriptionHeaderAccessories];
     VCRecordAppEvent(@"ping", @"All pings canceled",
                      [NSString stringWithFormat:@"pending=%lu", (unsigned long)stoppedCount]);
+    if (_sortSubscriptionsByPing) [self scheduleSubscriptionPingSort];
 }
 
 @end

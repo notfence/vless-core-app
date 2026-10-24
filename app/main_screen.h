@@ -66,6 +66,7 @@
     VCSubscriptionTask *_connectAfterSubscriptionTask;
     NSString *_connectAfterSubscriptionURL;
     NSMutableDictionary *_pingDisplayByURI;
+    VCSubscriptionPingOrder *_subscriptionPingOrder;
     NSString *_pingNetworkSignature;
     NSTimer *_pingNetworkTimer;
     NSUInteger _pingNetworkGeneration;
@@ -114,6 +115,7 @@
     BOOL _showingTerminal;
     BOOL _autoUpdateSubscriptions;
     BOOL _preserveCustomSubscriptionNames;
+    BOOL _sortSubscriptionsByPing;
     BOOL _stealthModeEnabled;
     BOOL _darkThemeEnabled;
     BOOL _automaticUpdateChecksEnabled;
@@ -174,6 +176,8 @@
 - (BOOL)configurationMutationBlocked;
 - (void)keepConfigurationWriteAlive;
 - (NSArray *)subscriptionItemsAtIndex:(NSInteger)subIdx;
+- (void)scheduleSubscriptionPingSort;
+- (void)applySubscriptionPingSort;
 - (NSInteger)subscriptionRowsExpandedIndex;
 - (NSInteger)subscriptionHeaderExpandedIndex;
 - (NSString *)subscriptionPingIdentifierAtIndex:(NSInteger)subIdx;
@@ -404,7 +408,7 @@
 - (void)updateTopButtonsIcons;
 - (UIView *)accessoryChevronExpanded:(BOOL)expanded;
 - (UIView *)subscriptionHeaderAccessoryExpanded:(BOOL)expanded loading:(BOOL)loading;
-- (UIView *)accessoryPingWithTag:(NSInteger)tag uri:(NSString *)uri;
+- (UIView *)accessoryPingForURI:(NSString *)uri;
 - (void)updatePhoneConnectionScrollInsets;
 - (void)updatePhoneConnectionLayout;
 - (void)updatePadConnectionLayout;

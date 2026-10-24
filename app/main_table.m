@@ -46,8 +46,8 @@
     }
 
     NSArray *items = [self subscriptionItemsAtIndex:subIdx];
-    BOOL firstItem = (itemIdx == 0);
-    BOOL lastItem = (itemIdx == (NSInteger)[items count] - 1);
+    BOOL firstItem = (indexPath.row == subIdx + 1);
+    BOOL lastItem = (indexPath.row == subIdx + (NSInteger)[items count]);
     return 44.0f + (firstItem ? 4.0f : 0.0f) + (lastItem ? 8.0f : 0.0f);
 }
 
@@ -72,6 +72,12 @@
         return NO;
     }
     return YES;
+}
+
+- (void)tableView:(UITableView *)tableView didEndEditingRowAtIndexPath:(NSIndexPath *)indexPath {
+    (void)tableView;
+    (void)indexPath;
+    [self scheduleSubscriptionPingSort];
 }
 
 - (UITableViewCellEditingStyle)tableView:(UITableView *)tableView editingStyleForRowAtIndexPath:(NSIndexPath *)indexPath {
@@ -311,14 +317,12 @@ moveRowAtIndexPath:(NSIndexPath *)sourceIndexPath
 
     NSArray *visibleRows = [_tableView indexPathsForVisibleRows];
     for (NSIndexPath *indexPath in visibleRows) {
-        NSInteger tag = -1;
         NSString *rowURI = nil;
 
         if (indexPath.section == 0) {
             if (indexPath.row >= 0 && indexPath.row < (NSInteger)[_configs count]) {
                 NSDictionary *cfg = [_configs objectAtIndex:indexPath.row];
                 rowURI = [cfg objectForKey:@"uri"];
-                tag = 10000 + indexPath.row;
             }
         } else {
             NSInteger subIdx = -1;
@@ -331,15 +335,14 @@ moveRowAtIndexPath:(NSIndexPath *)sourceIndexPath
                 NSArray *items = [self subscriptionItemsAtIndex:subIdx];
                 if (itemIdx >= 0 && itemIdx < (NSInteger)[items count]) {
                     rowURI = [items objectAtIndex:itemIdx];
-                    tag = 20000 + (subIdx * 1000) + itemIdx;
                 }
             }
         }
 
-        if (tag < 0 || (uri && ![rowURI isEqualToString:uri])) continue;
+        if (!rowURI || (uri && ![rowURI isEqualToString:uri])) continue;
         UITableViewCell *cell = [_tableView cellForRowAtIndexPath:indexPath];
         if (!cell) continue;
-        cell.accessoryView = [self accessoryPingWithTag:tag uri:rowURI];
+        cell.accessoryView = [self accessoryPingForURI:rowURI];
         [cell setNeedsLayout];
         [cell layoutIfNeeded];
         [self applyDetailForMainCell:cell atIndexPath:indexPath];
@@ -367,10 +370,9 @@ moveRowAtIndexPath:(NSIndexPath *)sourceIndexPath
         if (itemIdx < 0 || itemIdx >= (NSInteger)[items count]) continue;
 
         NSString *uri = [items objectAtIndex:itemIdx];
-        NSInteger tag = 20000 + (subIdx * 1000) + itemIdx;
         UITableViewCell *cell = [_tableView cellForRowAtIndexPath:indexPath];
         if (!cell) continue;
-        cell.accessoryView = [self accessoryPingWithTag:tag uri:uri];
+        cell.accessoryView = [self accessoryPingForURI:uri];
         [cell setNeedsLayout];
         [cell layoutIfNeeded];
         [self applyDetailForMainCell:cell atIndexPath:indexPath];
@@ -406,8 +408,8 @@ moveRowAtIndexPath:(NSIndexPath *)sourceIndexPath
         } else {
             visualKind = VCMainListCellKindSubscriptionItem;
             NSArray *mappedItems = [self subscriptionItemsAtIndex:mappedSubIdx];
-            firstItem = (mappedItemIdx == 0);
-            lastItem = (mappedItemIdx == (NSInteger)[mappedItems count] - 1);
+            firstItem = (indexPath.row == mappedSubIdx + 1);
+            lastItem = (indexPath.row == mappedSubIdx + (NSInteger)[mappedItems count]);
             active = (_selectedSubIndex == mappedSubIdx && _selectedSubItemIndex == mappedItemIdx);
             cellID = @"VCSubscriptionItemCell";
         }
@@ -455,7 +457,7 @@ moveRowAtIndexPath:(NSIndexPath *)sourceIndexPath
         cell.textLabel.text = [self maskedLinkText:shownConfigName];
         if (_reorderingSection != 0) {
             NSString *uri = [cfg objectForKey:@"uri"];
-            cell.accessoryView = [self accessoryPingWithTag:(10000 + indexPath.row) uri:uri];
+            cell.accessoryView = [self accessoryPingForURI:uri];
         }
     } else {
         NSInteger subIdx = mappedSubIdx;
@@ -488,8 +490,7 @@ moveRowAtIndexPath:(NSIndexPath *)sourceIndexPath
                                                                     index:itemIdx
                                                              subscription:sub];
                 cell.textLabel.text = [self maskedLinkText:itemName];
-                NSInteger tag = 20000 + (subIdx * 1000) + itemIdx;
-                cell.accessoryView = [self accessoryPingWithTag:tag uri:uri];
+                cell.accessoryView = [self accessoryPingForURI:uri];
             }
         } else {
             cell.textLabel.text = @"(invalid row)";

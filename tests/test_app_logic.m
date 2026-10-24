@@ -301,6 +301,11 @@ static void dataTests(void) {
     CHECK("routing/ipv6-normalization", [VCNormalizedIPAddress(@"2001:db8::1") isEqual:@"2001:db8::1"]);
     CHECK("routing/host-is-not-ip", VCNormalizedIPAddress(@"example.test") == nil);
     VCMemoryDefaults *defaults = [[[VCMemoryDefaults alloc] init] autorelease];
+    CHECK("settings/ping-sort-default-off", ![defaults boolForKey:kDefaultsSortSubscriptionsByPingKey]);
+    [defaults setBool:YES forKey:kDefaultsSortSubscriptionsByPingKey];
+    CHECK("settings/ping-sort-enabled", [defaults boolForKey:kDefaultsSortSubscriptionsByPingKey]);
+    [defaults setBool:NO forKey:kDefaultsSortSubscriptionsByPingKey];
+    CHECK("settings/ping-sort-disabled", ![defaults boolForKey:kDefaultsSortSubscriptionsByPingKey]);
     VCAppearanceSetAccentIndexInDefaults(5, defaults); VCAppearanceSetDarkInDefaults(YES, defaults);
     CHECK("settings/theme-and-accent-roundtrip", VCAppearanceAccentIndexInDefaults(defaults) == 5 && VCAppearanceIsDarkInDefaults(defaults));
     VCAppearanceSetAccentIndexInDefaults(99, defaults); CHECK("settings/invalid-accent-fallback", VCAppearanceAccentIndexInDefaults(defaults) == 0);
@@ -345,6 +350,59 @@ static void listTests(void) {
     CHECK("list/malformed-items-empty", [VCSubscriptionItemsAtIndex(@[@{@"items": @"bad"}], 0) count] == 0);
     ci = -1; si = 2; ii = 0; VCNormalizeSelection(0, subs, &ci, &si, &ii);
     CHECK("list/empty-subscription-selection", ci == -1 && si == 2 && ii == -1);
+}
+
+static void subscriptionPingSortTests(void) {
+    Class orderClass = NSClassFromString(@"VCSubscriptionPingOrder");
+    CHECK("list/ping-order-available", orderClass != Nil);
+    if (!orderClass) return;
+    NSArray *items = @[@"slow", @"fast", @"equal", @"missing", @"failed", @"loading", @"zero"];
+    NSDictionary *displays = @{@"slow":@"120 ms", @"fast":@"9 ms", @"equal":@"9 ms", @"failed":@"TCP", @"loading":@"loading", @"zero":@"0 ms"};
+    VCSubscriptionPingOrder *order = [[[orderClass alloc] initWithItems:items displays:nil] autorelease];
+    CHECK("list/ping-order-source-identity", [order matchesItems:items] && ![order matchesItems:@[]]);
+    for (NSInteger i = 0; i < (NSInteger)[items count]; i++)
+        CHECK("list/ping-order-default-original", [order sourceIndexForDisplayIndex:i] == i);
+    CHECK("list/ping-order-changed", [order updateWithDisplays:displays]);
+    NSArray *expected = @[@6, @1, @2, @0, @3, @4, @5];
+    for (NSInteger i = 0; i < (NSInteger)[items count]; i++)
+        CHECK("list/ping-order-numeric-stable", [order sourceIndexForDisplayIndex:i] == [[expected objectAtIndex:i] integerValue]);
+    CHECK("list/ping-order-invalid-row", [order sourceIndexForDisplayIndex:-1] == -1 && [order sourceIndexForDisplayIndex:7] == -1);
+    CHECK("list/ping-order-input-preserved", [[items objectAtIndex:0] isEqual:@"slow"] && [[items objectAtIndex:6] isEqual:@"zero"]);
+    NSInteger selectedSource = 0;
+    CHECK("list/ping-order-selected-config-preserved", [[items objectAtIndex:[order sourceIndexForDisplayIndex:3]] isEqual:[items objectAtIndex:selectedSource]]);
+    CHECK("list/ping-order-unchanged-no-reload", ![order updateWithDisplays:displays]);
+    CHECK("list/ping-order-off-restores-original", [order updateWithDisplays:nil]);
+    for (NSInteger i = 0; i < (NSInteger)[items count]; i++)
+        CHECK("list/ping-order-original-restored", [order sourceIndexForDisplayIndex:i] == i);
+    CHECK("list/ping-order-empty-results-no-change", ![order updateWithDisplays:@{}]);
+    CHECK("list/ping-order-maximum-latency", [order updateWithDisplays:@{@"fast":@"2147483647 ms", @"equal":@"2147483648 ms"}] && [order sourceIndexForDisplayIndex:0] == 1);
+    for (NSString *bad in @[@"Failed", @"DNS", @"Transport", @"Protocol", @"Response", @"-1 ms", @"+1 ms", @"1.5 ms", @"1 ms x", @" ms", @"999999999999999999999999999999 ms"]) {
+        CHECK("list/ping-order-malformed-result-last", [order updateWithDisplays:@{@"slow":bad, @"fast":@"1 ms"}] || [order sourceIndexForDisplayIndex:0] == 1);
+        CHECK("list/ping-order-only-valid-latency-first", [order sourceIndexForDisplayIndex:0] == 1 && [order sourceIndexForDisplayIndex:1] == 0);
+    }
+    VCSubscriptionPingOrder *empty = [[[orderClass alloc] initWithItems:@[] displays:displays] autorelease];
+    CHECK("list/ping-order-empty", ![empty updateWithDisplays:displays] && [empty sourceIndexForDisplayIndex:0] == -1);
+    NSMutableArray *large = [NSMutableArray arrayWithCapacity:20000];
+    NSMutableDictionary *latencies = [NSMutableDictionary dictionaryWithCapacity:20000];
+    for (NSUInteger i = 0; i < 20000; i++) {
+        NSAutoreleasePool *pool = [[NSAutoreleasePool alloc] init];
+        NSString *uri = [NSString stringWithFormat:@"profile-%lu", (unsigned long)i];
+        [large addObject:uri];
+        [latencies setObject:[NSString stringWithFormat:@"%lu ms", (unsigned long)(20000-i)] forKey:uri];
+        [pool drain];
+    }
+    VCSubscriptionPingOrder *largeOrder = [[[orderClass alloc] initWithItems:large displays:latencies] autorelease];
+    for (NSInteger i = 0; i < 20000; i++)
+        CHECK("list/ping-order-large-source-mapping", [largeOrder sourceIndexForDisplayIndex:i] == 19999-i);
+    CHECK("list/ping-order-network-reset", [largeOrder updateWithDisplays:nil] && [largeOrder sourceIndexForDisplayIndex:0] == 0);
+    [largeOrder updateWithDisplays:latencies];
+    NSArray *subscriptions = @[@{@"items":@[@"other"]}, @{@"items":large}, @{@"items":@[@"last"]}];
+    NSInteger sub = -1, item = -1; BOOL header = YES;
+    CHECK("list/ping-order-large-displayed-row", VCMapSubscriptionRow(subscriptions, 1, 2, &sub, &item, &header) && sub == 1 && !header && [largeOrder sourceIndexForDisplayIndex:item] == 19999);
+    CHECK("list/ping-order-header-unchanged", VCMapSubscriptionRow(subscriptions, 1, 20002, &sub, &item, &header) && sub == 2 && header);
+    NSArray *duplicates = @[@"slow", @"fast", @"fast"];
+    VCSubscriptionPingOrder *duplicateOrder = [[[orderClass alloc] initWithItems:duplicates displays:displays] autorelease];
+    CHECK("list/ping-order-duplicate-uri-stable", [duplicateOrder sourceIndexForDisplayIndex:0] == 1 && [duplicateOrder sourceIndexForDisplayIndex:1] == 2 && [duplicateOrder sourceIndexForDisplayIndex:2] == 0);
 }
 
 static void metadataTests(void) {
@@ -397,6 +455,6 @@ static int measureProfiles(NSUInteger count) {
 int main(int argc, char **argv) {
     NSAutoreleasePool *pool = [[NSAutoreleasePool alloc] init];
     if (argc == 3 && !strcmp(argv[1],"--measure")) { int result=measureProfiles((NSUInteger)strtoul(argv[2],NULL,10)); [pool drain]; return result; }
-    connectionTests(); importTests(); subscriptionUpdateTests(); dataTests(); listTests(); metadataTests(); FINISH("app logic");
+    connectionTests(); importTests(); subscriptionUpdateTests(); dataTests(); listTests(); subscriptionPingSortTests(); metadataTests(); FINISH("app logic");
     [pool drain]; return 0;
 }

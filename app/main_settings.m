@@ -57,6 +57,16 @@
                  ok:YES];
 }
 
+- (void)settingsVC:(SettingsVC *)vc didChangeSortSubscriptionsByPing:(BOOL)enabled {
+    (void)vc;
+    _sortSubscriptionsByPing = enabled;
+    NSUserDefaults *defaults = [NSUserDefaults standardUserDefaults];
+    [defaults setBool:enabled forKey:kDefaultsSortSubscriptionsByPingKey];
+    [defaults synchronize];
+    [self scheduleSubscriptionPingSort];
+    VCRecordAppEvent(@"settings", @"Subscription ping sorting changed", enabled ? @"enabled=1" : @"enabled=0");
+}
+
 - (void)settingsVC:(SettingsVC *)vc didChangeDarkTheme:(BOOL)enabled {
     (void)vc;
     _darkThemeEnabled = enabled;
@@ -87,6 +97,7 @@
     SettingsVC *settings = [[[SettingsVC alloc] init] autorelease];
     settings.autoUpdate = _autoUpdateSubscriptions;
     settings.preserveCustomNames = _preserveCustomSubscriptionNames;
+    settings.sortSubscriptionsByPing = _sortSubscriptionsByPing;
     settings.stealthMode = _stealthModeEnabled;
     settings.darkTheme = _darkThemeEnabled;
     settings.automaticUpdateChecks = _automaticUpdateChecksEnabled;

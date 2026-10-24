@@ -1,4 +1,76 @@
 #import "list_logic.h"
+#include <limits.h>
+#include <stdlib.h>
+
+struct VCSubscriptionPingEntry {
+    NSUInteger source;
+    unsigned int latency;
+};
+
+static unsigned int VCSubscriptionPingLatency(id display) {
+    if (![display isKindOfClass:[NSString class]] || ![display hasSuffix:@" ms"] || [display length] <= 3) return UINT_MAX;
+    unsigned int value = 0;
+    for (NSUInteger i = 0; i < [display length]-3; i++) {
+        unichar c = [display characterAtIndex:i];
+        if (c < '0' || c > '9' || value > (INT_MAX-(unsigned int)(c-'0'))/10) return UINT_MAX;
+        value = value*10+(unsigned int)(c-'0');
+    }
+    return value;
+}
+
+static int VCCompareSubscriptionPingEntries(const void *left, const void *right) {
+    const struct VCSubscriptionPingEntry *a = left, *b = right;
+    if (a->latency != b->latency) return a->latency < b->latency ? -1 : 1;
+    return (a->source > b->source)-(a->source < b->source);
+}
+
+@implementation VCSubscriptionPingOrder
+- (id)initWithItems:(NSArray *)items displays:(NSDictionary *)displays {
+    self = [super init];
+    if (self) {
+        _items = [items retain];
+        [self updateWithDisplays:displays];
+    }
+    return self;
+}
+- (void)dealloc {
+    free(_entries);
+    [_items release];
+    [super dealloc];
+}
+- (BOOL)matchesItems:(NSArray *)items { return _items == items; }
+- (NSInteger)sourceIndexForDisplayIndex:(NSInteger)index {
+    if (index < 0 || index >= (NSInteger)[_items count]) return -1;
+    return _entries ? (NSInteger)_entries[index].source : index;
+}
+- (BOOL)updateWithDisplays:(NSDictionary *)displays {
+    if (![displays count] && !_entries) return NO;
+    NSUInteger count = [_items count];
+    struct VCSubscriptionPingEntry *entries = NULL;
+    BOOL reordered = NO;
+    if ([displays count] && count > 1) {
+        if (count > NSUIntegerMax/sizeof(*entries)) return NO;
+        entries = malloc(count*sizeof(*entries));
+        if (!entries) return NO;
+        for (NSUInteger i = 0; i < count; i++) {
+            entries[i].source = i;
+            entries[i].latency = VCSubscriptionPingLatency([displays objectForKey:[_items objectAtIndex:i]]);
+        }
+        qsort(entries, count, sizeof(*entries), VCCompareSubscriptionPingEntries);
+        for (NSUInteger i = 0; i < count; i++) {
+            if (entries[i].source != i) { reordered = YES; break; }
+        }
+        if (!reordered) { free(entries); entries = NULL; }
+    }
+    BOOL changed = NO;
+    for (NSUInteger i = 0; i < count; i++) {
+        if ((_entries ? _entries[i].source : i) != (entries ? entries[i].source : i)) { changed = YES; break; }
+    }
+    free(_entries);
+    _entries = entries;
+    return changed;
+}
+@end
 
 NSArray *VCSubscriptionItemsAtIndex(NSArray *subscriptions, NSInteger subIdx) {
     if (subIdx < 0 || subIdx >= (NSInteger)[subscriptions count]) return [NSArray array];

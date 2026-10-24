@@ -195,6 +195,10 @@ static BOOL gVCSecureStoreWritable = YES;
 
 - (void)saveData {
     if (_configurationLoading) return;
+    if (![_subscriptionPingOrder matchesItems:[self subscriptionItemsAtIndex:[self subscriptionRowsExpandedIndex]]]) {
+        [_subscriptionPingOrder release];
+        _subscriptionPingOrder = nil;
+    }
     if (!_applyingConfigurationDraft && !_configurationCommitInProgress) {
         _configurationRevision++;
         [self prepareProfileMetadata];
@@ -227,6 +231,7 @@ static BOOL gVCSecureStoreWritable = YES;
     NSUserDefaults *defaults=[NSUserDefaults standardUserDefaults];
     _autoUpdateSubscriptions=[defaults objectForKey:kDefaultsAutoUpdateSubsKey] ? [defaults boolForKey:kDefaultsAutoUpdateSubsKey] : YES;
     _preserveCustomSubscriptionNames=[defaults boolForKey:kDefaultsPreserveCustomSubscriptionNamesKey];
+    _sortSubscriptionsByPing=[defaults boolForKey:kDefaultsSortSubscriptionsByPingKey];
     _stealthModeEnabled=[defaults boolForKey:kDefaultsStealthModeKey];
     _darkThemeEnabled=[defaults boolForKey:kDefaultsDarkThemeKey];
     _automaticUpdateChecksEnabled=[defaults objectForKey:kDefaultsAutomaticUpdateChecksKey] ? [defaults boolForKey:kDefaultsAutomaticUpdateChecksKey] : YES;
@@ -288,6 +293,7 @@ static BOOL gVCSecureStoreWritable = YES;
     }
 
     _preserveCustomSubscriptionNames = [ud boolForKey:kDefaultsPreserveCustomSubscriptionNamesKey];
+    _sortSubscriptionsByPing = [ud boolForKey:kDefaultsSortSubscriptionsByPingKey];
 
     if ([ud objectForKey:kDefaultsStealthModeKey] == nil) {
         _stealthModeEnabled = NO;
@@ -467,6 +473,7 @@ static BOOL gVCSecureStoreWritable = YES;
     if (saved) {
         [_configs release]; _configs=[[_configurationDraft objectForKey:@"configs"] mutableCopy];
         [_subscriptions release]; _subscriptions=[[_configurationDraft objectForKey:@"subscriptions"] mutableCopy];
+        [_subscriptionPingOrder release]; _subscriptionPingOrder=nil;
         [VCProfiles() installPreparedMetadata:[_configurationDraft objectForKey:@"metadata"]];
         _configurationRevision++; _metadataRevision++;
     }
@@ -519,7 +526,47 @@ static BOOL gVCSecureStoreWritable = YES;
 }
 
 - (BOOL)mapSubscriptionRow:(NSInteger)row toSubIndex:(NSInteger *)subIndex itemIndex:(NSInteger *)itemIndex isHeader:(BOOL *)isHeader {
-    return VCMapSubscriptionRow(_subscriptions, [self subscriptionRowsExpandedIndex], row, subIndex, itemIndex, isHeader);
+    NSInteger sub = -1, item = -1;
+    BOOL header = YES;
+    if (!VCMapSubscriptionRow(_subscriptions, [self subscriptionRowsExpandedIndex], row, &sub, &item, &header)) return NO;
+    if (!header) {
+        NSArray *items = [self subscriptionItemsAtIndex:sub];
+        if (![_subscriptionPingOrder matchesItems:items]) {
+            [_subscriptionPingOrder release];
+            _subscriptionPingOrder = [[VCSubscriptionPingOrder alloc] initWithItems:items displays:_sortSubscriptionsByPing ? _pingDisplayByURI : nil];
+        }
+        item = [_subscriptionPingOrder sourceIndexForDisplayIndex:item];
+        if (item < 0) return NO;
+    }
+    if (subIndex) *subIndex = sub;
+    if (itemIndex) *itemIndex = item;
+    if (isHeader) *isHeader = header;
+    return YES;
+}
+
+- (void)scheduleSubscriptionPingSort {
+    [NSObject cancelPreviousPerformRequestsWithTarget:self selector:@selector(applySubscriptionPingSort) object:nil];
+    if (_sortSubscriptionsByPing || _subscriptionPingOrder)
+        [self performSelector:@selector(applySubscriptionPingSort) withObject:nil afterDelay:0.1];
+}
+
+- (void)applySubscriptionPingSort {
+    if (_sortSubscriptionsByPing && [self isSubscriptionPingInProgressAtIndex:[self subscriptionRowsExpandedIndex]]) return;
+    if (_tableView.editing) return;
+    if (_mainSectionTransitionInProgress || _mainTabTransitionInProgress ||
+        _tableView.dragging || _tableView.decelerating) {
+        [self scheduleSubscriptionPingSort];
+        return;
+    }
+    NSArray *items = [self subscriptionItemsAtIndex:[self subscriptionRowsExpandedIndex]];
+    if (!_subscriptionsSectionExpanded || ![_subscriptionPingOrder matchesItems:items]) {
+        [_subscriptionPingOrder release];
+        _subscriptionPingOrder = nil;
+        return;
+    }
+    if ([_subscriptionPingOrder updateWithDisplays:_sortSubscriptionsByPing ? _pingDisplayByURI : nil]) {
+        [_tableView reloadSections:[NSIndexSet indexSetWithIndex:1] withRowAnimation:UITableViewRowAnimationNone];
+    }
 }
 
 - (NSInteger)rowForSubscriptionHeaderAtIndex:(NSInteger)subIdx {
