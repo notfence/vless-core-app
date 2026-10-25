@@ -522,8 +522,7 @@ static BOOL gVCSecureStoreWritable = YES;
 - (BOOL)isSubscriptionPingInProgressAtIndex:(NSInteger)subIdx {
     NSString *identifier = [self subscriptionPingIdentifierAtIndex:subIdx];
     if (!identifier) return NO;
-    NSSet *pending = [_subscriptionPingPendingByIdentifier objectForKey:identifier];
-    return [pending count] > 0;
+    return [_subscriptionPingTokenByIdentifier objectForKey:identifier] != nil;
 }
 
 - (NSInteger)subscriptionSectionRowCount {

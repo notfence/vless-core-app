@@ -174,6 +174,7 @@ BOOL VCPingUpdateNetwork(id owner, NSString *signature, NSString **storedSignatu
 @end
 
 @implementation VCPingOperation
+@synthesize cancellation = _cancellation;
 - (id)initWithTarget:(id)target payload:(NSDictionary *)payload cancellation:(VCPingCancellation *)cancellation {
     self = [super initWithTarget:target selector:@selector(pingWorker:) object:payload];
     if (self) _cancellation = [cancellation retain];
@@ -185,6 +186,43 @@ BOOL VCPingUpdateNetwork(id owner, NSString *signature, NSString **storedSignatu
 }
 - (void)dealloc {
     [_cancellation release];
+    [super dealloc];
+}
+@end
+
+@implementation VCPingBatch
+@synthesize options = _options, pending = _pending, operations = _operations, previousDisplays = _previousDisplays;
+- (id)initWithURIs:(NSArray *)uris options:(NSDictionary *)options cancellation:(VCPingCancellation *)cancellation {
+    self = [super init];
+    if (self) {
+        _pending = [[NSMutableSet alloc] init];
+        NSMutableArray *ordered = [[NSMutableArray alloc] init];
+        for (id uri in uris) {
+            if ([cancellation isCancelled]) {
+                [ordered release];
+                [self release];
+                return nil;
+            }
+            if (![uri isKindOfClass:[NSString class]] || ![uri length] || [_pending containsObject:uri]) continue;
+            [_pending addObject:uri];
+            [ordered addObject:uri];
+        }
+        _uris = ordered;
+        _options = [options copy];
+        _operations = [[NSMutableArray alloc] initWithCapacity:4];
+        _previousDisplays = [[NSMutableDictionary alloc] initWithCapacity:4];
+    }
+    return self;
+}
+- (NSString *)nextURI {
+    return _cursor < [_uris count] ? [_uris objectAtIndex:_cursor++] : nil;
+}
+- (void)dealloc {
+    [_uris release];
+    [_options release];
+    [_pending release];
+    [_operations release];
+    [_previousDisplays release];
     [super dealloc];
 }
 @end

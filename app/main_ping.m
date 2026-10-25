@@ -116,13 +116,16 @@
 
     BOOL completedSubscriptionPing = NO;
     if (batchIdentifier) {
-        NSMutableSet *pending = [_subscriptionPingPendingByIdentifier objectForKey:batchIdentifier];
+        VCPingBatch *batch = [_subscriptionPingPendingByIdentifier objectForKey:batchIdentifier];
+        NSMutableSet *pending = batch.pending;
         [pending removeObject:uri];
+        [batch.previousDisplays removeObjectForKey:uri];
         if ([pending count] == 0) {
             [_subscriptionPingPendingByIdentifier removeObjectForKey:batchIdentifier];
             [_subscriptionPingOperationsByIdentifier removeObjectForKey:batchIdentifier];
             [_subscriptionPingPreviousDisplayByIdentifier removeObjectForKey:batchIdentifier];
             [_subscriptionPingTokenByIdentifier removeObjectForKey:batchIdentifier];
+            [_subscriptionPingReadyIdentifiers removeObject:batchIdentifier];
             completedSubscriptionPing = YES;
         }
     }
@@ -147,16 +150,18 @@
                                     [NSNumber numberWithInteger:pingType], @"type",
                                     cancellation, @"cancellation",
                                     nil];
-    [payload setObject:[NSNumber numberWithUnsignedInteger:_pingNetworkGeneration] forKey:@"network_generation"];
-    [payload setObject:@(VCPingTimeoutSecondsInDefaults([NSUserDefaults standardUserDefaults])*1000) forKey:@"timeout_ms"];
-    if (pingType == VCPingTypeProxyGET) {
-        [payload setObject:[[VCSelectedProxyPingURL() copy] autorelease] forKey:@"probe_url"];
-        [payload setObject:@(VCUseXmuxInDefaults([NSUserDefaults standardUserDefaults])) forKey:@"use_xmux"];
-    }
     if (batchIdentifier && batchToken) {
+        VCPingBatch *batch = [_subscriptionPingPendingByIdentifier objectForKey:batchIdentifier];
+        [payload addEntriesFromDictionary:batch.options];
         [payload setObject:batchIdentifier forKey:@"batch_identifier"];
         [payload setObject:batchToken forKey:@"batch_token"];
     } else {
+        [payload setObject:[NSNumber numberWithUnsignedInteger:_pingNetworkGeneration] forKey:@"network_generation"];
+        [payload setObject:@(VCPingTimeoutSecondsInDefaults([NSUserDefaults standardUserDefaults])*1000) forKey:@"timeout_ms"];
+        if (pingType == VCPingTypeProxyGET) {
+            [payload setObject:[[VCSelectedProxyPingURL() copy] autorelease] forKey:@"probe_url"];
+            [payload setObject:@(VCUseXmuxInDefaults([NSUserDefaults standardUserDefaults])) forKey:@"use_xmux"];
+        }
         cancellation.previousDisplay = [_pingDisplayByURI objectForKey:uri];
         [_standalonePingCancellationsByURI setObject:cancellation forKey:uri];
     }
@@ -168,6 +173,9 @@
     VCPingOperation *operation = [[[VCPingOperation alloc]
         initWithTarget:self payload:payload cancellation:cancellation] autorelease];
     operation.queuePriority = priority;
+    [operation setCompletionBlock:^{
+        [self performSelectorOnMainThread:@selector(pingOperationFinished:) withObject:cancellation waitUntilDone:NO];
+    }];
     [_pingQueue addOperation:operation];
     return operation;
 }
@@ -176,6 +184,7 @@
     [self refreshPingNetworkState];
     if (![uri isKindOfClass:[NSString class]] || [uri length] == 0) return;
     if ([_standalonePingCancellationsByURI objectForKey:uri]) return;
+    if ([self isURIInActiveSubscriptionPing:uri]) return;
     if ([[_pingDisplayByURI objectForKey:uri] isEqualToString:kVCPingLoadingValue]) return;
 
     VCRecordAppEvent(@"ping", @"Configuration ping started",
@@ -228,58 +237,95 @@
     NSArray *items = [self subscriptionItemsAtIndex:subIdx];
     if ([items count] == 0 || [self isSubscriptionPingInProgressAtIndex:subIdx]) return;
 
-    NSMutableArray *urisToPing = [NSMutableArray arrayWithCapacity:[items count]];
-    NSMutableSet *seenURIs = [NSMutableSet setWithCapacity:[items count]];
-    for (NSString *uri in items) {
-        if (![uri isKindOfClass:[NSString class]] || [uri length] == 0 ||
-            [seenURIs containsObject:uri]) {
-            continue;
-        }
-        [seenURIs addObject:uri];
-        [urisToPing addObject:uri];
-    }
-    if ([urisToPing count] == 0) return;
-
     NSString *identifier = [self subscriptionPingIdentifierAtIndex:subIdx];
     if (!identifier) return;
-    [_subscriptionPingPendingByIdentifier setObject:[NSMutableSet setWithArray:urisToPing]
-                                             forKey:identifier];
 
     _nextSubscriptionPingToken++;
     if (_nextSubscriptionPingToken == 0) _nextSubscriptionPingToken++;
     NSNumber *batchToken = [NSNumber numberWithUnsignedInteger:_nextSubscriptionPingToken];
     [_subscriptionPingTokenByIdentifier setObject:batchToken forKey:identifier];
 
-    NSMutableDictionary *previousDisplay = [NSMutableDictionary dictionaryWithCapacity:[urisToPing count]];
-    NSMutableArray *operations = [NSMutableArray arrayWithCapacity:[urisToPing count]];
-    [_subscriptionPingPreviousDisplayByIdentifier setObject:previousDisplay forKey:identifier];
-    [_subscriptionPingOperationsByIdentifier setObject:operations forKey:identifier];
-
     VCPingType pingType = VCSelectedPingType();
+    NSDictionary *options = @{@"type":@(pingType), @"network_generation":@(_pingNetworkGeneration),
+        @"timeout_ms":@(VCPingTimeoutSecondsInDefaults([NSUserDefaults standardUserDefaults])*1000),
+        @"probe_url":[[VCSelectedProxyPingURL() copy] autorelease],
+        @"use_xmux":@(VCUseXmuxInDefaults([NSUserDefaults standardUserDefaults]))};
+    VCPingCancellation *preparation = [[[VCPingCancellation alloc] init] autorelease];
+    NSArray *snapshot = [items copy];
+    [_subscriptionPingPreparationByIdentifier setObject:preparation forKey:identifier];
     VCRecordAppEvent(@"ping", @"Subscription ping batch started",
                      [NSString stringWithFormat:@"configs=%lu type=%ld",
-                      (unsigned long)[urisToPing count], (long)pingType]);
-    for (NSString *uri in urisToPing) {
-        NSString *previous = [_pingDisplayByURI objectForKey:uri];
-        if ([previous length] > 0 && ![previous isEqualToString:kVCPingLoadingValue]) {
-            [previousDisplay setObject:previous forKey:uri];
-        }
-        NSOperation *operation = [self enqueuePingForURI:uri
-                                                    type:pingType
-                                                priority:NSOperationQueuePriorityNormal
-                                         batchIdentifier:identifier
-                                              batchToken:batchToken];
-        if (operation) [operations addObject:operation];
-    }
+                      (unsigned long)[items count], (long)pingType]);
+    dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_DEFAULT, 0), ^{
+        NSAutoreleasePool *pool = [[NSAutoreleasePool alloc] init];
+        VCPingBatch *batch = [[VCPingBatch alloc] initWithURIs:snapshot options:options cancellation:preparation];
+        [snapshot release];
+        dispatch_async(dispatch_get_main_queue(), ^{
+            if (![preparation isCancelled] &&
+                [[_subscriptionPingTokenByIdentifier objectForKey:identifier] isEqual:batchToken]) {
+                [_subscriptionPingPreparationByIdentifier removeObjectForKey:identifier];
+                if ([batch.pending count]) {
+                    [_subscriptionPingPendingByIdentifier setObject:batch forKey:identifier];
+                    [_subscriptionPingOperationsByIdentifier setObject:batch.operations forKey:identifier];
+                    [_subscriptionPingPreviousDisplayByIdentifier setObject:batch.previousDisplays forKey:identifier];
+                    [_subscriptionPingReadyIdentifiers addObject:identifier];
+                    [self pumpSubscriptionPings];
+                } else {
+                    [_subscriptionPingTokenByIdentifier removeObjectForKey:identifier];
+                }
+                [self refreshVisibleSubscriptionPingAccessories];
+                [self refreshVisibleSubscriptionHeaderAccessories];
+            }
+            [batch release];
+        });
+        [pool drain];
+    });
     [self refreshVisibleSubscriptionPingAccessories];
     [self refreshVisibleSubscriptionHeaderAccessories];
+}
+
+- (void)pumpSubscriptionPings {
+    NSUInteger occupied = 0;
+    for (NSOperation *operation in [_pingQueue operations]) if (![operation isFinished]) occupied++;
+    while (occupied < 4 && [_subscriptionPingReadyIdentifiers count]) {
+        NSString *identifier = [[[_subscriptionPingReadyIdentifiers objectAtIndex:0] retain] autorelease];
+        [_subscriptionPingReadyIdentifiers removeObjectAtIndex:0];
+        VCPingBatch *batch = [_subscriptionPingPendingByIdentifier objectForKey:identifier];
+        NSString *uri = [batch nextURI];
+        if (!uri) continue;
+        [_subscriptionPingReadyIdentifiers addObject:identifier];
+        id previous = [_pingDisplayByURI objectForKey:uri];
+        if ([previous isEqual:kVCPingLoadingValue]) {
+            for (NSDictionary *displays in [_subscriptionPingPreviousDisplayByIdentifier allValues]) {
+                if ([displays objectForKey:uri]) { previous = [displays objectForKey:uri]; break; }
+            }
+            VCPingCancellation *standalone = [_standalonePingCancellationsByURI objectForKey:uri];
+            if (standalone) previous = standalone.previousDisplay;
+        }
+        [batch.previousDisplays setObject:(previous ? previous : (id)[NSNull null]) forKey:uri];
+        NSOperation *operation = [self enqueuePingForURI:uri type:[[batch.options objectForKey:@"type"] integerValue]
+            priority:NSOperationQueuePriorityNormal batchIdentifier:identifier
+            batchToken:[_subscriptionPingTokenByIdentifier objectForKey:identifier]];
+        [batch.operations addObject:operation];
+        occupied++;
+    }
+}
+
+- (void)pingOperationFinished:(VCPingCancellation *)cancellation {
+    for (NSMutableArray *operations in [_subscriptionPingOperationsByIdentifier allValues]) {
+        for (NSUInteger i = [operations count]; i > 0; i--) {
+            VCPingOperation *operation = [operations objectAtIndex:i - 1];
+            if (operation.cancellation == cancellation) [operations removeObjectAtIndex:i - 1];
+        }
+    }
+    [self pumpSubscriptionPings];
 }
 
 - (BOOL)isURIInActiveSubscriptionPing:(NSString *)uri {
     if (![uri isKindOfClass:[NSString class]] || [uri length] == 0) return NO;
     for (NSString *identifier in _subscriptionPingPendingByIdentifier) {
-        NSSet *pending = [_subscriptionPingPendingByIdentifier objectForKey:identifier];
-        if ([pending containsObject:uri]) return YES;
+        VCPingBatch *batch = [_subscriptionPingPendingByIdentifier objectForKey:identifier];
+        if ([batch.pending containsObject:uri]) return YES;
     }
     return NO;
 }
@@ -289,26 +335,29 @@
     if (!identifier) return;
 
     NSArray *operations = [[_subscriptionPingOperationsByIdentifier objectForKey:identifier] copy];
-    NSSet *pending = [[_subscriptionPingPendingByIdentifier objectForKey:identifier] copy];
-    NSUInteger pendingCount = [pending count];
+    VCPingBatch *batch = [_subscriptionPingPendingByIdentifier objectForKey:identifier];
+    NSUInteger pendingCount = [batch.pending count];
     NSDictionary *previousDisplay = [[_subscriptionPingPreviousDisplayByIdentifier objectForKey:identifier] copy];
 
     [_subscriptionPingPendingByIdentifier removeObjectForKey:identifier];
     [_subscriptionPingOperationsByIdentifier removeObjectForKey:identifier];
     [_subscriptionPingPreviousDisplayByIdentifier removeObjectForKey:identifier];
     [_subscriptionPingTokenByIdentifier removeObjectForKey:identifier];
+    [[_subscriptionPingPreparationByIdentifier objectForKey:identifier] cancel];
+    [_subscriptionPingPreparationByIdentifier removeObjectForKey:identifier];
+    [_subscriptionPingReadyIdentifiers removeObject:identifier];
 
     for (NSOperation *operation in operations) {
         [operation cancel];
     }
 
-    for (NSString *uri in pending) {
+    for (NSString *uri in previousDisplay) {
         if (![[_pingDisplayByURI objectForKey:uri] isEqualToString:kVCPingLoadingValue]) continue;
         if ([self isURIInActiveSubscriptionPing:uri] || [_standalonePingCancellationsByURI objectForKey:uri]) {
             continue;
         }
-        NSString *previous = [previousDisplay objectForKey:uri];
-        if ([previous length] > 0) {
+        id previous = [previousDisplay objectForKey:uri];
+        if ([previous isKindOfClass:[NSString class]] && [previous length] > 0) {
             [_pingDisplayByURI setObject:previous forKey:uri];
         } else {
             [_pingDisplayByURI removeObjectForKey:uri];
@@ -316,8 +365,8 @@
     }
 
     [operations release];
-    [pending release];
     [previousDisplay release];
+    [self pumpSubscriptionPings];
 
     [self refreshVisibleSubscriptionPingAccessories];
     [self refreshVisibleSubscriptionHeaderAccessories];
@@ -341,7 +390,7 @@
 
 - (void)stopAllPings {
     if ([_standalonePingCancellationsByURI count] == 0 &&
-        [_subscriptionPingPendingByIdentifier count] == 0) return;
+        [_subscriptionPingTokenByIdentifier count] == 0) return;
 
     NSMutableDictionary *previousDisplay = [NSMutableDictionary dictionary];
     for (NSDictionary *previous in [_subscriptionPingPreviousDisplayByIdentifier allValues]) {
@@ -349,24 +398,24 @@
     }
     for (NSString *uri in _standalonePingCancellationsByURI) {
         VCPingCancellation *cancellation = [_standalonePingCancellationsByURI objectForKey:uri];
-        if ([cancellation.previousDisplay length] > 0) {
-            [previousDisplay setObject:cancellation.previousDisplay forKey:uri];
-        }
+        [previousDisplay setObject:(cancellation.previousDisplay ? (id)cancellation.previousDisplay : (id)[NSNull null]) forKey:uri];
         [cancellation cancel];
     }
     [_pingQueue cancelAllOperations];
+    for (VCPingCancellation *preparation in [_subscriptionPingPreparationByIdentifier allValues]) [preparation cancel];
+    [_subscriptionPingPreparationByIdentifier removeAllObjects];
+    [_subscriptionPingReadyIdentifiers removeAllObjects];
     [_standalonePingCancellationsByURI removeAllObjects];
     [_subscriptionPingPendingByIdentifier removeAllObjects];
     [_subscriptionPingOperationsByIdentifier removeAllObjects];
     [_subscriptionPingPreviousDisplayByIdentifier removeAllObjects];
     [_subscriptionPingTokenByIdentifier removeAllObjects];
 
-    NSArray *uris = [_pingDisplayByURI allKeys];
     NSUInteger stoppedCount = 0;
-    for (NSString *uri in uris) {
+    for (NSString *uri in previousDisplay) {
         if (![[_pingDisplayByURI objectForKey:uri] isEqualToString:kVCPingLoadingValue]) continue;
-        NSString *previous = [previousDisplay objectForKey:uri];
-        if ([previous length] > 0) [_pingDisplayByURI setObject:previous forKey:uri];
+        id previous = [previousDisplay objectForKey:uri];
+        if ([previous isKindOfClass:[NSString class]] && [previous length] > 0) [_pingDisplayByURI setObject:previous forKey:uri];
         else [_pingDisplayByURI removeObjectForKey:uri];
         stoppedCount++;
     }

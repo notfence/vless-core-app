@@ -399,7 +399,7 @@
 
 - (UIView *)accessoryPingForURI:(NSString *)uri {
     NSString *display = ([uri isKindOfClass:[NSString class]] ? [_pingDisplayByURI objectForKey:uri] : nil);
-    BOOL loading = [display isEqualToString:kVCPingLoadingValue];
+    BOOL loading = [display isEqualToString:kVCPingLoadingValue] || [self isURIInActiveSubscriptionPing:uri];
     BOOL hasResult = ([display length] > 0 && !loading);
     BOOL failed = VCPingDisplayIsFailure(display);
     UIView *v = [[[UIView alloc] initWithFrame:CGRectMake(0, 0, 24.0f, 24.0f)] autorelease];

@@ -34,6 +34,8 @@ HOST_TESTS += $(HOST_BUILD_DIR)/test_runtime_uri
 HOST_TESTS += $(HOST_BUILD_DIR)/test_incy
 HOST_TESTS += $(HOST_BUILD_DIR)/test_httpupgrade_import
 HOST_TESTS += $(HOST_BUILD_DIR)/test_main_state
+HOST_TESTS += $(HOST_BUILD_DIR)/test_ping_batch
+HOST_TESTS += $(HOST_BUILD_DIR)/test_main_ping
 CORE_PARSE_SRC := uri utils xhttp_config xhttp_download xhttp_payload buffer_budget websocket grpc http_headers core_log
 CORE_PARSE_SRC += vmess_uri shadowsocks_uri shadowsocks_crypto blake3 trojan core_random deadline socket_util relay_memory connection_trace resolver
 CORE_PARSE_OBJ := $(addprefix $(HOST_BUILD_DIR)/core-parser/,$(addsuffix .o,$(CORE_PARSE_SRC)))
@@ -64,6 +66,8 @@ test: requirements $(HOST_TESTS)
 	$(HOST_BUILD_DIR)/test_helper_monitor
 	$(HOST_BUILD_DIR)/test_dns_relay
 	$(HOST_BUILD_DIR)/test_ping
+	$(HOST_BUILD_DIR)/test_ping_batch
+	$(HOST_BUILD_DIR)/test_main_ping
 	$(HOST_BUILD_DIR)/test_proxy_probe
 	$(HOST_BUILD_DIR)/test_core_config
 	VC_HOST_BUILD_DIR="$(HOST_BUILD_DIR)" VC_TEST_SANITIZE="$(SANITIZE)" python3 $(ROOT)/tests/test_core_bridge.py
@@ -126,6 +130,19 @@ $(HOST_BUILD_DIR)/common/flag_logic.o: ../common/flag_logic.c ../common/flag_log
 
 $(HOST_BUILD_DIR)/test_ping: $(HOST_BUILD_DIR)/test_ping.o $(HOST_BUILD_DIR)/common/connection_logic.o
 	$(HOST_CC) $(SANITIZE) $^ -o $@ $(HOST_LIBS) -Wl,--wrap=kill,--wrap=waitpid,--wrap=select
+
+$(HOST_BUILD_DIR)/test_ping_batch: $(HOST_BUILD_DIR)/test_ping_batch.o $(HOST_BUILD_DIR)/common/connection_logic.o
+	$(HOST_CC) $(SANITIZE) $^ -o $@ $(HOST_LIBS)
+
+$(HOST_BUILD_DIR)/main_ping_test.inc: ../app/main_ping.m extract_ui_methods.py
+	mkdir -p $(dir $@)
+	python3 extract_ui_methods.py $< $@ '- (void)pumpSubscriptionPings' '- (void)pingOperationFinished:' '- (BOOL)isURIInActiveSubscriptionPing:' '- (void)stopSubscriptionPingAtIndex:' '- (void)stopAllPings'
+
+$(HOST_BUILD_DIR)/test_main_ping.o: $(HOST_BUILD_DIR)/main_ping_test.inc
+	$(HOST_CC) $(HOST_CPPFLAGS) $(HOST_OBJCFLAGS) $(HOST_CFLAGS) -I$(HOST_BUILD_DIR) -MMD -MP -c test_main_ping.m -o $@
+
+$(HOST_BUILD_DIR)/test_main_ping: $(HOST_BUILD_DIR)/test_main_ping.o $(HOST_BUILD_DIR)/common/connection_logic.o
+	$(HOST_CC) $(SANITIZE) $^ -o $@ $(HOST_LIBS)
 
 $(HOST_BUILD_DIR)/app/proxy_probe.o: ../app/proxy_probe.m ../app/proxy_probe.h ../common/connection_logic.h | requirements
 	mkdir -p $(dir $@)
@@ -211,5 +228,5 @@ sanitizers:
 asan:
 	ASAN_OPTIONS=detect_leaks=0 $(MAKE) test HOST_BUILD_DIR=$(HOST_BUILD_DIR)-asan SANITIZE='-fsanitize=address -fno-omit-frame-pointer'
 
--include $(APP_OBJECTS:.o=.d) $(CORE_PARSE_OBJ:.o=.d) $(HOST_BUILD_DIR)/test_ping.d $(HOST_BUILD_DIR)/test_proxy_probe.d $(HOST_BUILD_DIR)/app/proxy_probe.d $(HOST_BUILD_DIR)/test_import_formats.d $(HOST_BUILD_DIR)/test_httpupgrade_import.d $(HOST_BUILD_DIR)/test_runtime_uri.d $(HOST_BUILD_DIR)/test_incy.d $(HOST_BUILD_DIR)/test_large_subscriptions.d $(HOST_BUILD_DIR)/integrations/karing/karing_backup.d $(HOST_BUILD_DIR)/test_flag_profiles.d $(HOST_BUILD_DIR)/common/flag_logic.d $(HOST_BUILD_DIR)/test_main_state.d
+-include $(APP_OBJECTS:.o=.d) $(CORE_PARSE_OBJ:.o=.d) $(HOST_BUILD_DIR)/test_ping.d $(HOST_BUILD_DIR)/test_proxy_probe.d $(HOST_BUILD_DIR)/app/proxy_probe.d $(HOST_BUILD_DIR)/test_import_formats.d $(HOST_BUILD_DIR)/test_httpupgrade_import.d $(HOST_BUILD_DIR)/test_runtime_uri.d $(HOST_BUILD_DIR)/test_incy.d $(HOST_BUILD_DIR)/test_large_subscriptions.d $(HOST_BUILD_DIR)/integrations/karing/karing_backup.d $(HOST_BUILD_DIR)/test_flag_profiles.d $(HOST_BUILD_DIR)/common/flag_logic.d $(HOST_BUILD_DIR)/test_main_state.d $(HOST_BUILD_DIR)/test_ping_batch.d $(HOST_BUILD_DIR)/test_main_ping.d
 .PHONY: test requirements sanitizers asan

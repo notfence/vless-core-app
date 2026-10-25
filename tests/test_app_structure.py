@@ -155,6 +155,14 @@ def main():
         if required not in apply_sort:
             raise AssertionError('app/ping-sort-must-wait-for-batch-and-interactions-and-only-reload-on-change')
     ping_source = (ROOT / 'app/main_ping.m').read_text()
+    start_batch = ping_source.split('- (void)startSubscriptionPingAtIndex:', 1)[1].split('\n}', 1)[0]
+    pump_batch = ping_source.split('- (void)pumpSubscriptionPings {', 1)[1].split('\n}', 1)[0]
+    if 'enqueuePingForURI:' in start_batch or 'dispatch_async(dispatch_get_global_queue' not in start_batch or 'initWithURIs:snapshot options:options cancellation:preparation' not in start_batch:
+        raise AssertionError('app/ping-batch-must-prepare-snapshot-off-main-without-eager-operations')
+    if 'occupied < 4' not in pump_batch or 'isFinished' not in pump_batch or 'nextURI' not in pump_batch:
+        raise AssertionError('app/ping-batch-must-only-refill-free-operation-slots')
+    if 'setCompletionBlock:' not in ping_source or 'pingOperationFinished:' not in ping_source or 'batch.options' not in ping_source:
+        raise AssertionError('app/ping-refill-must-handle-cancellation-and-use-the-batch-options-snapshot')
     for required in ('return @"Use XMUX";', 'return @"Use XMUX for supported configs";', 'SettingsUseXmuxCell', 'cell.accessoryView = _useXmuxSwitch;', '[_useXmuxSwitch release]'):
         if required not in parent_settings:
             raise AssertionError('app/xmux-must-use-the-requested-title-description-and-shared-settings-style')

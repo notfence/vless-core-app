@@ -19,6 +19,8 @@
     _subscriptionPingOperationsByIdentifier = [[NSMutableDictionary alloc] init];
     _subscriptionPingPreviousDisplayByIdentifier = [[NSMutableDictionary alloc] init];
     _subscriptionPingTokenByIdentifier = [[NSMutableDictionary alloc] init];
+    _subscriptionPingPreparationByIdentifier = [[NSMutableDictionary alloc] init];
+    _subscriptionPingReadyIdentifiers = [[NSMutableArray alloc] init];
     _pingQueue = [[NSOperationQueue alloc] init];
     _pingQueue.maxConcurrentOperationCount = 4;
 
@@ -411,6 +413,8 @@
     [_subscriptionPingOperationsByIdentifier release];
     [_subscriptionPingPreviousDisplayByIdentifier release];
     [_subscriptionPingTokenByIdentifier release];
+    [_subscriptionPingPreparationByIdentifier release];
+    [_subscriptionPingReadyIdentifiers release];
     [_pingQueue cancelAllOperations];
     [_pingQueue release];
 

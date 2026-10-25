@@ -76,6 +76,8 @@
     NSMutableDictionary *_subscriptionPingOperationsByIdentifier;
     NSMutableDictionary *_subscriptionPingPreviousDisplayByIdentifier;
     NSMutableDictionary *_subscriptionPingTokenByIdentifier;
+    NSMutableDictionary *_subscriptionPingPreparationByIdentifier;
+    NSMutableArray *_subscriptionPingReadyIdentifiers;
     NSOperationQueue *_pingQueue;
 
     NSInteger _selectedConfigIndex;
@@ -243,6 +245,8 @@
 - (void)pingNetworkTick:(NSTimer *)timer;
 - (void)pingWorker:(NSDictionary *)payload;
 - (void)pingResultOnMain:(NSDictionary *)payload;
+- (void)pumpSubscriptionPings;
+- (void)pingOperationFinished:(VCPingCancellation *)cancellation;
 - (NSOperation *)enqueuePingForURI:(NSString *)uri
                               type:(VCPingType)pingType
                           priority:(NSOperationQueuePriority)priority

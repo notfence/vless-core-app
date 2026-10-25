@@ -25,7 +25,24 @@
 @interface VCPingOperation : NSInvocationOperation {
     VCPingCancellation *_cancellation;
 }
+@property(nonatomic, readonly) VCPingCancellation *cancellation;
 - (id)initWithTarget:(id)target payload:(NSDictionary *)payload cancellation:(VCPingCancellation *)cancellation;
+@end
+
+@interface VCPingBatch : NSObject {
+    NSArray *_uris;
+    NSDictionary *_options;
+    NSMutableSet *_pending;
+    NSMutableArray *_operations;
+    NSMutableDictionary *_previousDisplays;
+    NSUInteger _cursor;
+}
+@property(nonatomic, readonly) NSDictionary *options;
+@property(nonatomic, readonly) NSMutableSet *pending;
+@property(nonatomic, readonly) NSMutableArray *operations;
+@property(nonatomic, readonly) NSMutableDictionary *previousDisplays;
+- (id)initWithURIs:(NSArray *)uris options:(NSDictionary *)options cancellation:(VCPingCancellation *)cancellation;
+- (NSString *)nextURI;
 @end
 
 void VCClosePingSocket(int fd, VCPingCancellation *cancellation);
