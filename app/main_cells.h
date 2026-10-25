@@ -66,7 +66,10 @@ typedef NS_ENUM(NSInteger, VCMainListCellKind) {
     UILabel *_metadataSeparators[2];
     BOOL _showsDescription;
     BOOL _showsActions;
+    BOOL _pingLoading, _headerImagesValid, _headerImagesDark, _headerPingImageLoading;
+    NSInteger _headerImagesAccent;
 }
+- (void)refreshHeaderImages;
 - (void)configureDescription:(NSString *)description
                  configCount:(NSString *)configCount
                      traffic:(NSString *)traffic

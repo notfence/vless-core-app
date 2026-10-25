@@ -504,12 +504,8 @@ void VCApplyTouchFeedbackToButton(UIButton *button, id target) {
         : [NSString stringWithFormat:@"Runs %@ latency tests", VCPingTypeName(VCSelectedPingType())];
     _infoButton.accessibilityLabel = @"Subscription information";
     _infoButton.accessibilityHint = @"Opens subscription details and actions";
-    UIImage *pingIcon = pingLoading ? MakeIconImage(VCIconTypeStop, 20.0f, NO)
-        : LoadBundledIconTinted(@"icon-ping", 20.0f, VCPrimaryTextColor());
-    [_pingButton setImage:(pingIcon ? pingIcon : MakeIconImage(VCIconTypeWifi, 18.0f, NO))
-                  forState:UIControlStateNormal];
-    [_infoButton setImage:LoadBundledIconTinted(@"info", 21.0f, VCSecondaryTextColor())
-                  forState:UIControlStateNormal];
+    _pingLoading = pingLoading;
+    [self refreshHeaderImages];
 
     [_webPageButton removeTarget:nil action:NULL forControlEvents:UIControlEventTouchUpInside];
     [_supportButton removeTarget:nil action:NULL forControlEvents:UIControlEventTouchUpInside];
@@ -535,23 +531,46 @@ void VCApplyTouchFeedbackToButton(UIButton *button, id target) {
     [super refreshVisualAppearance];
     _providerDescriptionLabel.textColor = VCPrimaryTextColor();
     _lastUpdatedLabel.textColor = VCSecondaryTextColor();
-    VCIconType iconTypes[] = {VCIconTypeDocument, VCIconTypeStorage, VCIconTypeCalendar};
     for (NSUInteger i = 0; i < 3; i++) {
-        _metadataIcons[i].image = MakeIconImage(iconTypes[i], 13.0f, YES);
         _metadataLabels[i].textColor = VCSecondaryTextColor();
     }
     for (NSUInteger i = 0; i < 2; i++) {
         _metadataSeparators[i].textColor = VCSecondaryTextColor();
     }
 
-    [_webPageButton setImage:MakeIconImage(VCIconTypeGlobe, 17.0f, YES)
+    [self refreshHeaderImages];
+}
+
+- (void)refreshHeaderImages {
+    BOOL dark = VCAppearanceIsDark();
+    NSInteger accent = VCAppearanceAccentIndex();
+    BOOL changed = !_headerImagesValid || _headerImagesDark != dark || _headerImagesAccent != accent;
+    if (!changed && _headerPingImageLoading == _pingLoading) return;
+    if (changed) {
+        VCIconType iconTypes[] = {VCIconTypeDocument, VCIconTypeStorage, VCIconTypeCalendar};
+        for (NSUInteger i = 0; i < 3; i++) _metadataIcons[i].image = MakeIconImage(iconTypes[i], 13.0f, YES);
+        [_infoButton setImage:LoadBundledIconTinted(@"info", 21.0f, VCSecondaryTextColor())
                     forState:UIControlStateNormal];
-    [_webPageButton setImage:MakeIconImage(VCIconTypeGlobe, 17.0f, NO)
-                    forState:UIControlStateHighlighted];
-    [_supportButton setImage:MakeIconImage(VCIconTypeSupport, 17.0f, YES)
+        [_webPageButton setImage:MakeIconImage(VCIconTypeGlobe, 17.0f, YES)
                     forState:UIControlStateNormal];
-    [_supportButton setImage:MakeIconImage(VCIconTypeSupport, 17.0f, NO)
+        [_webPageButton setImage:MakeIconImage(VCIconTypeGlobe, 17.0f, NO)
                     forState:UIControlStateHighlighted];
+        [_supportButton setImage:MakeIconImage(VCIconTypeSupport, 17.0f, YES)
+                    forState:UIControlStateNormal];
+        [_supportButton setImage:MakeIconImage(VCIconTypeSupport, 17.0f, NO)
+                    forState:UIControlStateHighlighted];
+    }
+    UIImage *pingIcon = _pingLoading ? MakeIconImage(VCIconTypeStop, 20.0f, NO)
+        : LoadBundledIconTinted(@"icon-ping", 20.0f, VCPrimaryTextColor());
+    [_pingButton setImage:(pingIcon ? pingIcon : MakeIconImage(VCIconTypeWifi, 18.0f, NO))
+                forState:UIControlStateNormal];
+    _headerImagesValid = _metadataIcons[0].image && _metadataIcons[1].image && _metadataIcons[2].image &&
+        [_infoButton imageForState:UIControlStateNormal] && [_pingButton imageForState:UIControlStateNormal] &&
+        [_webPageButton imageForState:UIControlStateNormal] && [_webPageButton imageForState:UIControlStateHighlighted] &&
+        [_supportButton imageForState:UIControlStateNormal] && [_supportButton imageForState:UIControlStateHighlighted];
+    _headerImagesDark = dark;
+    _headerImagesAccent = accent;
+    _headerPingImageLoading = _pingLoading;
 }
 
 - (void)layoutSubviews {
