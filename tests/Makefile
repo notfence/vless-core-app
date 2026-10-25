@@ -33,6 +33,7 @@ HOST_TESTS += $(HOST_BUILD_DIR)/test_flag_profiles
 HOST_TESTS += $(HOST_BUILD_DIR)/test_runtime_uri
 HOST_TESTS += $(HOST_BUILD_DIR)/test_incy
 HOST_TESTS += $(HOST_BUILD_DIR)/test_httpupgrade_import
+HOST_TESTS += $(HOST_BUILD_DIR)/test_main_state
 CORE_PARSE_SRC := uri utils xhttp_config xhttp_download xhttp_payload buffer_budget websocket grpc http_headers core_log
 CORE_PARSE_SRC += vmess_uri shadowsocks_uri shadowsocks_crypto blake3 trojan core_random deadline socket_util relay_memory connection_trace resolver
 CORE_PARSE_OBJ := $(addprefix $(HOST_BUILD_DIR)/core-parser/,$(addsuffix .o,$(CORE_PARSE_SRC)))
@@ -42,6 +43,7 @@ HOST_ZBAR_HEADERS := $(shell find $(ROOT)/$(ZBAR_DIR) -name '*.h')
 
 test: requirements $(HOST_TESTS)
 	$(HOST_BUILD_DIR)/test_app_logic
+	$(HOST_BUILD_DIR)/test_main_state
 	$(HOST_BUILD_DIR)/test_large_subscriptions
 	$(HOST_BUILD_DIR)/test_flags
 	$(HOST_BUILD_DIR)/test_flag_profiles 1000 scan
@@ -95,6 +97,21 @@ $(HOST_BUILD_DIR)/integrations/incy/%.o: ../integrations/incy/%.m | requirements
 	$(HOST_CC) $(HOST_CPPFLAGS) $(HOST_OBJCFLAGS) $(HOST_CFLAGS) -MMD -MP -c $< -o $@
 
 $(HOST_BUILD_DIR)/test_app_logic: $(APP_OBJECTS)
+	$(HOST_CC) $(SANITIZE) $^ -o $@ $(HOST_LIBS)
+
+UI_SOURCE_ROOT ?= $(ROOT)
+$(HOST_BUILD_DIR)/main_state_save.inc: $(UI_SOURCE_ROOT)/app/main_state.m extract_ui_methods.py
+	mkdir -p $(dir $@)
+	python3 extract_ui_methods.py $< $@ '- (void)saveData {' '?- (void)saveSettings {'
+
+$(HOST_BUILD_DIR)/main_state_settings.inc: $(UI_SOURCE_ROOT)/app/main_settings.m extract_ui_methods.py
+	mkdir -p $(dir $@)
+	python3 extract_ui_methods.py $< $@ '- (void)settingsVC:(SettingsVC *)vc didChangeAutoUpdate:' '- (void)settingsVC:(SettingsVC *)vc didChangeAutomaticUpdateChecks:' '- (void)settingsVC:(SettingsVC *)vc didChangePreserveCustomSubscriptionNames:' '- (void)settingsVC:(SettingsVC *)vc didChangeStealthMode:' '- (void)settingsVC:(SettingsVC *)vc didChangeDarkTheme:'
+
+$(HOST_BUILD_DIR)/test_main_state.o: $(HOST_BUILD_DIR)/main_state_save.inc $(HOST_BUILD_DIR)/main_state_settings.inc
+$(HOST_BUILD_DIR)/test_main_state.o: HOST_CPPFLAGS += -I$(HOST_BUILD_DIR)
+
+$(HOST_BUILD_DIR)/test_main_state: $(HOST_BUILD_DIR)/test_main_state.o $(filter-out $(HOST_BUILD_DIR)/test_app_logic.o,$(APP_OBJECTS))
 	$(HOST_CC) $(SANITIZE) $^ -o $@ $(HOST_LIBS)
 
 $(HOST_BUILD_DIR)/test_large_subscriptions: $(HOST_BUILD_DIR)/test_large_subscriptions.o $(filter-out $(HOST_BUILD_DIR)/test_app_logic.o,$(APP_OBJECTS))
@@ -194,5 +211,5 @@ sanitizers:
 asan:
 	ASAN_OPTIONS=detect_leaks=0 $(MAKE) test HOST_BUILD_DIR=$(HOST_BUILD_DIR)-asan SANITIZE='-fsanitize=address -fno-omit-frame-pointer'
 
--include $(APP_OBJECTS:.o=.d) $(CORE_PARSE_OBJ:.o=.d) $(HOST_BUILD_DIR)/test_ping.d $(HOST_BUILD_DIR)/test_proxy_probe.d $(HOST_BUILD_DIR)/app/proxy_probe.d $(HOST_BUILD_DIR)/test_import_formats.d $(HOST_BUILD_DIR)/test_httpupgrade_import.d $(HOST_BUILD_DIR)/test_runtime_uri.d $(HOST_BUILD_DIR)/test_incy.d $(HOST_BUILD_DIR)/test_large_subscriptions.d $(HOST_BUILD_DIR)/integrations/karing/karing_backup.d $(HOST_BUILD_DIR)/test_flag_profiles.d $(HOST_BUILD_DIR)/common/flag_logic.d
+-include $(APP_OBJECTS:.o=.d) $(CORE_PARSE_OBJ:.o=.d) $(HOST_BUILD_DIR)/test_ping.d $(HOST_BUILD_DIR)/test_proxy_probe.d $(HOST_BUILD_DIR)/app/proxy_probe.d $(HOST_BUILD_DIR)/test_import_formats.d $(HOST_BUILD_DIR)/test_httpupgrade_import.d $(HOST_BUILD_DIR)/test_runtime_uri.d $(HOST_BUILD_DIR)/test_incy.d $(HOST_BUILD_DIR)/test_large_subscriptions.d $(HOST_BUILD_DIR)/integrations/karing/karing_backup.d $(HOST_BUILD_DIR)/test_flag_profiles.d $(HOST_BUILD_DIR)/common/flag_logic.d $(HOST_BUILD_DIR)/test_main_state.d
 .PHONY: test requirements sanitizers asan

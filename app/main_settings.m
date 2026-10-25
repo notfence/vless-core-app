@@ -8,7 +8,7 @@
     (void)vc;
     _autoUpdateSubscriptions = enabled;
     VCRecordAppEvent(@"settings", @"Subscription auto-update changed", enabled ? @"enabled=1" : @"enabled=0");
-    [self saveData];
+    [self saveSettings];
     [self showStatus:_autoUpdateSubscriptions ? @"Auto-update subscriptions: ON"
                                            : @"Auto-update subscriptions: OFF"
                  ok:YES];
@@ -18,7 +18,7 @@
     (void)vc;
     _automaticUpdateChecksEnabled = enabled;
     VCRecordAppEvent(@"settings", @"Application update checks changed", enabled ? @"enabled=1" : @"enabled=0");
-    [self saveData];
+    [self saveSettings];
 
     [NSObject cancelPreviousPerformRequestsWithTarget:self
                                              selector:@selector(startAutomaticUpdateCheckIfNeeded)
@@ -40,7 +40,7 @@
     (void)vc;
     _preserveCustomSubscriptionNames = enabled;
     VCRecordAppEvent(@"settings", @"Preserve custom names changed", enabled ? @"enabled=1" : @"enabled=0");
-    [self saveData];
+    [self saveSettings];
     [self showStatus:_preserveCustomSubscriptionNames ? @"Preserve custom names: ON"
                                                       : @"Preserve custom names: OFF"
                  ok:YES];
@@ -50,7 +50,7 @@
     (void)vc;
     _stealthModeEnabled = enabled;
     VCRecordAppEvent(@"settings", @"Stealth mode changed", enabled ? @"enabled=1" : @"enabled=0");
-    [self saveData];
+    [self saveSettings];
     [_tableView reloadData];
     [self showStatus:_stealthModeEnabled ? @"Stealth mode: ON"
                                    : @"Stealth mode: OFF"
@@ -90,7 +90,7 @@
     (void)vc;
     _darkThemeEnabled = enabled;
     VCRecordAppEvent(@"settings", @"Appearance changed", enabled ? @"theme=dark" : @"theme=light");
-    [self saveData];
+    [self saveSettings];
     [self applyTheme];
 }
 

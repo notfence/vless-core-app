@@ -166,6 +166,7 @@
 - (BOOL)isDirectConfigURI:(NSString *)s;
 - (void)saveMainState;
 - (void)flushMainStateDefaults;
+- (void)saveSettings;
 - (void)saveData;
 - (void)loadData;
 - (void)completeConfigurationLoad:(NSDictionary *)loaded;

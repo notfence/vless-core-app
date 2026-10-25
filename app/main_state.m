@@ -207,6 +207,13 @@ static BOOL gVCSecureStoreWritable = YES;
             [_configurationWriter enqueueConfigurations:_configs subscriptions:_subscriptions revision:++_storeSequence target:self selector:@selector(configurationStoreFinished:) context:nil];
         }
     }
+    [self saveSettings];
+    [self updateMainEmptyState];
+    [self refreshMainSwitcher];
+}
+
+- (void)saveSettings {
+    if (_configurationLoading) return;
     NSUserDefaults *ud = [NSUserDefaults standardUserDefaults];
     [ud setBool:_autoUpdateSubscriptions forKey:kDefaultsAutoUpdateSubsKey];
     [ud setBool:_preserveCustomSubscriptionNames forKey:kDefaultsPreserveCustomSubscriptionNamesKey];
@@ -214,8 +221,6 @@ static BOOL gVCSecureStoreWritable = YES;
     [ud setBool:_darkThemeEnabled forKey:kDefaultsDarkThemeKey];
     [ud setBool:_automaticUpdateChecksEnabled forKey:kDefaultsAutomaticUpdateChecksKey];
     [self saveMainState];
-    [self updateMainEmptyState];
-    [self refreshMainSwitcher];
 }
 
 - (void)loadData {

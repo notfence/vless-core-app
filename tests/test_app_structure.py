@@ -202,6 +202,13 @@ def main():
         raise AssertionError('app/save-must-not-reparse-all-profiles-on-main')
     if 'VCSaveProtectedConfigurationData(' in save or 'enqueueConfigurations:' not in save:
         raise AssertionError('app/save-must-use-background-writer')
+    save_settings = state.split('- (void)saveSettings {', 1)[1].split('\n}', 1)[0]
+    if any(value in save_settings for value in ('enqueueConfigurations:', 'prepareProfileMetadata', '_configurationRevision', 'VCLoadSecureStoreKey')):
+        raise AssertionError('app/settings-must-not-rewrite-or-reprepare-configurations')
+    for name in ('didChangeAutoUpdate:', 'didChangeAutomaticUpdateChecks:', 'didChangePreserveCustomSubscriptionNames:', 'didChangeStealthMode:', 'didChangeDarkTheme:'):
+        handler = main_settings.split(name, 1)[1].split('\n}', 1)[0]
+        if '[self saveSettings];' not in handler or '[self saveData];' in handler:
+            raise AssertionError('app/ordinary-settings-must-use-settings-only-save')
     load = state.split('- (void)loadData {', 1)[1].split('\n}', 1)[0]
     if 'dispatch_async(_configurationQueue' not in load or load.index('dispatch_async(_configurationQueue') > load.index('VCLoadProtectedConfigurationData'):
         raise AssertionError('app/configuration-load-must-run-in-background')
