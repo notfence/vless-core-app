@@ -46,11 +46,13 @@ static void VCRecordAppEvent(id a,id b,id c) { (void)a; (void)b; (void)c; }
     NSMutableArray *_subscriptionPingReadyIdentifiers;
     VCTestPingQueue *_pingQueue;
     BOOL _sortSubscriptionsByPing;
+    BOOL _pingNetworkDirty,_pingNetworkCheckInFlight,_publishingPingNetwork;
+    NSMutableArray *_pingNetworkStarts,*_pingNetworkResults;
     NSUInteger _nextSubscriptionPingToken,_pingNetworkGeneration;
     NSArray *_items;
 }
 - (void)pingWorker:(id)payload;
-- (NSOperation *)enqueuePingForURI:(NSString *)uri type:(VCPingType)type priority:(NSOperationQueuePriority)priority batchIdentifier:(NSString *)identifier batchToken:(NSNumber *)token;
+- (NSOperation *)enqueuePingForURI:(NSString *)uri type:(VCPingType)type priority:(NSOperationQueuePriority)priority batchIdentifier:(NSString *)identifier batchToken:(NSNumber *)token options:(NSDictionary *)options;
 - (void)pumpSubscriptionPings;
 - (void)pingOperationFinished:(VCPingCancellation *)cancellation;
 - (BOOL)isURIInActiveSubscriptionPing:(NSString *)uri;
@@ -80,6 +82,8 @@ static void VCRecordAppEvent(id a,id b,id c) { (void)a; (void)b; (void)c; }
         _subscriptionPingTokenByIdentifier=[[NSMutableDictionary alloc] init];
         _subscriptionPingPreparationByIdentifier=[[NSMutableDictionary alloc] init];
         _subscriptionPingReadyIdentifiers=[[NSMutableArray alloc] init];
+        _pingNetworkStarts=[[NSMutableArray alloc] init];
+        _pingNetworkResults=[[NSMutableArray alloc] init];
         _pingQueue=[[VCTestPingQueue alloc] init];
     }
     return self;
@@ -90,6 +94,7 @@ static void VCRecordAppEvent(id a,id b,id c) { (void)a; (void)b; (void)c; }
     [_subscriptionPingPendingByIdentifier release]; [_subscriptionPingOperationsByIdentifier release];
     [_subscriptionPingPreviousDisplayByIdentifier release]; [_subscriptionPingTokenByIdentifier release];
     [_subscriptionPingPreparationByIdentifier release]; [_subscriptionPingReadyIdentifiers release];
+    [_pingNetworkStarts release]; [_pingNetworkResults release];
     [_pingQueue release]; [super dealloc];
 }
 - (void)pingWorker:(id)payload { (void)payload; }
@@ -99,8 +104,8 @@ static void VCRecordAppEvent(id a,id b,id c) { (void)a; (void)b; (void)c; }
 - (void)refreshVisibleSubscriptionHeaderAccessories {}
 - (void)scheduleSubscriptionPingSort {}
 - (void)showStatus:(id)message ok:(BOOL)ok { (void)message; (void)ok; }
-- (NSOperation *)enqueuePingForURI:(NSString *)uri type:(VCPingType)type priority:(NSOperationQueuePriority)priority batchIdentifier:(NSString *)identifier batchToken:(NSNumber *)token {
-    (void)type; (void)identifier; (void)token;
+- (NSOperation *)enqueuePingForURI:(NSString *)uri type:(VCPingType)type priority:(NSOperationQueuePriority)priority batchIdentifier:(NSString *)identifier batchToken:(NSNumber *)token options:(NSDictionary *)options {
+    (void)type; (void)identifier; (void)token; (void)options;
     VCPingCancellation *cancel=[[[VCPingCancellation alloc] init] autorelease];
     VCPingOperation *operation=[[[VCPingOperation alloc] initWithTarget:self payload:@{} cancellation:cancel] autorelease];
     operation.queuePriority=priority;

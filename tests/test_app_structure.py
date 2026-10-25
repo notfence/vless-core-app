@@ -155,7 +155,10 @@ def main():
         if required not in apply_sort:
             raise AssertionError('app/ping-sort-must-wait-for-batch-and-interactions-and-only-reload-on-change')
     ping_source = (ROOT / 'app/main_ping.m').read_text()
-    start_batch = ping_source.split('- (void)startSubscriptionPingAtIndex:', 1)[1].split('\n}', 1)[0]
+    result_method = ping_source.split('- (void)pingResultOnMain:', 1)[1].split('\n}', 1)[0]
+    if 'refreshPingNetworkState' in result_method or 'VCPingNetworkSignature' in result_method:
+        raise AssertionError('app/ping-results-must-not-rescan-the-network')
+    start_batch = ping_source.split('- (void)beginSubscriptionPingAtIndex:', 1)[1].split('\n}', 1)[0]
     pump_batch = ping_source.split('- (void)pumpSubscriptionPings {', 1)[1].split('\n}', 1)[0]
     if 'enqueuePingForURI:' in start_batch or 'dispatch_async(dispatch_get_global_queue' not in start_batch or 'initWithURIs:snapshot options:options cancellation:preparation' not in start_batch:
         raise AssertionError('app/ping-batch-must-prepare-snapshot-off-main-without-eager-operations')

@@ -23,6 +23,9 @@
     _subscriptionPingReadyIdentifiers = [[NSMutableArray alloc] init];
     _pingQueue = [[NSOperationQueue alloc] init];
     _pingQueue.maxConcurrentOperationCount = 4;
+    _pingNetworkStarts = [[NSMutableArray alloc] init];
+    _pingNetworkResults = [[NSMutableArray alloc] init];
+    [self startPingNetworkObservation];
 
     CGRect b = self.view.bounds;
     BOOL collapsiblePhoneLayout = !IsPadDevice();
@@ -406,6 +409,13 @@
     [_pingDisplayByURI release];
     [_subscriptionPingOrder release];
     [_pingNetworkSignature release];
+    if (_pingNetworkReachability) {
+        SCNetworkReachabilityUnscheduleFromRunLoop(_pingNetworkReachability, CFRunLoopGetMain(), kCFRunLoopCommonModes);
+        SCNetworkReachabilitySetCallback(_pingNetworkReachability, NULL, NULL);
+        CFRelease(_pingNetworkReachability);
+    }
+    [_pingNetworkStarts release];
+    [_pingNetworkResults release];
     [_pingNetworkTimer invalidate];
     [_pingNetworkTimer release];
     [_standalonePingCancellationsByURI release];

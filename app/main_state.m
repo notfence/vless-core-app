@@ -522,6 +522,8 @@ static BOOL gVCSecureStoreWritable = YES;
 - (BOOL)isSubscriptionPingInProgressAtIndex:(NSInteger)subIdx {
     NSString *identifier = [self subscriptionPingIdentifierAtIndex:subIdx];
     if (!identifier) return NO;
+    for (NSDictionary *start in _pingNetworkStarts)
+        if ([[start objectForKey:@"identifier"] isEqual:identifier]) return YES;
     return [_subscriptionPingTokenByIdentifier objectForKey:identifier] != nil;
 }
 

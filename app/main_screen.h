@@ -71,6 +71,9 @@
     NSString *_pingNetworkSignature;
     NSTimer *_pingNetworkTimer;
     NSUInteger _pingNetworkGeneration;
+    SCNetworkReachabilityRef _pingNetworkReachability;
+    BOOL _pingNetworkCheckInFlight, _pingNetworkCheckPending, _pingNetworkDirty, _publishingPingNetwork;
+    NSMutableArray *_pingNetworkStarts, *_pingNetworkResults;
     NSMutableDictionary *_standalonePingCancellationsByURI;
     NSMutableDictionary *_subscriptionPingPendingByIdentifier;
     NSMutableDictionary *_subscriptionPingOperationsByIdentifier;
@@ -242,6 +245,10 @@
 
 @interface MainVC (VCMainPing)
 - (void)refreshPingNetworkState;
+- (void)startPingNetworkObservation;
+- (NSDictionary *)pingOptionsForType:(VCPingType)type;
+- (void)beginPingForURI:(NSString *)uri type:(VCPingType)type options:(NSDictionary *)options;
+- (void)beginSubscriptionPingAtIndex:(NSInteger)index options:(NSDictionary *)options;
 - (void)pingNetworkTick:(NSTimer *)timer;
 - (void)pingWorker:(NSDictionary *)payload;
 - (void)pingResultOnMain:(NSDictionary *)payload;
@@ -251,7 +258,8 @@
                               type:(VCPingType)pingType
                           priority:(NSOperationQueuePriority)priority
                    batchIdentifier:(NSString *)batchIdentifier
-                        batchToken:(NSNumber *)batchToken;
+                        batchToken:(NSNumber *)batchToken
+                           options:(NSDictionary *)options;
 - (void)startPingForURI:(NSString *)uri type:(VCPingType)pingType;
 - (void)pingButtonPressed:(UIButton *)sender;
 - (void)startSubscriptionPingAtIndex:(NSInteger)subIdx;

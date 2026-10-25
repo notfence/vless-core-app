@@ -1,26 +1,101 @@
 #import "main_screen.h"
 
+static void VCPingNetworkChanged(SCNetworkReachabilityRef target, SCNetworkReachabilityFlags flags, void *info) {
+    (void)target; (void)flags;
+    [(MainVC *)info refreshPingNetworkState];
+}
+
 @implementation MainVC (VCMainPing)
 
+- (void)startPingNetworkObservation {
+    struct sockaddr_in address;
+    memset(&address, 0, sizeof(address));
+    address.sin_len = sizeof(address);
+    address.sin_family = AF_INET;
+    _pingNetworkReachability = SCNetworkReachabilityCreateWithAddress(kCFAllocatorDefault, (struct sockaddr *)&address);
+    if (_pingNetworkReachability) {
+        SCNetworkReachabilityContext context = {0, self, NULL, NULL, NULL};
+        if (SCNetworkReachabilitySetCallback(_pingNetworkReachability, VCPingNetworkChanged, &context))
+            SCNetworkReachabilityScheduleWithRunLoop(_pingNetworkReachability, CFRunLoopGetMain(), kCFRunLoopCommonModes);
+    }
+    _pingNetworkDirty = YES;
+}
+
 - (void)refreshPingNetworkState {
-    NSString *signature = VCPingNetworkSignature();
-    if (!signature) return;
-    BOOL changed = VCPingUpdateNetwork(self,signature,&_pingNetworkSignature,&_pingNetworkGeneration,_pingDisplayByURI);
-    if (changed) {
-        if (_sortSubscriptionsByPing) [self scheduleSubscriptionPingSort];
-        [self refreshVisiblePingAccessoriesForURI:nil];
-        [self refreshVisibleSubscriptionHeaderAccessories];
-        VCRecordAppEvent(@"ping", @"Network changed; ping results cleared", nil);
-    }
-    if ([_pingDisplayByURI count] == 0 && _pingNetworkTimer) {
-        [_pingNetworkTimer invalidate];
-        [_pingNetworkTimer release];
-        _pingNetworkTimer = nil;
-    }
+    _pingNetworkDirty = YES;
+    if ([[UIApplication sharedApplication] applicationState] == UIApplicationStateBackground) return;
+    if (_pingNetworkCheckInFlight) { _pingNetworkCheckPending = YES; return; }
+    _pingNetworkCheckInFlight = YES;
+    dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_DEFAULT, 0), ^{
+        NSAutoreleasePool *pool = [[NSAutoreleasePool alloc] init];
+        NSString *signature = [VCPingNetworkSignature() copy];
+        dispatch_async(dispatch_get_main_queue(), ^{
+            _pingNetworkCheckInFlight = NO;
+            BOOL available = signature != nil;
+            _publishingPingNetwork = YES;
+            BOOL changed = signature && VCPingUpdateNetwork(self,signature,&_pingNetworkSignature,&_pingNetworkGeneration,_pingDisplayByURI);
+            _publishingPingNetwork = NO;
+            if (changed) {
+                if (_sortSubscriptionsByPing) [self scheduleSubscriptionPingSort];
+                [self refreshVisiblePingAccessoriesForURI:nil];
+                [self refreshVisibleSubscriptionHeaderAccessories];
+                VCRecordAppEvent(@"ping", @"Network changed; ping results cleared", nil);
+            }
+            [signature release];
+            if (_pingNetworkCheckPending) {
+                _pingNetworkCheckPending = NO;
+                [self refreshPingNetworkState];
+                return;
+            }
+            _pingNetworkDirty = !available;
+            if ([[UIApplication sharedApplication] applicationState] == UIApplicationStateBackground) {
+                _pingNetworkDirty = YES;
+                return;
+            }
+            NSArray *starts = [[_pingNetworkStarts copy] autorelease];
+            [_pingNetworkStarts removeAllObjects];
+            if (!_pingNetworkDirty) {
+                NSArray *results = [[_pingNetworkResults copy] autorelease];
+                [_pingNetworkResults removeAllObjects];
+                for (NSDictionary *result in results) [self pingResultOnMain:result];
+                for (NSDictionary *start in starts) {
+                    NSString *uri = [start objectForKey:@"uri"];
+                    NSDictionary *options = [start objectForKey:@"options"];
+                    if (uri) [self beginPingForURI:uri type:[[options objectForKey:@"type"] integerValue] options:options];
+                    else {
+                        NSInteger index = [[start objectForKey:@"index"] integerValue];
+                        if ([[start objectForKey:@"identifier"] isEqual:[self subscriptionPingIdentifierAtIndex:index]] &&
+                            [start objectForKey:@"items"] == [self subscriptionItemsAtIndex:index])
+                            [self beginSubscriptionPingAtIndex:index options:options];
+                    }
+                }
+                [self pumpSubscriptionPings];
+            } else if ([starts count]) [self showStatus:@"Cannot check network state" ok:NO];
+            [self refreshVisibleSubscriptionHeaderAccessories];
+        });
+        [pool drain];
+    });
+}
+
+- (NSDictionary *)pingOptionsForType:(VCPingType)type {
+    NSMutableDictionary *payload = [NSMutableDictionary dictionaryWithObjectsAndKeys:
+        @(type), @"type", @(VCPingTimeoutSecondsInDefaults([NSUserDefaults standardUserDefaults])*1000), @"timeout_ms", nil];
+    [payload setObject:[[VCSelectedProxyPingURL() copy] autorelease] forKey:@"probe_url"];
+    [payload setObject:@(VCUseXmuxInDefaults([NSUserDefaults standardUserDefaults])) forKey:@"use_xmux"];
+    NSString *xrayVersion = VCActiveXrayVersion();
+    if (xrayVersion) [payload setObject:xrayVersion forKey:@"xray_version"];
+    return payload;
 }
 
 - (void)pingNetworkTick:(NSTimer *)timer {
     (void)timer;
+    if (![_pingDisplayByURI count] && ![_standalonePingCancellationsByURI count] &&
+        ![_subscriptionPingTokenByIdentifier count] && ![_pingNetworkStarts count]) {
+        [_pingNetworkTimer invalidate];
+        [_pingNetworkTimer release];
+        _pingNetworkTimer = nil;
+        return;
+    }
     [self refreshPingNetworkState];
 }
 
@@ -43,7 +118,7 @@
         int rc = -1;
 
         if (pingType == VCPingTypeProxyGET) {
-            NSString *xrayVersion = VCActiveXrayVersion();
+            NSString *xrayVersion = [payload objectForKey:@"xray_version"];
             NSString *runtimeURI = [VCProfiles() runtimeURI:uri useXmux:[[payload objectForKey:@"use_xmux"] boolValue] error:NULL];
             if (runtimeURI) rc = ProxyGetViaTempCoreMs([runtimeURI UTF8String], [xrayVersion UTF8String],
                                        timeoutMs, 2, &latencyMs, cancellation, [payload objectForKey:@"probe_url"]);
@@ -80,7 +155,12 @@
 }
 
 - (void)pingResultOnMain:(NSDictionary *)payload {
-    [self refreshPingNetworkState];
+    if ([[payload objectForKey:@"cancellation"] isCancelled] ||
+        !VCPingResultIsCurrent([[payload objectForKey:@"network_generation"] unsignedIntegerValue],_pingNetworkGeneration)) return;
+    if (_pingNetworkDirty || _pingNetworkCheckInFlight) {
+        [_pingNetworkResults addObject:payload];
+        return;
+    }
     if (!VCPingResultIsCurrent([[payload objectForKey:@"network_generation"] unsignedIntegerValue],_pingNetworkGeneration)) return;
     VCPingCancellation *cancellation = [payload objectForKey:@"cancellation"];
     if ([cancellation isCancelled]) return;
@@ -143,7 +223,8 @@
                               type:(VCPingType)pingType
                           priority:(NSOperationQueuePriority)priority
                    batchIdentifier:(NSString *)batchIdentifier
-                        batchToken:(NSNumber *)batchToken {
+                        batchToken:(NSNumber *)batchToken
+                           options:(NSDictionary *)options {
     VCPingCancellation *cancellation = [[[VCPingCancellation alloc] init] autorelease];
     NSMutableDictionary *payload = [NSMutableDictionary dictionaryWithObjectsAndKeys:
                                     uri, @"uri",
@@ -156,12 +237,8 @@
         [payload setObject:batchIdentifier forKey:@"batch_identifier"];
         [payload setObject:batchToken forKey:@"batch_token"];
     } else {
+        [payload addEntriesFromDictionary:options];
         [payload setObject:[NSNumber numberWithUnsignedInteger:_pingNetworkGeneration] forKey:@"network_generation"];
-        [payload setObject:@(VCPingTimeoutSecondsInDefaults([NSUserDefaults standardUserDefaults])*1000) forKey:@"timeout_ms"];
-        if (pingType == VCPingTypeProxyGET) {
-            [payload setObject:[[VCSelectedProxyPingURL() copy] autorelease] forKey:@"probe_url"];
-            [payload setObject:@(VCUseXmuxInDefaults([NSUserDefaults standardUserDefaults])) forKey:@"use_xmux"];
-        }
         cancellation.previousDisplay = [_pingDisplayByURI objectForKey:uri];
         [_standalonePingCancellationsByURI setObject:cancellation forKey:uri];
     }
@@ -181,7 +258,13 @@
 }
 
 - (void)startPingForURI:(NSString *)uri type:(VCPingType)pingType {
+    if (![uri isKindOfClass:[NSString class]] || ![uri length]) return;
+    for (NSDictionary *start in _pingNetworkStarts) if ([[start objectForKey:@"uri"] isEqual:uri]) return;
+    [_pingNetworkStarts addObject:@{@"uri":uri, @"options":[self pingOptionsForType:pingType]}];
     [self refreshPingNetworkState];
+}
+
+- (void)beginPingForURI:(NSString *)uri type:(VCPingType)pingType options:(NSDictionary *)options {
     if (![uri isKindOfClass:[NSString class]] || [uri length] == 0) return;
     if ([_standalonePingCancellationsByURI objectForKey:uri]) return;
     if ([self isURIInActiveSubscriptionPing:uri]) return;
@@ -193,7 +276,7 @@
                        type:pingType
                    priority:NSOperationQueuePriorityHigh
             batchIdentifier:nil
-                 batchToken:nil];
+                 batchToken:nil options:options];
     [self refreshVisiblePingAccessoriesForURI:uri];
 }
 
@@ -233,7 +316,16 @@
 }
 
 - (void)startSubscriptionPingAtIndex:(NSInteger)subIdx {
+    NSString *identifier = [self subscriptionPingIdentifierAtIndex:subIdx];
+    NSArray *items = [self subscriptionItemsAtIndex:subIdx];
+    if (!identifier || ![items count] || [self isSubscriptionPingInProgressAtIndex:subIdx]) return;
+    [_pingNetworkStarts addObject:@{@"index":@(subIdx), @"identifier":identifier, @"items":items,
+        @"options":[self pingOptionsForType:VCSelectedPingType()]}];
+    [self refreshVisibleSubscriptionHeaderAccessories];
     [self refreshPingNetworkState];
+}
+
+- (void)beginSubscriptionPingAtIndex:(NSInteger)subIdx options:(NSDictionary *)initialOptions {
     NSArray *items = [self subscriptionItemsAtIndex:subIdx];
     if ([items count] == 0 || [self isSubscriptionPingInProgressAtIndex:subIdx]) return;
 
@@ -245,11 +337,9 @@
     NSNumber *batchToken = [NSNumber numberWithUnsignedInteger:_nextSubscriptionPingToken];
     [_subscriptionPingTokenByIdentifier setObject:batchToken forKey:identifier];
 
-    VCPingType pingType = VCSelectedPingType();
-    NSDictionary *options = @{@"type":@(pingType), @"network_generation":@(_pingNetworkGeneration),
-        @"timeout_ms":@(VCPingTimeoutSecondsInDefaults([NSUserDefaults standardUserDefaults])*1000),
-        @"probe_url":[[VCSelectedProxyPingURL() copy] autorelease],
-        @"use_xmux":@(VCUseXmuxInDefaults([NSUserDefaults standardUserDefaults]))};
+    VCPingType pingType = [[initialOptions objectForKey:@"type"] integerValue];
+    NSMutableDictionary *options = [[initialOptions mutableCopy] autorelease];
+    [options setObject:@(_pingNetworkGeneration) forKey:@"network_generation"];
     VCPingCancellation *preparation = [[[VCPingCancellation alloc] init] autorelease];
     NSArray *snapshot = [items copy];
     [_subscriptionPingPreparationByIdentifier setObject:preparation forKey:identifier];
@@ -285,6 +375,7 @@
 }
 
 - (void)pumpSubscriptionPings {
+    if (_pingNetworkDirty || _pingNetworkCheckInFlight) return;
     NSUInteger occupied = 0;
     for (NSOperation *operation in [_pingQueue operations]) if (![operation isFinished]) occupied++;
     while (occupied < 4 && [_subscriptionPingReadyIdentifiers count]) {
@@ -305,7 +396,7 @@
         [batch.previousDisplays setObject:(previous ? previous : (id)[NSNull null]) forKey:uri];
         NSOperation *operation = [self enqueuePingForURI:uri type:[[batch.options objectForKey:@"type"] integerValue]
             priority:NSOperationQueuePriorityNormal batchIdentifier:identifier
-            batchToken:[_subscriptionPingTokenByIdentifier objectForKey:identifier]];
+            batchToken:[_subscriptionPingTokenByIdentifier objectForKey:identifier] options:batch.options];
         [batch.operations addObject:operation];
         occupied++;
     }
@@ -333,6 +424,9 @@
 - (void)stopSubscriptionPingAtIndex:(NSInteger)subIdx {
     NSString *identifier = [self subscriptionPingIdentifierAtIndex:subIdx];
     if (!identifier) return;
+    for (NSUInteger i = [_pingNetworkStarts count]; i > 0; i--)
+        if ([[[_pingNetworkStarts objectAtIndex:i - 1] objectForKey:@"identifier"] isEqual:identifier])
+            [_pingNetworkStarts removeObjectAtIndex:i - 1];
 
     NSArray *operations = [[_subscriptionPingOperationsByIdentifier objectForKey:identifier] copy];
     VCPingBatch *batch = [_subscriptionPingPendingByIdentifier objectForKey:identifier];
@@ -389,6 +483,8 @@
 }
 
 - (void)stopAllPings {
+    if (!_publishingPingNetwork) [_pingNetworkStarts removeAllObjects];
+    [_pingNetworkResults removeAllObjects];
     if ([_standalonePingCancellationsByURI count] == 0 &&
         [_subscriptionPingTokenByIdentifier count] == 0) return;
 
