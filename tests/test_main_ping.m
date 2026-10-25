@@ -43,6 +43,12 @@ static void VCRecordAppEvent(id a,id b,id c) { (void)a; (void)b; (void)c; }
     NSMutableDictionary *_subscriptionPingPendingByIdentifier,*_subscriptionPingOperationsByIdentifier;
     NSMutableDictionary *_subscriptionPingPreviousDisplayByIdentifier,*_subscriptionPingTokenByIdentifier;
     NSMutableDictionary *_subscriptionPingPreparationByIdentifier;
+    NSMutableDictionary *_subscriptionPingItemsByIdentifier;
+    NSDictionary *_pingOwnedMetadata;
+    NSDictionary *_installedMetadata;
+    NSUInteger _metadataRevision,_pingOwnershipRevision;
+    BOOL _pingDisplayMayContainUnowned;
+    NSArray *_subscriptions;
     NSMutableArray *_subscriptionPingReadyIdentifiers;
     VCTestPingQueue *_pingQueue;
     BOOL _sortSubscriptionsByPing;
@@ -58,6 +64,9 @@ static void VCRecordAppEvent(id a,id b,id c) { (void)a; (void)b; (void)c; }
 - (BOOL)isURIInActiveSubscriptionPing:(NSString *)uri;
 - (void)stopAllPings;
 - (void)stopSubscriptionPingAtIndex:(NSInteger)index;
+- (void)stopSubscriptionPingIdentifier:(NSString *)identifier;
+- (void)prunePingStateForMetadata:(NSDictionary *)metadata;
+- (void)pingResultOnMain:(NSDictionary *)payload;
 - (NSString *)subscriptionPingIdentifierAtIndex:(NSInteger)index;
 - (void)refreshVisiblePingAccessoriesForURI:(id)uri;
 - (void)refreshVisibleSubscriptionPingAccessories;
@@ -81,6 +90,7 @@ static void VCRecordAppEvent(id a,id b,id c) { (void)a; (void)b; (void)c; }
         _subscriptionPingPreviousDisplayByIdentifier=[[NSMutableDictionary alloc] init];
         _subscriptionPingTokenByIdentifier=[[NSMutableDictionary alloc] init];
         _subscriptionPingPreparationByIdentifier=[[NSMutableDictionary alloc] init];
+        _subscriptionPingItemsByIdentifier=[[NSMutableDictionary alloc] init];
         _subscriptionPingReadyIdentifiers=[[NSMutableArray alloc] init];
         _pingNetworkStarts=[[NSMutableArray alloc] init];
         _pingNetworkResults=[[NSMutableArray alloc] init];
@@ -94,6 +104,7 @@ static void VCRecordAppEvent(id a,id b,id c) { (void)a; (void)b; (void)c; }
     [_subscriptionPingPendingByIdentifier release]; [_subscriptionPingOperationsByIdentifier release];
     [_subscriptionPingPreviousDisplayByIdentifier release]; [_subscriptionPingTokenByIdentifier release];
     [_subscriptionPingPreparationByIdentifier release]; [_subscriptionPingReadyIdentifiers release];
+    [_subscriptionPingItemsByIdentifier release]; [_pingOwnedMetadata release]; [_installedMetadata release]; [_subscriptions release];
     [_pingNetworkStarts release]; [_pingNetworkResults release];
     [_pingQueue release]; [super dealloc];
 }
@@ -160,7 +171,31 @@ int main(int argc,char **argv) {
         [pool drain]; return 0;
     }
 #else
-    (void)argc; (void)argv;
+    if (argc==3 && !strcmp(argv[1],"--measure")) {
+        NSUInteger count=strtoul(argv[2],NULL,10);
+        CHECK("ping-prune/bounded-measure-count",count>0 && count<=20000);
+        MainVC *measured=[[MainVC alloc] init];
+        struct timeval start,end; gettimeofday(&start,NULL);
+        for (NSUInteger revision=0;revision<24;revision++) {
+            NSAutoreleasePool *step=[[NSAutoreleasePool alloc] init];
+            NSMutableDictionary *metadata=[NSMutableDictionary dictionaryWithCapacity:count];
+            for (NSUInteger i=0;i<count;i++) {
+                NSString *uri=[NSString stringWithFormat:@"synthetic:%lu:%lu",(unsigned long)revision,(unsigned long)i];
+                [metadata setObject:@{} forKey:uri];
+                [measured->_pingDisplayByURI setObject:@"12 ms" forKey:uri];
+            }
+            NSDictionary *prepared=[[metadata copy] autorelease];
+            [measured->_installedMetadata release]; measured->_installedMetadata=[prepared retain];
+            if ([measured respondsToSelector:@selector(prunePingStateForMetadata:)]) [measured prunePingStateForMetadata:prepared];
+            [step drain];
+        }
+        gettimeofday(&end,NULL);
+        struct rusage usage; getrusage(RUSAGE_SELF,&usage);
+        printf("{\"count\":%lu,\"updates_ms\":%.6f,\"retained_results\":%lu,\"cpu_s\":%.6f,\"maxrss\":%ld}\n",(unsigned long)count,
+            (end.tv_sec-start.tv_sec)*1000+(end.tv_usec-start.tv_usec)/1000.0,(unsigned long)[measured->_pingDisplayByURI count],
+            usage.ru_utime.tv_sec+usage.ru_utime.tv_usec/1e6+usage.ru_stime.tv_sec+usage.ru_stime.tv_usec/1e6,usage.ru_maxrss);
+        [measured release]; [pool drain]; return 0;
+    }
 #endif
     MainVC *owner=[[[MainVC alloc] init] autorelease];
     [owner->_pingDisplayByURI setObject:@"42 ms" forKey:@"a"];
@@ -205,6 +240,68 @@ int main(int argc,char **argv) {
         [step drain];
     }
     CHECK("ping-pump/every-cursor-item-issued",finished==1000);
+    CHECK("ping-prune/implemented",[owner respondsToSelector:@selector(prunePingStateForMetadata:)]);
+    [owner stopAllPings];
+    [owner->_pingDisplayByURI setObject:@"12 ms" forKey:@"shared"];
+    [owner->_pingDisplayByURI setObject:@"80 ms" forKey:@"deleted"];
+    VCPingCancellation *deleted=[[[VCPingCancellation alloc] init] autorelease];
+    [owner->_standalonePingCancellationsByURI setObject:deleted forKey:@"deleted"];
+    [owner->_pingNetworkStarts addObject:@{@"uri":@"deleted"}];
+    [owner->_pingNetworkResults addObject:@{@"uri":@"deleted",@"cancellation":deleted}];
+    [owner prunePingStateForMetadata:@{@"shared":@{}}];
+    CHECK("ping-prune/shared-owner-preserved",[[owner->_pingDisplayByURI objectForKey:@"shared"] isEqual:@"12 ms"]);
+    CHECK("ping-prune/deleted-results-released",[owner->_pingDisplayByURI count]==1);
+    CHECK("ping-prune/deleted-worker-cancelled",deleted.isCancelled && ![owner->_standalonePingCancellationsByURI count]);
+    CHECK("ping-prune/deferred-state-released",![owner->_pingNetworkStarts count] && ![owner->_pingNetworkResults count]);
+    [owner prunePingStateForMetadata:@{}];
+    CHECK("ping-prune/last-owner-removed",![owner->_pingDisplayByURI count]);
+    NSArray *unchanged=@[@"shared",@"keep"],*replaced=@[@"deleted",@"shared"];
+    owner->_subscriptions=[@[@{@"items":unchanged},@{@"items":@[@"new",@"shared"]}] retain];
+    VCPingBatch *keep=attach(owner,0,unchanged),*remove=attach(owner,1,replaced);
+    [owner->_subscriptionPingItemsByIdentifier setObject:unchanged forKey:@"0"];
+    [owner->_subscriptionPingItemsByIdentifier setObject:replaced forKey:@"1"];
+    VCPingCancellation *preparing=[[[VCPingCancellation alloc] init] autorelease];
+    [owner->_subscriptionPingItemsByIdentifier setObject:@[@"orphan"] forKey:@"removed"];
+    [owner->_subscriptionPingPreparationByIdentifier setObject:preparing forKey:@"removed"];
+    [owner->_subscriptionPingTokenByIdentifier setObject:@2 forKey:@"removed"];
+    [owner pumpSubscriptionPings];
+    NSArray *removedOperations=[[remove.operations copy] autorelease];
+    [owner->_pingNetworkStarts addObject:@{@"identifier":@"1",@"items":replaced}];
+    [owner prunePingStateForMetadata:@{@"shared":@{},@"keep":@{},@"new":@{}}];
+    CHECK("ping-prune/unchanged-batch-kept",[owner->_subscriptionPingPendingByIdentifier objectForKey:@"0"]==keep);
+    CHECK("ping-prune/replaced-batch-released",![owner->_subscriptionPingPendingByIdentifier objectForKey:@"1"] && ![owner->_subscriptionPingItemsByIdentifier objectForKey:@"1"]);
+    for (NSOperation *operation in removedOperations) CHECK("ping-prune/replaced-worker-cancelled",operation.isCancelled);
+    CHECK("ping-prune/removed-preparation-cancelled",preparing.isCancelled && ![owner->_subscriptionPingPreparationByIdentifier count]);
+    CHECK("ping-prune/stale-start-released",![owner->_pingNetworkStarts count]);
+    for (NSUInteger revision=0;revision<100;revision++) {
+        NSAutoreleasePool *step=[[NSAutoreleasePool alloc] init];
+        NSString *uri=[NSString stringWithFormat:@"replacement:%lu",(unsigned long)revision];
+        [owner->_pingDisplayByURI setObject:@"12 ms" forKey:uri];
+        [owner prunePingStateForMetadata:@{uri:@{}}];
+        CHECK("ping-prune/replacements-do-not-accumulate",[owner->_pingDisplayByURI count]==1);
+        [step drain];
+    }
+    VCPingCancellation *late=[[[VCPingCancellation alloc] init] autorelease];
+    [owner->_standalonePingCancellationsByURI setObject:late forKey:@"removed"];
+    [owner pingResultOnMain:@{@"uri":@"removed",@"cancellation":late,@"network_generation":@0,@"ok":@1,@"ms":@10}];
+    CHECK("ping-prune/late-result-cannot-resurrect",![owner->_pingDisplayByURI objectForKey:@"removed"]);
+    owner->_metadataRevision++;
+    VCPingCancellation *fresh=[[[VCPingCancellation alloc] init] autorelease];
+    [owner->_standalonePingCancellationsByURI setObject:fresh forKey:@"newly-added"];
+    [owner pingResultOnMain:@{@"uri":@"newly-added",@"cancellation":fresh,@"network_generation":@0,@"ok":@1,@"ms":@10}];
+    CHECK("ping-prune/new-result-before-metadata-kept",[[owner->_pingDisplayByURI objectForKey:@"newly-added"] isEqual:@"10 ms"]);
+    [owner prunePingStateForMetadata:@{@"newly-added":@{}}];
+    CHECK("ping-prune/published-ownership-catches-up",owner->_pingOwnershipRevision==owner->_metadataRevision && [owner->_pingDisplayByURI count]==1);
+    NSDictionary *sameDisplays=owner->_pingDisplayByURI;
+    [owner prunePingStateForMetadata:owner->_pingOwnedMetadata];
+    CHECK("ping-prune/unchanged-ownership-keeps-cache",owner->_pingDisplayByURI==sameDisplays);
+    owner->_metadataRevision++;
+    VCPingCancellation *intermediate=[[[VCPingCancellation alloc] init] autorelease];
+    [owner->_standalonePingCancellationsByURI setObject:intermediate forKey:@"intermediate"];
+    [owner pingResultOnMain:@{@"uri":@"intermediate",@"cancellation":intermediate,@"network_generation":@0,@"ok":@1,@"ms":@10}];
+    CHECK("ping-prune/intermediate-result-tracked",owner->_pingDisplayMayContainUnowned);
+    [owner prunePingStateForMetadata:owner->_pingOwnedMetadata];
+    CHECK("ping-prune/intermediate-removed-even-with-same-ownership",![owner->_pingDisplayByURI objectForKey:@"intermediate"] && !owner->_pingDisplayMayContainUnowned);
     FINISH("main ping scheduler");
     [pool drain]; return 0;
 }

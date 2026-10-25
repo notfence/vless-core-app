@@ -279,6 +279,7 @@ static BOOL gVCSecureStoreWritable = YES;
     }
 
     [VCProfiles() installPreparedMetadata:[loaded objectForKey:@"metadata"]];
+    [self prunePingStateForMetadata:[loaded objectForKey:@"metadata"]];
 
     if ([[loaded objectForKey:@"secure"] boolValue] &&
         ([legacyConfigs isKindOfClass:[NSArray class]] || [legacySubscriptions isKindOfClass:[NSArray class]])) {
@@ -392,7 +393,10 @@ static BOOL gVCSecureStoreWritable = YES;
         NSAutoreleasePool *pool=[[NSAutoreleasePool alloc] init];
         NSDictionary *metadata=[[VCProfiles() preparedMetadataForConfigurations:configs subscriptions:subscriptions additionalMetadata:additional] retain];
         dispatch_async(dispatch_get_main_queue(), ^{
-            if (revision == _metadataRevision) [VCProfiles() installPreparedMetadata:metadata];
+            if (revision == _metadataRevision) {
+                [VCProfiles() installPreparedMetadata:metadata];
+                [self prunePingStateForMetadata:metadata];
+            }
             _metadataPreparationRunning=NO;
             if (_metadataPreparationPending) [self prepareProfileMetadata];
             [metadata release];
@@ -479,8 +483,9 @@ static BOOL gVCSecureStoreWritable = YES;
         [_configs release]; _configs=[[_configurationDraft objectForKey:@"configs"] mutableCopy];
         [_subscriptions release]; _subscriptions=[[_configurationDraft objectForKey:@"subscriptions"] mutableCopy];
         [_subscriptionPingOrder release]; _subscriptionPingOrder=nil;
-        [VCProfiles() installPreparedMetadata:[_configurationDraft objectForKey:@"metadata"]];
         _configurationRevision++; _metadataRevision++;
+        [VCProfiles() installPreparedMetadata:[_configurationDraft objectForKey:@"metadata"]];
+        [self prunePingStateForMetadata:[_configurationDraft objectForKey:@"metadata"]];
     }
     [_configurationDraft release]; _configurationDraft=nil;
     _configurationCommitInProgress=NO;

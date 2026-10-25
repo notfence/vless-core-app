@@ -831,13 +831,18 @@ failure:
     NSMutableDictionary *metadata=[NSMutableDictionary dictionaryWithCapacity:[uris count]];
     NSDictionary *previous=nil;
     @synchronized(self) { previous=[_profileMetadata retain]; }
+    BOOL unchanged=[previous count]==[uris count];
     for (NSString *uri in uris) {
         if (VCCurrentSubscriptionTask().isCancelled) { [previous release]; return nil; }
         NSAutoreleasePool *pool=[[NSAutoreleasePool alloc] init];
-        NSDictionary *entry=[additional objectForKey:uri] ?: [previous objectForKey:uri];
-        [metadata setObject:entry ?: [self metadataForURI:uri] forKey:uri];
+        id old=[previous objectForKey:uri];
+        NSDictionary *entry=[additional objectForKey:uri] ?: old;
+        entry=entry ?: [self metadataForURI:uri];
+        if (unchanged && old!=entry && ![old isEqual:entry]) unchanged=NO;
+        [metadata setObject:entry forKey:uri];
         [pool drain];
     }
+    if (unchanged && previous) return [previous autorelease];
     [previous release];
     return [[metadata copy] autorelease];
 }

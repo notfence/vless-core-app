@@ -459,6 +459,13 @@ int main(int argc, char **argv) {
     CHECK("bulk/prepared-install",[profiles metadataForURI:one] == [entries objectForKey:one]);
     NSDictionary *reused=[profiles preparedMetadataForConfigurations:@[@{@"uri":one}] subscriptions:@[] additionalMetadata:nil];
     CHECK("bulk/unchanged-metadata-reused",[reused objectForKey:one] == [entries objectForKey:one]);
+    CHECK("bulk/unchanged-metadata-snapshot-reused",reused == prepared);
+    NSDictionary *identical=[profiles preparedMetadataForConfigurations:@[@{@"uri":one}] subscriptions:@[] additionalMetadata:entries];
+    CHECK("bulk/equal-import-metadata-snapshot-reused",identical == prepared);
+    NSMutableDictionary *changedEntry=[NSMutableDictionary dictionaryWithDictionary:[entries objectForKey:one]];
+    [changedEntry setObject:@"Changed metadata" forKey:@"title"];
+    NSDictionary *changed=[profiles preparedMetadataForConfigurations:@[@{@"uri":one}] subscriptions:@[] additionalMetadata:@{one:changedEntry}];
+    CHECK("bulk/changed-metadata-not-hidden",changed != prepared && [[[changed objectForKey:one] objectForKey:@"title"] isEqual:@"Changed metadata"]);
     [profiles installPreparedMetadata:[profiles preparedMetadataForConfigurations:@[] subscriptions:@[] additionalMetadata:nil]];
     CHECK("bulk/removed-metadata-pruned",[profiles metadataForURI:one] != [entries objectForKey:one]);
     CHECK("bulk/background-writer-interface",NSClassFromString(@"VCConfigurationStoreWriter") != Nil);

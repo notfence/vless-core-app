@@ -143,7 +143,7 @@ $(HOST_BUILD_DIR)/test_ping_batch: $(HOST_BUILD_DIR)/test_ping_batch.o $(HOST_BU
 
 $(HOST_BUILD_DIR)/main_ping_test.inc: ../app/main_ping.m extract_ui_methods.py
 	mkdir -p $(dir $@)
-	python3 extract_ui_methods.py $< $@ '- (void)pumpSubscriptionPings' '- (void)pingOperationFinished:' '- (BOOL)isURIInActiveSubscriptionPing:' '- (void)stopSubscriptionPingAtIndex:' '- (void)stopAllPings'
+	python3 extract_ui_methods.py $< $@ '- (void)pumpSubscriptionPings' '- (void)pingOperationFinished:' '- (BOOL)isURIInActiveSubscriptionPing:' '- (void)stopSubscriptionPingAtIndex:' '- (void)stopAllPings' '- (void)pingResultOnMain:' '?- (void)stopSubscriptionPingIdentifier:' '?- (void)prunePingStateForMetadata:'
 
 $(HOST_BUILD_DIR)/test_main_ping.o: $(HOST_BUILD_DIR)/main_ping_test.inc
 	$(HOST_CC) $(HOST_CPPFLAGS) $(HOST_OBJCFLAGS) $(HOST_CFLAGS) -I$(HOST_BUILD_DIR) -MMD -MP -c test_main_ping.m -o $@

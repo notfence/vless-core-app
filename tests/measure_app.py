@@ -25,6 +25,7 @@ def main():
     records = []
     summary = []
     binaries = {label: getattr(args, label).resolve() for label in ('before', 'after')}
+    binary_hashes = {label: hashlib.sha256(binary.read_bytes()).hexdigest() for label, binary in binaries.items()}
     for count in args.counts:
         grouped = {'before': [], 'after': []}
         for pair in range(args.pairs):
@@ -44,7 +45,7 @@ def main():
                             'before_p95': percentile(grouped['before']), 'after_p95': percentile(grouped['after']),
                             'delta': after-before, 'percent': (after-before)*100/before if before else None})
     result = {'pairs': args.pairs, 'records': records, 'summary': summary,
-              'sha256': {label: hashlib.sha256(getattr(args, label).read_bytes()).hexdigest() for label in ('before', 'after')}}
+              'sha256': binary_hashes}
     args.output.parent.mkdir(parents=True, exist_ok=True)
     args.output.write_text(json.dumps(result, indent=2)+'\n')
     print(json.dumps(summary, indent=2))

@@ -67,6 +67,9 @@
     VCSubscriptionTask *_connectAfterSubscriptionTask;
     NSString *_connectAfterSubscriptionURL;
     NSMutableDictionary *_pingDisplayByURI;
+    NSDictionary *_pingOwnedMetadata;
+    NSUInteger _pingOwnershipRevision;
+    BOOL _pingDisplayMayContainUnowned;
     VCSubscriptionPingOrder *_subscriptionPingOrder;
     NSString *_pingNetworkSignature;
     NSTimer *_pingNetworkTimer;
@@ -80,6 +83,7 @@
     NSMutableDictionary *_subscriptionPingPreviousDisplayByIdentifier;
     NSMutableDictionary *_subscriptionPingTokenByIdentifier;
     NSMutableDictionary *_subscriptionPingPreparationByIdentifier;
+    NSMutableDictionary *_subscriptionPingItemsByIdentifier;
     NSMutableArray *_subscriptionPingReadyIdentifiers;
     NSOperationQueue *_pingQueue;
 
@@ -265,6 +269,8 @@
 - (void)startSubscriptionPingAtIndex:(NSInteger)subIdx;
 - (BOOL)isURIInActiveSubscriptionPing:(NSString *)uri;
 - (void)stopSubscriptionPingAtIndex:(NSInteger)subIdx;
+- (void)stopSubscriptionPingIdentifier:(NSString *)identifier;
+- (void)prunePingStateForMetadata:(NSDictionary *)metadata;
 - (void)subscriptionPingButtonPressed:(UIButton *)sender;
 - (void)stopAllPings;
 @end

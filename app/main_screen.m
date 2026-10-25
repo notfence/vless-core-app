@@ -20,6 +20,7 @@
     _subscriptionPingPreviousDisplayByIdentifier = [[NSMutableDictionary alloc] init];
     _subscriptionPingTokenByIdentifier = [[NSMutableDictionary alloc] init];
     _subscriptionPingPreparationByIdentifier = [[NSMutableDictionary alloc] init];
+    _subscriptionPingItemsByIdentifier = [[NSMutableDictionary alloc] init];
     _subscriptionPingReadyIdentifiers = [[NSMutableArray alloc] init];
     _pingQueue = [[NSOperationQueue alloc] init];
     _pingQueue.maxConcurrentOperationCount = 4;
@@ -407,6 +408,7 @@
     [_configs release];
     [_subscriptions release];
     [_pingDisplayByURI release];
+    [_pingOwnedMetadata release];
     [_subscriptionPingOrder release];
     [_pingNetworkSignature release];
     if (_pingNetworkReachability) {
@@ -424,6 +426,7 @@
     [_subscriptionPingPreviousDisplayByIdentifier release];
     [_subscriptionPingTokenByIdentifier release];
     [_subscriptionPingPreparationByIdentifier release];
+    [_subscriptionPingItemsByIdentifier release];
     [_subscriptionPingReadyIdentifiers release];
     [_pingQueue cancelAllOperations];
     [_pingQueue release];

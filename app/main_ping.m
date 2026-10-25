@@ -157,6 +157,10 @@ static void VCPingNetworkChanged(SCNetworkReachabilityRef target, SCNetworkReach
 - (void)pingResultOnMain:(NSDictionary *)payload {
     if ([[payload objectForKey:@"cancellation"] isCancelled] ||
         !VCPingResultIsCurrent([[payload objectForKey:@"network_generation"] unsignedIntegerValue],_pingNetworkGeneration)) return;
+    NSString *resultURI = [payload objectForKey:@"uri"];
+    if (![resultURI isKindOfClass:[NSString class]] || ![resultURI length]) return;
+    if (_pingOwnedMetadata && _pingOwnershipRevision == _metadataRevision &&
+        ![_pingOwnedMetadata objectForKey:resultURI]) return;
     if (_pingNetworkDirty || _pingNetworkCheckInFlight) {
         [_pingNetworkResults addObject:payload];
         return;
@@ -184,6 +188,7 @@ static void VCPingNetworkChanged(SCNetworkReachabilityRef target, SCNetworkReach
     NSString *display = ok
         ? [NSString stringWithFormat:@"%d ms", [[payload objectForKey:@"ms"] intValue]]
         : VCProbeFailureDisplay([payload objectForKey:@"diagnostics"]);
+    if (![_pingOwnedMetadata objectForKey:uri]) _pingDisplayMayContainUnowned = YES;
     [_pingDisplayByURI setObject:display forKey:uri];
     VCRecordAppEvent(@"ping", @"Probe stages",
                      [NSString stringWithFormat:@"network_generation=%lu %@",(unsigned long)_pingNetworkGeneration,
@@ -205,6 +210,7 @@ static void VCPingNetworkChanged(SCNetworkReachabilityRef target, SCNetworkReach
             [_subscriptionPingOperationsByIdentifier removeObjectForKey:batchIdentifier];
             [_subscriptionPingPreviousDisplayByIdentifier removeObjectForKey:batchIdentifier];
             [_subscriptionPingTokenByIdentifier removeObjectForKey:batchIdentifier];
+            [_subscriptionPingItemsByIdentifier removeObjectForKey:batchIdentifier];
             [_subscriptionPingReadyIdentifiers removeObject:batchIdentifier];
             completedSubscriptionPing = YES;
         }
@@ -242,6 +248,7 @@ static void VCPingNetworkChanged(SCNetworkReachabilityRef target, SCNetworkReach
         cancellation.previousDisplay = [_pingDisplayByURI objectForKey:uri];
         [_standalonePingCancellationsByURI setObject:cancellation forKey:uri];
     }
+    if (![_pingOwnedMetadata objectForKey:uri]) _pingDisplayMayContainUnowned = YES;
     [_pingDisplayByURI setObject:kVCPingLoadingValue forKey:uri];
     if (!_pingNetworkTimer) {
         _pingNetworkTimer = [[NSTimer scheduledTimerWithTimeInterval:1.0 target:self selector:@selector(pingNetworkTick:)
@@ -336,6 +343,7 @@ static void VCPingNetworkChanged(SCNetworkReachabilityRef target, SCNetworkReach
     if (_nextSubscriptionPingToken == 0) _nextSubscriptionPingToken++;
     NSNumber *batchToken = [NSNumber numberWithUnsignedInteger:_nextSubscriptionPingToken];
     [_subscriptionPingTokenByIdentifier setObject:batchToken forKey:identifier];
+    [_subscriptionPingItemsByIdentifier setObject:items forKey:identifier];
 
     VCPingType pingType = [[initialOptions objectForKey:@"type"] integerValue];
     NSMutableDictionary *options = [[initialOptions mutableCopy] autorelease];
@@ -362,6 +370,7 @@ static void VCPingNetworkChanged(SCNetworkReachabilityRef target, SCNetworkReach
                     [self pumpSubscriptionPings];
                 } else {
                     [_subscriptionPingTokenByIdentifier removeObjectForKey:identifier];
+                    [_subscriptionPingItemsByIdentifier removeObjectForKey:identifier];
                 }
                 [self refreshVisibleSubscriptionPingAccessories];
                 [self refreshVisibleSubscriptionHeaderAccessories];
@@ -424,6 +433,11 @@ static void VCPingNetworkChanged(SCNetworkReachabilityRef target, SCNetworkReach
 - (void)stopSubscriptionPingAtIndex:(NSInteger)subIdx {
     NSString *identifier = [self subscriptionPingIdentifierAtIndex:subIdx];
     if (!identifier) return;
+    [self stopSubscriptionPingIdentifier:identifier];
+    [self showStatus:@"Subscription ping stopped" ok:YES];
+}
+
+- (void)stopSubscriptionPingIdentifier:(NSString *)identifier {
     for (NSUInteger i = [_pingNetworkStarts count]; i > 0; i--)
         if ([[[_pingNetworkStarts objectAtIndex:i - 1] objectForKey:@"identifier"] isEqual:identifier])
             [_pingNetworkStarts removeObjectAtIndex:i - 1];
@@ -437,6 +451,7 @@ static void VCPingNetworkChanged(SCNetworkReachabilityRef target, SCNetworkReach
     [_subscriptionPingOperationsByIdentifier removeObjectForKey:identifier];
     [_subscriptionPingPreviousDisplayByIdentifier removeObjectForKey:identifier];
     [_subscriptionPingTokenByIdentifier removeObjectForKey:identifier];
+    [_subscriptionPingItemsByIdentifier removeObjectForKey:identifier];
     [[_subscriptionPingPreparationByIdentifier objectForKey:identifier] cancel];
     [_subscriptionPingPreparationByIdentifier removeObjectForKey:identifier];
     [_subscriptionPingReadyIdentifiers removeObject:identifier];
@@ -464,7 +479,6 @@ static void VCPingNetworkChanged(SCNetworkReachabilityRef target, SCNetworkReach
 
     [self refreshVisibleSubscriptionPingAccessories];
     [self refreshVisibleSubscriptionHeaderAccessories];
-    [self showStatus:@"Subscription ping stopped" ok:YES];
     if (_sortSubscriptionsByPing) [self scheduleSubscriptionPingSort];
     VCRecordAppEvent(@"ping", @"Subscription ping batch canceled",
                      [NSString stringWithFormat:@"pending=%lu", (unsigned long)pendingCount]);
@@ -506,6 +520,7 @@ static void VCPingNetworkChanged(SCNetworkReachabilityRef target, SCNetworkReach
     [_subscriptionPingOperationsByIdentifier removeAllObjects];
     [_subscriptionPingPreviousDisplayByIdentifier removeAllObjects];
     [_subscriptionPingTokenByIdentifier removeAllObjects];
+    [_subscriptionPingItemsByIdentifier removeAllObjects];
 
     NSUInteger stoppedCount = 0;
     for (NSString *uri in previousDisplay) {
@@ -520,6 +535,50 @@ static void VCPingNetworkChanged(SCNetworkReachabilityRef target, SCNetworkReach
     VCRecordAppEvent(@"ping", @"All pings canceled",
                      [NSString stringWithFormat:@"pending=%lu", (unsigned long)stoppedCount]);
     if (_sortSubscriptionsByPing) [self scheduleSubscriptionPingSort];
+}
+
+- (void)prunePingStateForMetadata:(NSDictionary *)metadata {
+    if (![metadata isKindOfClass:[NSDictionary class]]) return;
+    BOOL unchanged = metadata == _pingOwnedMetadata;
+    NSDictionary *snapshot = [metadata copy];
+    [_pingOwnedMetadata release]; _pingOwnedMetadata = snapshot;
+    _pingOwnershipRevision = _metadataRevision;
+    NSMutableDictionary *itemsByIdentifier = [NSMutableDictionary dictionaryWithCapacity:[_subscriptions count]];
+    for (NSUInteger index = 0; index < [_subscriptions count]; index++) {
+        NSString *identifier = [self subscriptionPingIdentifierAtIndex:index];
+        NSArray *items = [[_subscriptions objectAtIndex:index] objectForKey:@"items"];
+        if (identifier && [items isKindOfClass:[NSArray class]]) [itemsByIdentifier setObject:items forKey:identifier];
+    }
+    for (NSString *identifier in [[[_subscriptionPingItemsByIdentifier allKeys] copy] autorelease]) {
+        NSArray *current = [itemsByIdentifier objectForKey:identifier];
+        NSArray *previous = [_subscriptionPingItemsByIdentifier objectForKey:identifier];
+        if (!current || (current != previous && ![current isEqual:previous])) [self stopSubscriptionPingIdentifier:identifier];
+    }
+    for (NSString *uri in [[[_standalonePingCancellationsByURI allKeys] copy] autorelease]) {
+        if ([metadata objectForKey:uri]) continue;
+        [[_standalonePingCancellationsByURI objectForKey:uri] cancel];
+        [_standalonePingCancellationsByURI removeObjectForKey:uri];
+    }
+    if (!unchanged || _pingDisplayMayContainUnowned) {
+        NSMutableDictionary *displays = [[NSMutableDictionary alloc] initWithCapacity:MIN([metadata count], [_pingDisplayByURI count])];
+        NSDictionary *keys = [metadata count] < [_pingDisplayByURI count] ? metadata : _pingDisplayByURI;
+        for (NSString *uri in keys) {
+            id display = [_pingDisplayByURI objectForKey:uri];
+            if (display && [metadata objectForKey:uri]) [displays setObject:display forKey:uri];
+        }
+        [_pingDisplayByURI release]; _pingDisplayByURI = displays;
+    }
+    _pingDisplayMayContainUnowned = NO;
+    for (NSMutableArray *requests in @[_pingNetworkStarts, _pingNetworkResults]) {
+        for (NSUInteger index = [requests count]; index > 0; index--) {
+            NSDictionary *request = [requests objectAtIndex:index - 1];
+            NSString *uri = [request objectForKey:@"uri"];
+            NSString *identifier = [request objectForKey:@"identifier"];
+            NSArray *items = identifier ? [itemsByIdentifier objectForKey:identifier] : nil;
+            if (uri ? ![metadata objectForKey:uri] : ![items isEqual:[request objectForKey:@"items"]])
+                [requests removeObjectAtIndex:index - 1];
+        }
+    }
 }
 
 @end
