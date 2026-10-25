@@ -196,6 +196,34 @@ static void VCProfileClear(NSMutableData *data) {
     for (NSUInteger i=0;i<[data length];i++) bytes[i]=0;
 }
 
+static BOOL VCProfileUpgradeHeaders(id headers) {
+    NSString *text=[headers isKindOfClass:[NSString class]] ? headers : nil;
+    if ([headers isKindOfClass:[NSDictionary class]]) {
+        for (id key in headers) if (![key isKindOfClass:[NSString class]] || ![[headers objectForKey:key] isKindOfClass:[NSString class]]) return NO;
+        NSData *data=[NSJSONSerialization dataWithJSONObject:headers options:0 error:NULL];
+        text=data ? [[[NSString alloc] initWithData:data encoding:NSUTF8StringEncoding] autorelease] : nil;
+    }
+    if (!text || [text lengthOfBytesUsingEncoding:NSUTF8StringEncoding] > kVCMaximumConfigURIBytes) return NO;
+    core_json_t *root=core_json_parse([text UTF8String],NULL,0);
+    BOOL valid=root && root->type == CORE_JSON_OBJECT;
+    NSMutableDictionary *seen=[NSMutableDictionary dictionary];
+    NSUInteger size=0,count=0;
+    for (const core_json_t *entry=valid ? root->child : NULL;entry;entry=entry->next) {
+        const char *name=entry->key;
+        if (++count > 512 || entry->type != CORE_JSON_STRING || !name || !*name || strlen(name) >= 128) { valid=NO; break; }
+        for (const unsigned char *c=(const unsigned char *)name;*c;c++)
+            if (!((*c >= 'a' && *c <= 'z') || (*c >= 'A' && *c <= 'Z') || (*c >= '0' && *c <= '9') || strchr("!#$%&'*+-.^_`|~",*c))) valid=NO;
+        for (const unsigned char *c=(const unsigned char *)entry->text;*c;c++) if ((*c < 0x20 && *c != '\t') || *c == 0x7f) valid=NO;
+        NSString *key=[[NSString stringWithUTF8String:name] lowercaseString],*value=[NSString stringWithUTF8String:entry->text];
+        if (!key || !value || [@[@"host",@"content-length",@"transfer-encoding",@"connection",@"keep-alive",@"proxy-connection",@"upgrade",@"trailer",@"te"] containsObject:key]) { valid=NO; break; }
+        NSString *previous=[seen objectForKey:key];
+        if (previous && ![previous isEqual:value]) { valid=NO; break; }
+        if (!previous) { size+=strlen(name)+strlen(entry->text)+4; [seen setObject:value forKey:key]; }
+        if (size >= 4096 || !valid) { valid=NO; break; }
+    }
+    core_json_free(root); return valid;
+}
+
 static NSMutableData *VCProfileBase64(NSString *text) {
     NSUInteger length=[text length],symbols=length,padding=0;
     if (!length || length > kVCMaximumConfigURIBytes) return nil;
@@ -237,6 +265,14 @@ static NSDictionary *VCProfileJSONObject(NSData *data) {
             if (![field isKindOfClass:[NSDictionary class]]) return nil;
             for (NSString *key in field) {
                 id previous=[fields objectForKey:key],value=[field objectForKey:key];
+                if ([@[@"ed",@"maxearlydata"] containsObject:[key lowercaseString]]) {
+                    core_json_t *root=core_json_parse([[[[NSString alloc] initWithData:entry encoding:NSUTF8StringEncoding] autorelease] UTF8String],NULL,0);
+                    const core_json_t *node=root ? core_json_get(root,[key UTF8String]) : NULL;
+                    unsigned number;
+                    BOOL valid=node && (node->type == CORE_JSON_NUMBER || node->type == CORE_JSON_STRING) &&
+                        VCProfileUnsignedScalar([NSString stringWithUTF8String:node->text],UINT32_MAX,&number);
+                    core_json_free(root); if (!valid) return nil;
+                }
                 if (previous && ![previous isEqual:value]) return nil;
                 [fields setObject:value forKey:key];
             }
@@ -249,7 +285,7 @@ static NSDictionary *VCProfileJSONObject(NSData *data) {
 
 static NSString *VCProfileVMessKey(NSString *key) {
     NSString *lower=[key lowercaseString];
-    return [@{@"scy":@"encryption",@"alterid":@"aid",@"net":@"transport",@"network":@"transport",@"tls":@"security",@"service_name":@"servicename",@"insecure":@"allowinsecure"} objectForKey:lower] ?: lower;
+    return [@{@"scy":@"encryption",@"alterid":@"aid",@"net":@"transport",@"network":@"transport",@"tls":@"security",@"service_name":@"servicename",@"insecure":@"allowinsecure",@"maxearlydata":@"ed"} objectForKey:lower] ?: lower;
 }
 
 static NSDictionary *VCProfileVMessJSON(NSString *uri) {
@@ -267,7 +303,7 @@ static NSDictionary *VCProfileVMessJSON(NSString *uri) {
         if ([canonical isEqual:@"security"] && [value isEqual:@""]) value=@"none";
         id previous=[result objectForKey:canonical];
         if (previous && ![previous isEqual:value] && !([[previous description] isEqual:[value description]] &&
-            ([canonical isEqual:@"port"] || [canonical isEqual:@"aid"] || [canonical isEqual:@"v"]))) return nil;
+            ([canonical isEqual:@"port"] || [canonical isEqual:@"aid"] || [canonical isEqual:@"v"] || [canonical isEqual:@"ed"]))) return nil;
         [result setObject:value forKey:canonical];
     }
     if (VCProfileForbidden(result,@[@"authenticatedlength",@"noterminationsignal",@"experiments",@"globalpadding",@"chunkstream",@"chunkmasking",@"mux",@"packetencoding",@"headertype",@"cert",@"ca",@"pinsha256",@"pinnedpeercertificatesha256",@"pinnedpeercertificatespkisha256",@"verifycert",@"peer",@"vcn",@"pcs"],@"JSON.")) return nil;
@@ -618,7 +654,7 @@ failure:
         if (strict && !value) error=error ?: @"invalid query parameter encoding";
         if (error) { if (reason) *reason=error; return nil; }
         if (key) [seen addObject:key];
-        if ([key length] && [value length] && ![fields objectForKey:key]) [fields setObject:value forKey:key];
+        if ([key length] && ([value length] || [@[@"ed",@"headers",@"heartbeatperiod"] containsObject:key]) && ![fields objectForKey:key]) [fields setObject:value forKey:key];
     }
     return fields;
 }
@@ -682,10 +718,11 @@ failure:
     NSString *security=vmess ? [vmess objectForKey:@"security"] : [fields objectForKey:@"security"];
     security=VCProfileText(security) ? [security lowercaseString] : @"";
     if (![security length]) security=[scheme isEqual:@"trojan"] ? @"tls" : @"none";
-    if (!reason && ![@[@"tcp",@"ws",@"grpc",@"xhttp"] containsObject:transport]) reason=@"unsupported transport";
+    if (!reason && ![@[@"tcp",@"ws",@"grpc",@"xhttp",@"httpupgrade"] containsObject:transport]) reason=@"unsupported transport";
     if (!reason && ![@[@"none",@"tls",@"reality"] containsObject:security]) reason=@"unsupported security";
     if (!reason && [scheme isEqual:@"socks5"] && ![security isEqual:@"none"]) reason=@"SOCKS5 supports only security=none";
     if (!reason && [transport isEqual:@"ws"] && [security isEqual:@"reality"]) reason=@"WebSocket does not support REALITY";
+    if (!reason && [transport isEqual:@"httpupgrade"] && [security isEqual:@"reality"]) reason=@"HTTPUpgrade does not support REALITY";
     NSString *flow=vmess ? [vmess objectForKey:@"flow"] : [fields objectForKey:@"flow"];
     if (!VCProfileText(flow)) flow=nil;
     if (!reason && [flow length] && ![flow isEqual:@"xtls-rprx-vision"]) reason=@"unsupported flow";
@@ -709,6 +746,42 @@ failure:
             if ([fields objectForKey:field]) { reason=@"unsupported Shadowsocks query field"; break; }
     }
     if (!reason && [flow length] && [transport isEqual:@"tcp"] && [security isEqual:@"none"] && (![encryption length] || [encryption isEqual:@"none"])) reason=@"Vision requires TLS, REALITY or VLESS Encryption";
+    if (!reason && [transport isEqual:@"httpupgrade"]) {
+        NSDictionary *settings=vmess ?: fields;
+        if ([flow length] && (![encryption length] || [encryption isEqual:@"none"])) reason=@"HTTPUpgrade Vision requires VLESS Encryption";
+        NSString *authority=[settings objectForKey:@"host"];
+        if (![authority length] && [security isEqual:@"tls"]) authority=[settings objectForKey:@"sni"];
+        if (![authority length]) authority=host;
+        if (!VCProfileText(authority) || [authority lengthOfBytesUsingEncoding:NSUTF8StringEncoding] > 255 ||
+            (!VCProfileHost(authority) && !VCProfileEndpoint(authority,443,NULL,NULL))) reason=@"invalid HTTPUpgrade host";
+        NSString *path=[settings objectForKey:@"path"];
+        if (path && (!VCProfileText(path) || [path lengthOfBytesUsingEncoding:NSUTF8StringEncoding] > 255 || [path rangeOfString:@"\\"].location != NSNotFound)) reason=@"invalid HTTPUpgrade path";
+        NSRange question=[path rangeOfString:@"?"],hash=[path rangeOfString:@"#"];
+        NSUInteger end=hash.location == NSNotFound ? [path length] : hash.location;
+        BOOL seen=NO;
+        if (path && question.location != NSNotFound && question.location < end) {
+            NSString *query=[path substringWithRange:NSMakeRange(question.location+1,end-question.location-1)];
+            for (NSString *pair in [query componentsSeparatedByString:@"&"]) {
+                NSRange equals=[pair rangeOfString:@"="];
+                NSString *key=[self strictDecodedConfigQueryComponent:equals.location == NSNotFound ? pair : [pair substringToIndex:equals.location]];
+                if (!key) reason=@"invalid HTTPUpgrade path";
+                if ([key isEqual:@"ed"]) {
+                    unsigned number;
+                    NSString *value=equals.location == NSNotFound ? nil : [self strictDecodedConfigQueryComponent:[pair substringFromIndex:equals.location+1]];
+                    if (seen || !VCProfileUnsignedScalar(value,UINT32_MAX,&number)) reason=@"invalid HTTPUpgrade path.ed";
+                    seen=YES;
+                }
+            }
+        }
+        unsigned number; id early=[settings objectForKey:@"ed"];
+        if (early && !VCProfileUnsignedScalar(early,UINT32_MAX,&number)) reason=@"invalid HTTPUpgrade ed";
+        if ([settings objectForKey:@"heartbeatperiod"]) reason=@"HTTPUpgrade does not support heartbeatPeriod";
+        id headers=[settings objectForKey:@"headers"];
+        if (headers && !VCProfileUpgradeHeaders(headers)) reason=@"invalid HTTPUpgrade headers";
+        id alpn=[settings objectForKey:@"alpn"];
+        if ([security isEqual:@"tls"] && alpn && (!VCProfileText(alpn) || [alpn lengthOfBytesUsingEncoding:NSUTF8StringEncoding] >= 128 ||
+            ([alpn length] && ![[alpn componentsSeparatedByString:@","] containsObject:@"http/1.1"]))) reason=@"HTTPUpgrade requires ALPN http/1.1";
+    }
     NSString *fp=vmess ? [vmess objectForKey:@"fp"] : [fields objectForKey:@"fp"];
     fp=VCProfileText(fp) ? [fp lowercaseString] : @"";
     if (![fp length]) fp=@"chrome";
@@ -1730,7 +1803,8 @@ failure:
                        ([security isEqualToString:@"tls"] || [security isEqualToString:@"none"]);
     BOOL grpcSupported = [network isEqualToString:@"grpc"] &&
                          ([security isEqualToString:@"none"] || [security isEqualToString:@"tls"] || [security isEqualToString:@"reality"]);
-    if (!tcpSupported && !xhttpSupported && !wsSupported && !grpcSupported) return NO;
+    BOOL upgradeSupported = [network isEqual:@"httpupgrade"] && ([security isEqual:@"none"] || [security isEqual:@"tls"]);
+    if (!tcpSupported && !xhttpSupported && !wsSupported && !grpcSupported && !upgradeSupported) return NO;
 
     [self addHappURIQueryValue:network key:@"type" toParts:query];
     [self addHappURIQueryValue:security key:@"security" toParts:query];
@@ -1813,6 +1887,26 @@ failure:
         [self addHappURIQueryValue:host key:@"host" toParts:query];
         [self addHappURIQueryValue:mode key:@"mode" toParts:query];
         [self addHappURIQueryValue:[self happJSONStringFromDictionary:extra] key:@"extra" toParts:query];
+    } else if (upgradeSupported) {
+        id raw=[stream objectForKey:@"httpupgradeSettings"];
+        if (raw && ![raw isKindOfClass:[NSDictionary class]]) return NO;
+        NSDictionary *upgrade=raw;
+        if (VCProfileForbidden(upgrade,@[@"heartbeatPeriod",@"heartbeat_period",@"early_data_header_name",@"acceptProxyProtocol"],@"httpupgradeSettings.")) return NO;
+        for (NSString *field in @[@"host",@"path"]) {
+            id value=[upgrade objectForKey:field];
+            if (value && !VCProfileText(value)) return NO;
+            [self addHappURIQueryValue:value key:field toParts:query];
+        }
+        id headers=[upgrade objectForKey:@"headers"];
+        if (headers) {
+            if (![headers isKindOfClass:[NSDictionary class]] || !VCProfileUpgradeHeaders(headers)) return NO;
+            [self addHappURIQueryValue:[self happJSONStringFromDictionary:headers] key:@"headers" toParts:query];
+        }
+        BOOL valid=YES; unsigned number=0;
+        id early=VCProfileAlias(upgrade,@[@"ed",@"maxEarlyData"],&valid);
+        if (!valid || (early && !VCProfileUnsignedScalar(early,UINT32_MAX,&number))) return NO;
+        if (early) [self addHappURIQueryValue:[NSString stringWithFormat:@"%u",number] key:@"ed" toParts:query];
+        VCProfileUnknown(upgrade,@[@"host",@"path",@"headers",@"ed",@"maxEarlyData"],@"httpupgradeSettings.");
     } else if (wsSupported) {
         id rawWS = [stream objectForKey:@"wsSettings"];
         if (rawWS && ![rawWS isKindOfClass:[NSDictionary class]]) return NO;
@@ -1955,6 +2049,7 @@ failure:
         if (!VCProfileCopyAliases(transport,settings,[pair objectAtIndex:0],aliases)) return nil;
     }
     id earlyHeader=[settings objectForKey:@"early_data_header_name"];
+    if ([network isEqual:@"httpupgrade"] && earlyHeader) return nil;
     if (earlyHeader && ![earlyHeader isEqual:@"Sec-WebSocket-Protocol"]) return nil;
     [settings removeObjectForKey:@"early_data_header_name"];
     id rawHeaders=[settings objectForKey:@"headers"];
@@ -1971,7 +2066,7 @@ failure:
     }
     NSMutableDictionary *stream=[NSMutableDictionary dictionaryWithObjectsAndKeys:network,@"network",useReality ? @"reality" : tlsEnabled ? @"tls" : @"none",@"security",nil];
     [stream setObject:security forKey:useReality ? @"realitySettings" : @"tlsSettings"];
-    NSString *settingsKey=[@{@"tcp":@"tcpSettings",@"ws":@"wsSettings",@"grpc":@"grpcSettings",@"xhttp":@"xhttpSettings"} objectForKey:network];
+    NSString *settingsKey=[@{@"tcp":@"tcpSettings",@"ws":@"wsSettings",@"grpc":@"grpcSettings",@"xhttp":@"xhttpSettings",@"httpupgrade":@"httpupgradeSettings"} objectForKey:network];
     if (!settingsKey) return nil;
     if ([network isEqual:@"tcp"] && [settings count]) return nil;
     [stream setObject:settings forKey:settingsKey];

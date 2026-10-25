@@ -48,6 +48,7 @@
                  answer:@"Supported configurations:\n"
                          @"• VLESS, Trojan, VMess AEAD, and Shadowsocks: TCP, gRPC gun/multi, and XHTTP with no external security, TLS, or Reality\n"
                          @"• WebSocket with TLS or no external security; WS + Reality is not supported\n"
+                         @"• HTTPUpgrade with TLS (HTTP/1.1) or no external security. Reality and h2 are not supported\n"
                          @"• XHTTP: auto, packet-up, stream-one, stream-up, XMUX, and a separate download server\n"
                          @"• VLESS Encryption and applicable Vision; not available for other protocols\n"
                          @"• VMess alterId=0 only; auto, AES-GCM, ChaCha20-Poly1305, none, or zero\n"

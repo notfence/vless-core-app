@@ -1,11 +1,13 @@
 import contextlib
 import base64
 import json
+import io
 import os
 from pathlib import Path
 import subprocess
 import sys
 import tempfile
+import zipfile
 
 APP = Path(__file__).resolve().parents[1]
 CORE = APP.parent / "vless-core-cli"
@@ -31,6 +33,84 @@ with tempfile.TemporaryDirectory(prefix="vless-app-bridge-", dir=private_parent)
     decryption = f"mlkem768x25519plus.native.600s.{f.KEY}"
     flow = "xtls-rprx-vision"
     cert, _ = f.certificate()
+    upgrade_cases = [("vless", None, None), ("trojan", None, None)]
+    upgrade_cases += [("vmess", algorithm, None) for algorithm in ("auto", "aes-128-gcm", "chacha20-poly1305", "none", "zero")]
+    upgrade_cases += [("shadowsocks", None, method) for method in f.SHADOWSOCKS_METHODS]
+    for protocol, algorithm, method in upgrade_cases:
+        for security in ("none", "tls"):
+            with contextlib.ExitStack() as stack:
+                target = stack.enter_context(f.Server())
+                password = f.shadowsocks_password(method) if method else f.TROJAN_PASSWORD
+                options = {"protocol": protocol, "password": password, "ss_method": method or "aes-128-gcm"}
+                reference = stack.enter_context(f.xray_server("httpupgrade", security, **options))
+                stream = {"network": "httpupgrade", "security": security,
+                          "httpupgradeSettings": {"path": "/vless-core", "host": "vless-core.test", "ed": 0,
+                                                  "headers": {"X-Fixture": "A+B%20"}}}
+                if security == "tls":
+                    stream["tlsSettings"] = {"serverName": "vless-core.test", "alpn": ["http/1.1"]}
+                if protocol in ("vless", "vmess"):
+                    user = {"id": f.UUID, "encryption": "none"} if protocol == "vless" else {"id": f.UUID, "security": algorithm, "alterId": 0}
+                    settings = {"vnext": [{"address": "primary.invalid", "port": reference.port, "users": [user]}]}
+                else:
+                    settings = {"address": "primary.invalid", "port": reference.port, "password": password}
+                    if method:
+                        settings["method"] = method
+                happ = {"outbounds": [{"protocol": protocol, "settings": settings, "streamSettings": stream}]}
+                karing = {"type": protocol, "server": "primary.invalid", "server_port": reference.port,
+                          "uuid": f.UUID, "password": password,
+                          "transport": {"type": "httpupgrade", **stream["httpupgradeSettings"]},
+                          "tls": {"enabled": security == "tls", "server_name": "vless-core.test", "alpn": ["http/1.1"]}}
+                if algorithm:
+                    karing["security"] = algorithm
+                if method:
+                    karing["method"] = method
+                parameters = {"encryption": algorithm} if algorithm else {}
+                links = [("URI", f.uri(reference.port, "httpupgrade", security, **options, **parameters))]
+                for source, document, option in (("HAPP", happ, "--convert"), ("Karing", karing, "--convert-karing")):
+                    converted = subprocess.run([str(BUILD / "test_import_formats"), option], input=json.dumps(document),
+                                               text=True, capture_output=True, timeout=5, check=True)
+                    links.append((source, converted.stdout.strip()))
+                archive = io.BytesIO()
+                with zipfile.ZipFile(archive, "w", zipfile.ZIP_DEFLATED) as backup:
+                    backup.writestr("karing_subscribe.json", json.dumps({"items": [{"urlOrPath": "https://subscription.invalid/fixture", "servers": [karing]}]}))
+                converted = subprocess.run([str(BUILD / "test_import_formats"), "--convert-backup"], input=archive.getvalue(),
+                                           capture_output=True, timeout=5, check=True)
+                links.append(("Karing ZIP", converted.stdout.decode().strip()))
+                if protocol == "vmess":
+                    document = {"v": "2", "id": f.UUID, "add": "primary.invalid", "port": reference.port,
+                                "net": "httpupgrade", "tls": security, "scy": algorithm,
+                                "path": "/vless-core", "sni": "vless-core.test", "maxEarlyData": 0}
+                    links.append(("VMess JSON", "vmess://" + base64.b64encode(json.dumps(document).encode()).decode()))
+                for source, original in links:
+                    inspected = subprocess.run([str(BUILD / "test_core_config"), "--real", str(CORE_BUILD / "vless-core-test")],
+                                               input=original, text=True, capture_output=True, timeout=5, check=True)
+                    if "PRIMARY\t" not in inspected.stdout:
+                        raise AssertionError("HTTPUpgrade inspection lost endpoint")
+                    for enabled in (False, True):
+                        prepared = subprocess.run([str(BUILD / "test_runtime_uri"), "--runtime-on" if enabled else "--runtime-off"],
+                                                  input=original, text=True, capture_output=True, timeout=5, check=True).stdout.strip()
+                        if prepared != original:
+                            raise AssertionError("Use XMUX rewrote HTTPUpgrade URI")
+                        with f.cli(prepared, extra=["--server-ips", "127.0.0.1"], environment={"VLESS_CA_BUNDLE": str(cert)}) as client:
+                            with f.socks_connect(client.port, target.port) as connection:
+                                f.exchange(connection, b"\x00\x00" + bytes(range(256)) * 256)
+                        if target.errors:
+                            raise AssertionError("HTTPUpgrade changed application data")
+                print(f"PASS app/core/Xray: HTTPUpgrade/{protocol}/{algorithm or method or '-'}/{security}/all-imports/XMUX-both")
+    import test_httpupgrade as upgrade_tests
+    import unittest
+    original_upgrade_uri = upgrade_tests.uri
+    def prepared_upgrade_uri(*args, **kwargs):
+        original = original_upgrade_uri(*args, **kwargs)
+        return subprocess.run([str(BUILD / "test_runtime_uri"), "--runtime-off"], input=original,
+                              text=True, capture_output=True, timeout=5, check=True).stdout.strip()
+    upgrade_tests.uri = prepared_upgrade_uri
+    controlled = unittest.TestSuite(upgrade_tests.HTTPUpgradeTests(name) for name in (
+        "test_early_data_fragmented_upgrade_and_remaining_data", "test_invalid_upgrade_does_not_expose_payload",
+        "test_pending_upgrade_deadline_is_not_paused", "test_half_close_and_last_data"))
+    if not unittest.TextTestRunner(verbosity=1).run(controlled).wasSuccessful():
+        raise AssertionError("app HTTPUpgrade controlled server tests failed")
+    upgrade_tests.uri = original_upgrade_uri
     for protocol in ("vless", "trojan", "vmess", "shadowsocks"):
         for enabled in (False, True):
             for mode, security in (("stream-one", "reality"), ("stream-up", "tls"), ("packet-up", "none")):
@@ -77,7 +157,8 @@ with tempfile.TemporaryDirectory(prefix="vless-app-bridge-", dir=private_parent)
                         raise AssertionError("XMUX toggle damaged independent channels or their physical connection sharing")
             print(f"PASS app/core/Xray: Use-XMUX/{int(enabled)}/{protocol}/independent-download")
     for protocol, transport, security in (("vless", "tcp", "none"), ("trojan", "ws", "tls"),
-                                          ("vmess", "grpc", "tls"), ("shadowsocks", "xhttp", "reality")):
+                                          ("vmess", "grpc", "tls"), ("shadowsocks", "xhttp", "reality"),
+                                          *((p, "httpupgrade", s) for p in ("vless", "trojan", "vmess", "shadowsocks") for s in ("none", "tls"))):
         requests = []
         def http_probe(connection):
             request = bytearray()

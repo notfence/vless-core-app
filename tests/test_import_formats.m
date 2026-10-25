@@ -238,11 +238,15 @@ static void shadowsocksProfiles(void) {
         CHECK("ss/empty-and-endpoint-bounds",![p isSupportedConfigTupleForURI:value]);
 }
 int main(int argc, char **argv) {
-    if (argc == 2 && (!strcmp(argv[1], "--convert") || !strcmp(argv[1],"--convert-karing"))) {
+    if (argc == 2 && (!strcmp(argv[1], "--convert") || !strcmp(argv[1],"--convert-karing") || !strcmp(argv[1],"--convert-backup"))) {
         NSAutoreleasePool *pool = [[NSAutoreleasePool alloc] init];
         NSData *data = [[NSFileHandle fileHandleWithStandardInput] readDataToEndOfFile];
         NSArray *uris=nil;
-        if (!strcmp(argv[1],"--convert-karing")) {
+        if (!strcmp(argv[1],"--convert-backup")) {
+            NSMutableArray *items=[NSMutableArray array];
+            for (NSDictionary *subscription in VCKaringSubscriptionsFromBackupData(data,NULL)) [items addObjectsFromArray:[subscription objectForKey:@"items"] ?: @[]];
+            uris=items;
+        } else if (!strcmp(argv[1],"--convert-karing")) {
             NSString *uri=[VCProfiles() URIFromKaringServer:[NSJSONSerialization JSONObjectWithData:data options:0 error:NULL] error:NULL];
             uris=uri ? @[uri] : @[];
         } else uris=[VCProfiles() extractConfigURIsFromHappJSONData:data];
