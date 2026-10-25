@@ -510,6 +510,7 @@
 @end
 
 @interface MainVC (VCMainTable) <UITableViewDataSource, UITableViewDelegate>
+- (void)applyConfigDetailForURI:(NSString *)uri hidden:(BOOL)hidden toCell:(UITableViewCell *)cell;
 - (NSInteger)numberOfSectionsInTableView:(UITableView *)tableView;
 - (NSInteger)tableView:(UITableView *)tableView numberOfRowsInSection:(NSInteger)section;
 - (CGFloat)tableView:(UITableView *)tableView heightForRowAtIndexPath:(NSIndexPath *)indexPath;

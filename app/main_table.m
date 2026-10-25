@@ -231,6 +231,21 @@ moveRowAtIndexPath:(NSIndexPath *)sourceIndexPath
     [self showStatus:@"Subscription config deleted" ok:YES];
 }
 
+- (void)applyConfigDetailForURI:(NSString *)uri hidden:(BOOL)hidden toCell:(UITableViewCell *)cell {
+    VCMainListCell *live = [cell isKindOfClass:[VCMainListCell class]] ? (VCMainListCell *)cell : nil;
+    NSString *prefix = nil, *tail = nil;
+    BOOL supported = NO;
+    if ([live hasDetailForURI:uri hidden:hidden stealth:_stealthModeEnabled]) {
+        prefix = live.detailPrefix; tail = live.detailTail; supported = live.detailSupported;
+    } else {
+        prefix = [self configPrefixTextFromURI:uri];
+        tail = hidden ? kHiddenLinkText : [self configEndpointTextFromURI:uri];
+        supported = [self isSupportedConfigTupleForURI:uri];
+        [live rememberDetailURI:uri hidden:hidden stealth:_stealthModeEnabled prefix:prefix tail:tail supported:supported];
+    }
+    [self applyDetailPrefix:prefix prefixColor:supported ? VCSecondaryTextColor() : VCErrorColor() tail:tail toCell:cell];
+}
+
 - (void)applyDetailForMainCell:(UITableViewCell *)cell atIndexPath:(NSIndexPath *)indexPath {
     if (!cell || !indexPath) return;
 
@@ -241,12 +256,7 @@ moveRowAtIndexPath:(NSIndexPath *)sourceIndexPath
         }
         NSDictionary *cfg = [_configs objectAtIndex:indexPath.row];
         NSString *uri = [cfg objectForKey:@"uri"];
-        NSString *prefix = [self configPrefixTextFromURI:uri];
-        NSString *tail = [self configEndpointTextFromURI:uri];
-        [self applyDetailPrefix:prefix
-                    prefixColor:[self configPrefixColorForURI:uri]
-                           tail:tail
-                         toCell:cell];
+        [self applyConfigDetailForURI:uri hidden:NO toCell:cell];
         return;
     }
 
@@ -271,14 +281,7 @@ moveRowAtIndexPath:(NSIndexPath *)sourceIndexPath
     }
 
     NSString *uri = [items objectAtIndex:itemIdx];
-    NSString *prefix = [self configPrefixTextFromURI:uri];
-    NSString *tail = SubscriptionDictionaryIsHappEncrypted(sub)
-        ? kHiddenLinkText
-        : [self configEndpointTextFromURI:uri];
-    [self applyDetailPrefix:prefix
-                prefixColor:[self configPrefixColorForURI:uri]
-                       tail:tail
-                     toCell:cell];
+    [self applyConfigDetailForURI:uri hidden:SubscriptionDictionaryIsHappEncrypted(sub) toCell:cell];
 }
 
 - (void)runQueuedMainDetailRelayout {
@@ -344,7 +347,6 @@ moveRowAtIndexPath:(NSIndexPath *)sourceIndexPath
         if (!cell) continue;
         cell.accessoryView = [self accessoryPingForURI:rowURI];
         [cell setNeedsLayout];
-        [cell layoutIfNeeded];
         [self applyDetailForMainCell:cell atIndexPath:indexPath];
     }
 }
@@ -374,7 +376,6 @@ moveRowAtIndexPath:(NSIndexPath *)sourceIndexPath
         if (!cell) continue;
         cell.accessoryView = [self accessoryPingForURI:uri];
         [cell setNeedsLayout];
-        [cell layoutIfNeeded];
         [self applyDetailForMainCell:cell atIndexPath:indexPath];
     }
 }

@@ -40,6 +40,7 @@ HOST_TESTS += $(HOST_BUILD_DIR)/test_main_network
 HOST_TESTS += $(HOST_BUILD_DIR)/test_temp_probe
 HOST_TESTS += $(HOST_BUILD_DIR)/test_temp_spawn $(HOST_BUILD_DIR)/test_probe_log
 HOST_TESTS += $(HOST_BUILD_DIR)/test_main_images
+HOST_TESTS += $(HOST_BUILD_DIR)/test_main_detail
 CORE_PARSE_SRC := uri utils xhttp_config xhttp_download xhttp_payload buffer_budget websocket grpc http_headers core_log
 CORE_PARSE_SRC += vmess_uri shadowsocks_uri shadowsocks_crypto blake3 trojan core_random deadline socket_util relay_memory connection_trace resolver
 CORE_PARSE_OBJ := $(addprefix $(HOST_BUILD_DIR)/core-parser/,$(addsuffix .o,$(CORE_PARSE_SRC)))
@@ -77,6 +78,7 @@ test: requirements $(HOST_TESTS)
 	$(HOST_BUILD_DIR)/test_temp_spawn
 	$(HOST_BUILD_DIR)/test_probe_log
 	$(HOST_BUILD_DIR)/test_main_images
+	$(HOST_BUILD_DIR)/test_main_detail
 	$(HOST_BUILD_DIR)/test_proxy_probe
 	$(HOST_BUILD_DIR)/test_core_config
 	VC_HOST_BUILD_DIR="$(HOST_BUILD_DIR)" VC_TEST_SANITIZE="$(SANITIZE)" python3 $(ROOT)/tests/test_core_bridge.py
@@ -191,6 +193,17 @@ $(HOST_BUILD_DIR)/main_header_images.inc: ../app/main_cells.m extract_ui_methods
 	python3 extract_ui_methods.py $< $@ '?- (void)refreshHeaderImages'
 
 $(HOST_BUILD_DIR)/test_main_images: test_main_images.m $(HOST_BUILD_DIR)/main_header_images.inc check.h
+	$(HOST_CC) $(HOST_CPPFLAGS) $(HOST_OBJCFLAGS) $(HOST_CFLAGS) -I$(HOST_BUILD_DIR) $< -o $@ $(HOST_LIBS)
+
+$(HOST_BUILD_DIR)/main_detail_cache.inc: ../app/main_cells.m extract_ui_methods.py Makefile
+	mkdir -p $(dir $@)
+	python3 extract_ui_methods.py $< $@ '?- (BOOL)hasDetailForURI:' '?- (void)rememberDetailURI:' '?- (BOOL)hasDetailLayoutForFrame:' '?- (void)rememberDetailLayoutForFrame:' '?- (void)invalidateDetailLayout' '?- (void)resetDetailState'
+
+$(HOST_BUILD_DIR)/main_detail_apply.inc: ../app/main_table.m extract_ui_methods.py Makefile
+	mkdir -p $(dir $@)
+	python3 extract_ui_methods.py $< $@ '?- (void)applyConfigDetailForURI:'
+
+$(HOST_BUILD_DIR)/test_main_detail: test_main_detail.m $(HOST_BUILD_DIR)/main_detail_cache.inc $(HOST_BUILD_DIR)/main_detail_apply.inc check.h
 	$(HOST_CC) $(HOST_CPPFLAGS) $(HOST_OBJCFLAGS) $(HOST_CFLAGS) -I$(HOST_BUILD_DIR) $< -o $@ $(HOST_LIBS)
 
 $(HOST_BUILD_DIR)/app/proxy_probe.o: ../app/proxy_probe.m ../app/proxy_probe.h ../common/connection_logic.h | requirements

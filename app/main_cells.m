@@ -185,6 +185,55 @@ static UIView *VCMainListCellReorderControlInView(UIView *view) {
 
 @implementation VCMainListCell
 
+@synthesize detailPrefix = _detailPrefix, detailTail = _detailTail, detailSupported = _detailSupported;
+
+- (BOOL)hasDetailForURI:(NSString *)uri hidden:(BOOL)hidden stealth:(BOOL)stealth {
+    return [uri isKindOfClass:[NSString class]] && _detailSourceURI && [_detailSourceURI isEqualToString:uri] && _detailHidden == hidden && _detailStealth == stealth;
+}
+
+- (void)rememberDetailURI:(NSString *)uri hidden:(BOOL)hidden stealth:(BOOL)stealth prefix:(NSString *)prefix tail:(NSString *)tail supported:(BOOL)supported {
+    NSString *source = [uri isKindOfClass:[NSString class]] ? [uri copy] : nil;
+    NSString *head = [prefix copy], *end = [tail copy];
+    [_detailSourceURI release]; _detailSourceURI = source;
+    [_detailPrefix release]; _detailPrefix = head;
+    [_detailTail release]; _detailTail = end;
+    _detailHidden = hidden; _detailStealth = stealth; _detailSupported = supported;
+    [self invalidateDetailLayout];
+}
+
+- (BOOL)hasDetailLayoutForFrame:(CGRect)frame font:(UIFont *)font prefix:(NSString *)prefix tail:(NSString *)tail {
+    return _detailLayoutValid && CGRectEqualToRect(frame, _detailLayoutFrame) && [_detailLayoutFont isEqual:font] &&
+        [_detailLayoutPrefix isEqualToString:prefix] && [_detailLayoutTail isEqualToString:tail];
+}
+
+- (void)rememberDetailLayoutForFrame:(CGRect)frame font:(UIFont *)font prefix:(NSString *)prefix tail:(NSString *)tail {
+    UIFont *base = [font retain];
+    NSString *head = [prefix copy], *end = [tail copy];
+    [_detailLayoutFont release]; _detailLayoutFont = base;
+    [_detailLayoutPrefix release]; _detailLayoutPrefix = head;
+    [_detailLayoutTail release]; _detailLayoutTail = end;
+    _detailLayoutFrame = frame; _detailLayoutValid = YES;
+}
+
+- (void)invalidateDetailLayout {
+    _detailLayoutValid = NO;
+    [_detailLayoutFont release]; _detailLayoutFont = nil;
+    [_detailLayoutPrefix release]; _detailLayoutPrefix = nil;
+    [_detailLayoutTail release]; _detailLayoutTail = nil;
+}
+
+- (void)resetDetailState {
+    [_detailSourceURI release]; _detailSourceURI = nil;
+    [_detailPrefix release]; _detailPrefix = nil;
+    [_detailTail release]; _detailTail = nil;
+    [self invalidateDetailLayout];
+}
+
+- (void)prepareForReuse {
+    [self resetDetailState];
+    [super prepareForReuse];
+}
+
 - (id)initWithStyle:(UITableViewCellStyle)style reuseIdentifier:(NSString *)reuseIdentifier {
     self = [super initWithStyle:style reuseIdentifier:reuseIdentifier];
     if (!self) return nil;
@@ -198,6 +247,7 @@ static UIView *VCMainListCellReorderControlInView(UIView *view) {
 }
 
 - (void)dealloc {
+    [self resetDetailState];
     [_normalVisualBackground release];
     [_selectedVisualBackground release];
     [super dealloc];
@@ -209,6 +259,8 @@ static UIView *VCMainListCellReorderControlInView(UIView *view) {
                    lastItem:(BOOL)lastItem
                       active:(BOOL)active
              showsHeaderTab:(BOOL)showsHeaderTab {
+    if (_visualKind != kind || _visualFirstItem != firstItem || _visualLastItem != lastItem)
+        [self invalidateDetailLayout];
     _visualKind = kind;
     _visualExpanded = expanded;
     _visualFirstItem = firstItem;

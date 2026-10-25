@@ -70,7 +70,6 @@
 
 - (CGRect)mainDetailContentFrameForCell:(UITableViewCell *)cell {
     if (!cell) return CGRectZero;
-    [cell setNeedsLayout];
     [cell layoutIfNeeded];
 
     CGRect contentBounds = cell.contentView.bounds;
@@ -131,6 +130,7 @@
 }
 
 - (void)clearDetailTextForCell:(UITableViewCell *)cell {
+    if ([cell isKindOfClass:[VCMainListCell class]]) [(VCMainListCell *)cell invalidateDetailLayout];
     UIView *container = [self mainDetailContainerForCell:cell createIfNeeded:NO];
     if (!container) return;
 
@@ -181,7 +181,11 @@
 
     // Keep subtitle geometry stable: non-empty detail preserves UIKit two-line layout metrics.
     BOOL hasDetail = ([prefixText length] > 0 || [tailText length] > 0);
-    cell.detailTextLabel.text = hasDetail ? @" " : @"";
+    NSString *placeholder = hasDetail ? @" " : @"";
+    if (![cell.detailTextLabel.text isEqualToString:placeholder]) {
+        cell.detailTextLabel.text = placeholder;
+        [cell setNeedsLayout];
+    }
     cell.detailTextLabel.textColor = [UIColor clearColor];
 
     if ([prefixText length] == 0 && [tailText length] == 0) {
@@ -201,6 +205,12 @@
 
     UILabel *prefixLabel = [self mainDetailPrefixLabelForContainer:container createIfNeeded:YES];
     UILabel *tailLabel = [self mainDetailTailLabelForContainer:container createIfNeeded:YES];
+    VCMainListCell *live = [cell isKindOfClass:[VCMainListCell class]] ? (VCMainListCell *)cell : nil;
+    if ([live hasDetailLayoutForFrame:containerFrame font:detailFont prefix:prefixText tail:tailText]) {
+        prefixLabel.textColor = effectivePrefixColor;
+        tailLabel.textColor = detailColor;
+        return;
+    }
     CGFloat lineH = CGRectGetHeight(container.bounds);
     CGFloat lineW = CGRectGetWidth(container.bounds);
     UIFont *fittedFont = [self mainDetailFont:detailFont
@@ -222,6 +232,7 @@
         prefixLabel.hidden = NO;
         prefixLabel.text = prefixText;
         prefixLabel.frame = CGRectMake(0.0f, 0.0f, lineW, lineH);
+        [live rememberDetailLayoutForFrame:containerFrame font:detailFont prefix:prefixText tail:tailText];
         return;
     }
 
@@ -233,6 +244,7 @@
         tailLabel.hidden = NO;
         tailLabel.frame = CGRectMake(0.0f, 0.0f, lineW, lineH);
         tailLabel.text = tailText;
+        [live rememberDetailLayoutForFrame:containerFrame font:detailFont prefix:prefixText tail:tailText];
         return;
     }
 
@@ -260,6 +272,7 @@
                                        tail:combinedText
                                       width:lineW];
         tailLabel.text = combinedText;
+        [live rememberDetailLayoutForFrame:containerFrame font:detailFont prefix:prefixText tail:tailText];
         return;
     }
 
@@ -270,6 +283,7 @@
     tailLabel.hidden = NO;
     tailLabel.frame = CGRectMake(tailX, 0.0f, tailWidth, lineH);
     tailLabel.text = tailText;
+    [live rememberDetailLayoutForFrame:containerFrame font:detailFont prefix:prefixText tail:tailText];
 }
 
 - (void)applyDetailPrefix:(NSString *)prefix tail:(NSString *)tail toCell:(UITableViewCell *)cell {

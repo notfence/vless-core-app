@@ -39,7 +39,21 @@ typedef NS_ENUM(NSInteger, VCMainListCellKind) {
     BOOL _visualShowsHeaderTab;
     VCMainListCellBackgroundView *_normalVisualBackground;
     VCMainListCellBackgroundView *_selectedVisualBackground;
+    NSString *_detailSourceURI, *_detailPrefix, *_detailTail;
+    BOOL _detailHidden, _detailStealth, _detailSupported, _detailLayoutValid;
+    CGRect _detailLayoutFrame;
+    UIFont *_detailLayoutFont;
+    NSString *_detailLayoutPrefix, *_detailLayoutTail;
 }
+@property (nonatomic, readonly) NSString *detailPrefix;
+@property (nonatomic, readonly) NSString *detailTail;
+@property (nonatomic, readonly) BOOL detailSupported;
+- (BOOL)hasDetailForURI:(NSString *)uri hidden:(BOOL)hidden stealth:(BOOL)stealth;
+- (void)rememberDetailURI:(NSString *)uri hidden:(BOOL)hidden stealth:(BOOL)stealth prefix:(NSString *)prefix tail:(NSString *)tail supported:(BOOL)supported;
+- (BOOL)hasDetailLayoutForFrame:(CGRect)frame font:(UIFont *)font prefix:(NSString *)prefix tail:(NSString *)tail;
+- (void)rememberDetailLayoutForFrame:(CGRect)frame font:(UIFont *)font prefix:(NSString *)prefix tail:(NSString *)tail;
+- (void)invalidateDetailLayout;
+- (void)resetDetailState;
 - (void)configureVisualKind:(VCMainListCellKind)kind
                    expanded:(BOOL)expanded
                   firstItem:(BOOL)firstItem
