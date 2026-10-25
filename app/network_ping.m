@@ -2,6 +2,7 @@
 #include <ifaddrs.h>
 #include <net/if.h>
 #import <SystemConfiguration/CaptiveNetwork.h>
+#include <sys/event.h>
 
 static long long PingMonotonicMs(void) {
     return (long long)(VCSubscriptionMonotonicTime() * 1000.0);
@@ -50,18 +51,10 @@ NSString *VCPingNetworkSignature(void) {
     return [NSString stringWithFormat:@"%u|%@",(unsigned)(flags & kSCNetworkReachabilityFlagsIsWWAN),[addresses componentsJoinedByString:@"|"]];
 }
 
-static NSDictionary *ReadProbeReport(int fd, long long previousID, VCPingCancellation *cancellation) {
-    if (fd < 0) return nil;
+static NSDictionary *ReadProbeReport(VCProbeLogReader *reader, long long previousID, VCPingCancellation *cancellation) {
     for (int attempt = 0; attempt < 20 && ![cancellation isCancelled]; attempt++) {
-        struct stat state;
-        if (fstat(fd,&state) != 0) break;
-        size_t length = state.st_size > 65536 ? 65536 : (size_t)state.st_size;
-        char *buffer = calloc(1,length + 1);
-        if (!buffer) break;
-        ssize_t count = pread(fd,buffer,length,state.st_size - length);
-        NSDictionary *report = count > 0 ? VCProbeReportFromLog([NSString stringWithUTF8String:buffer]) : nil;
-        free(buffer);
-        if ([[report objectForKey:@"id"] longLongValue] > previousID) return report;
+        NSDictionary *report = [reader readReportAfterID:previousID];
+        if (report) return report;
         usleep(5000);
     }
     return nil;
@@ -206,16 +199,31 @@ static void stop_child_process(pid_t pid) {
     if (wr == pid) return;
     if (wr < 0 && errno == ECHILD) return;
 
-    kill(pid, SIGTERM);
-    for (int i = 0; i < 20; i++) {
-        wr = waitpid(pid, &st, WNOHANG);
-        if (wr == pid) return;
-        if (wr < 0 && errno == ECHILD) return;
-        usleep(50 * 1000);
+    int events = kqueue();
+    if (events >= 0) {
+        struct kevent change;
+        EV_SET(&change, (uintptr_t)pid, EVFILT_PROC, EV_ADD | EV_ENABLE | EV_ONESHOT, NOTE_EXIT, 0, NULL);
+        if (kevent(events, &change, 1, NULL, 0, NULL) != 0) { close(events); events = -1; }
     }
-    kill(pid, SIGKILL);
-    wr = waitpid(pid, &st, 0);
-    if (wr < 0 && errno == ECHILD) return;
+    kill(pid, SIGTERM);
+    long long deadline = PingMonotonicMs() + 1000;
+    while (PingMonotonicMs() < deadline) {
+        wr = waitpid(pid, &st, WNOHANG);
+        if (wr == pid || (wr < 0 && errno == ECHILD)) break;
+        long long remaining = deadline - PingMonotonicMs();
+        if (remaining <= 0) break;
+        if (events >= 0) {
+            struct timespec timeout = {remaining / 1000, (remaining % 1000) * 1000000};
+            struct kevent event;
+            int count = kevent(events, NULL, 0, &event, 1, &timeout);
+            if (count < 0 && errno != EINTR) { close(events); events = -1; }
+        } else usleep((useconds_t)MIN(remaining, 50) * 1000);
+    }
+    if (events >= 0) close(events);
+    if (wr != pid && !(wr < 0 && errno == ECHILD)) {
+        kill(pid, SIGKILL);
+        do { wr = waitpid(pid, &st, 0); } while (wr < 0 && errno == EINTR);
+    }
 }
 
 static pid_t spawn_temp_core_for_ping(const char *uri, uint16_t port, const char *xray_version, int diagnostics_fd) {
@@ -279,6 +287,7 @@ int ProxyGetViaTempCoreMs(const char *uri, const char *xray_version,
     cancellation.diagnosticReport = nil;
     if (!uri || !*uri || [cancellation isCancelled] || !VCProxyPingTargetForURL(probeURL)) return -1;
     if (attempts <= 0) attempts = 1;
+    if (attempts > 2) attempts = 2;
 
     int port = pick_free_loopback_port();
     if (port <= 0 || port > 65535) return -2;
@@ -302,14 +311,15 @@ int ProxyGetViaTempCoreMs(const char *uri, const char *xray_version,
 
     int best = -1;
     long long previousID = 0;
+    VCProbeLogReader *reader = capture >= 0 ? [[VCProbeLogReader alloc] initWithFileDescriptor:capture] : nil;
     NSDictionary *selectedReport = nil;
     for (int i = 0; i < attempts && ![cancellation isCancelled]; i++) {
         int ms = 0;
         int result = ProxyGetConnectToURLOnceMs((uint16_t)port, probeURL, timeout_ms, &ms, cancellation);
-        NSDictionary *report = ReadProbeReport(capture,previousID,cancellation);
+        NSDictionary *report = reader ? ReadProbeReport(reader,previousID,cancellation) : nil;
         if (report) previousID = [[report objectForKey:@"id"] longLongValue];
         if (result == 0) {
-            if (best < 0 || ms < best) { best = ms; selectedReport = report; }
+            if (best < 0 || ms < best) { best = ms; [selectedReport release]; selectedReport = [report retain]; }
         } else if (best < 0) {
             if ([[report objectForKey:@"success"] boolValue]) {
                 NSMutableDictionary *failure = [NSMutableDictionary dictionaryWithDictionary:report];
@@ -317,13 +327,16 @@ int ProxyGetViaTempCoreMs(const char *uri, const char *xray_version,
                 [failure setObject:@"carry" forKey:@"stage"];
                 report = failure;
             }
-            selectedReport = report;
+            [selectedReport release]; selectedReport = [report retain];
         }
+        if (i == 0 && result != 0) break;
     }
     [cancellation forgetChild:pid];
     stop_child_process(pid);
-    if (capture >= 0) close(capture);
     cancellation.diagnosticReport = selectedReport;
+    [selectedReport release];
+    [reader release];
+    if (capture >= 0) close(capture);
 
     if (best < 0) {
         return -5;

@@ -8,6 +8,7 @@
 #include <errno.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/stat.h>
 
 NSDictionary *VCProbeReportFromLog(NSString *text) {
     if (![text isKindOfClass:[NSString class]]) return nil;
@@ -225,6 +226,54 @@ BOOL VCPingUpdateNetwork(id owner, NSString *signature, NSString **storedSignatu
     [_previousDisplays release];
     [super dealloc];
 }
+@end
+
+@implementation VCProbeLogReader
+- (id)initWithFileDescriptor:(int)descriptor {
+    if ((self = [super init])) {
+        _descriptor = descriptor;
+        _pending = [[NSMutableData alloc] init];
+    }
+    return self;
+}
+- (NSDictionary *)readReportAfterID:(long long)identifier {
+    struct stat state;
+    if (_descriptor < 0 || fstat(_descriptor, &state) != 0 || state.st_size < 0) return nil;
+    if (_offset > state.st_size || state.st_size - _offset > 65536) {
+        _offset = state.st_size > 65536 ? state.st_size - 65536 : 0;
+        [_pending setLength:0];
+        [_latest release]; _latest = nil;
+    }
+    NSUInteger interruptions = 0;
+    while (_offset < state.st_size) {
+        unsigned char bytes[4096];
+        size_t requested = (size_t)MIN((off_t)sizeof(bytes), state.st_size - _offset);
+        ssize_t count = pread(_descriptor, bytes, requested, _offset);
+        if (count < 0 && errno == EINTR && ++interruptions < 8) continue;
+        if (count <= 0) break;
+        _offset += count;
+        if ([_pending length] > 65536 - (NSUInteger)count)
+            [_pending replaceBytesInRange:NSMakeRange(0, [_pending length] - (65536 - count)) withBytes:NULL length:0];
+        [_pending appendBytes:bytes length:count];
+        const unsigned char *data = [_pending bytes];
+        NSUInteger length = [_pending length], consumed = 0;
+        while (consumed < length) {
+            const unsigned char *newline = memchr(data + consumed, '\n', length - consumed);
+            if (!newline) break;
+            NSAutoreleasePool *pool = [[NSAutoreleasePool alloc] init];
+            NSUInteger end = (NSUInteger)(newline - data) + 1;
+            NSString *line = [[NSString alloc] initWithBytes:data + consumed length:end - consumed encoding:NSUTF8StringEncoding];
+            NSDictionary *report = VCProbeReportFromLog(line);
+            if (report) { [_latest release]; _latest = [report retain]; }
+            [line release];
+            [pool drain];
+            consumed = end;
+        }
+        if (consumed) [_pending replaceBytesInRange:NSMakeRange(0, consumed) withBytes:NULL length:0];
+    }
+    return [[_latest objectForKey:@"id"] longLongValue] > identifier ? _latest : nil;
+}
+- (void)dealloc { [_pending release]; [_latest release]; [super dealloc]; }
 @end
 
 void VCClosePingSocket(int fd, VCPingCancellation *cancellation) {

@@ -45,6 +45,16 @@
 - (NSString *)nextURI;
 @end
 
+@interface VCProbeLogReader : NSObject {
+    int _descriptor;
+    off_t _offset;
+    NSMutableData *_pending;
+    NSDictionary *_latest;
+}
+- (id)initWithFileDescriptor:(int)descriptor;
+- (NSDictionary *)readReportAfterID:(long long)identifier;
+@end
+
 void VCClosePingSocket(int fd, VCPingCancellation *cancellation);
 int VCWaitForPingSocket(int fd, BOOL writable, int timeout_ms, VCPingCancellation *cancellation);
 typedef NS_ENUM(NSInteger, VCConnectionGate) { VCConnectionGateAllowed, VCConnectionGateBusy, VCConnectionGateSwitching };
