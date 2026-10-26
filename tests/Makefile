@@ -43,6 +43,7 @@ HOST_TESTS += $(HOST_BUILD_DIR)/test_main_images
 HOST_TESTS += $(HOST_BUILD_DIR)/test_main_detail
 HOST_TESTS += $(HOST_BUILD_DIR)/test_main_headers
 HOST_TESTS += $(HOST_BUILD_DIR)/test_main_layout
+HOST_TESTS += $(HOST_BUILD_DIR)/test_store_crypto
 CORE_PARSE_SRC := uri utils xhttp_config xhttp_download xhttp_payload buffer_budget websocket grpc http_headers core_log
 CORE_PARSE_SRC += vmess_uri shadowsocks_uri shadowsocks_crypto blake3 trojan core_random deadline socket_util relay_memory connection_trace resolver
 CORE_PARSE_OBJ := $(addprefix $(HOST_BUILD_DIR)/core-parser/,$(addsuffix .o,$(CORE_PARSE_SRC)))
@@ -83,6 +84,7 @@ test: requirements $(HOST_TESTS)
 	$(HOST_BUILD_DIR)/test_main_detail
 	$(HOST_BUILD_DIR)/test_main_headers
 	$(HOST_BUILD_DIR)/test_main_layout
+	$(HOST_BUILD_DIR)/test_store_crypto
 	$(HOST_BUILD_DIR)/test_proxy_probe
 	$(HOST_BUILD_DIR)/test_core_config
 	VC_HOST_BUILD_DIR="$(HOST_BUILD_DIR)" VC_TEST_SANITIZE="$(SANITIZE)" python3 $(ROOT)/tests/test_core_bridge.py
@@ -235,6 +237,17 @@ $(HOST_BUILD_DIR)/main_phone_layout.inc: ../app/main_layout.m extract_ui_methods
 
 $(HOST_BUILD_DIR)/test_main_layout: test_main_layout.m $(HOST_BUILD_DIR)/main_phone_layout.inc ../common/main_geometry.c check.h
 	$(HOST_CC) $(HOST_CPPFLAGS) $(HOST_OBJCFLAGS) $(HOST_CFLAGS) -I$(HOST_BUILD_DIR) $< ../common/main_geometry.c -o $@ $(HOST_LIBS)
+
+$(HOST_BUILD_DIR)/store_encrypt.inc: ../common/foundation_logic.m extract_ui_methods.py Makefile
+	mkdir -p $(dir $@)
+	python3 extract_ui_methods.py $< $@ 'NSData *VCEncryptSecureStorePayload('
+
+$(HOST_BUILD_DIR)/store_decrypt.inc: ../common/foundation_logic.m extract_ui_methods.py Makefile
+	mkdir -p $(dir $@)
+	python3 extract_ui_methods.py $< $@ 'NSData *VCDecryptSecureStorePayload('
+
+$(HOST_BUILD_DIR)/test_store_crypto: test_store_crypto.m $(HOST_BUILD_DIR)/store_encrypt.inc $(HOST_BUILD_DIR)/store_decrypt.inc ../common/app_constants.h check.h
+	$(HOST_CC) $(HOST_CPPFLAGS) $(HOST_OBJCFLAGS) $(HOST_CFLAGS) -I$(HOST_BUILD_DIR) $< -o $@ $(HOST_LIBS)
 
 $(HOST_BUILD_DIR)/app/proxy_probe.o: ../app/proxy_probe.m ../app/proxy_probe.h ../common/connection_logic.h | requirements
 	mkdir -p $(dir $@)

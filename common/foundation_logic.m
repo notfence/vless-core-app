@@ -142,36 +142,52 @@ BOOL VCIsASCIIHexDigit(unichar value) {
 }
 
 NSData *VCEncryptSecureStorePayload(NSData *plaintext, const unsigned char key[32]) {
-    if (![plaintext isKindOfClass:[NSData class]] || [plaintext length] == 0 || [plaintext length] > INT_MAX) return nil;
-    unsigned char nonce[12];
-    unsigned char tag[16];
-    if (RAND_bytes(nonce, sizeof(nonce)) != 1) return nil;
-
-    NSMutableData *ciphertext = [NSMutableData dataWithLength:[plaintext length] + 16];
+    if (!key || ![plaintext isKindOfClass:[NSData class]] || [plaintext length] == 0 || [plaintext length] > INT_MAX) return nil;
+    unsigned char nonce[12] = {0};
+    unsigned char tag[16] = {0};
+    if (RAND_bytes(nonce, sizeof(nonce)) != 1) {
+        OPENSSL_cleanse(nonce, sizeof(nonce));
+        OPENSSL_cleanse(tag, sizeof(tag));
+        return nil;
+    }
+    NSUInteger headerLength = sizeof(kVCSecureStoreMagic) + sizeof(nonce) + sizeof(tag);
+    NSMutableData *output = [NSMutableData dataWithLength:headerLength + [plaintext length] + 16];
+    unsigned char *bytes = [output mutableBytes];
+    if (!bytes) {
+        OPENSSL_cleanse(nonce, sizeof(nonce));
+        OPENSSL_cleanse(tag, sizeof(tag));
+        return nil;
+    }
     EVP_CIPHER_CTX *context = EVP_CIPHER_CTX_new();
     int count = 0;
-    int total = 0;
+    NSUInteger total = 0;
     BOOL ok = context != NULL &&
               EVP_EncryptInit_ex(context, EVP_aes_256_gcm(), NULL, NULL, NULL) == 1 &&
               EVP_CIPHER_CTX_ctrl(context, EVP_CTRL_GCM_SET_IVLEN, sizeof(nonce), NULL) == 1 &&
               EVP_EncryptInit_ex(context, NULL, NULL, key, nonce) == 1 &&
               EVP_EncryptUpdate(context, NULL, &count, kVCSecureStoreMagic, sizeof(kVCSecureStoreMagic)) == 1 &&
-              EVP_EncryptUpdate(context, [ciphertext mutableBytes], &count, [plaintext bytes], (int)[plaintext length]) == 1;
+              EVP_EncryptUpdate(context, bytes + headerLength, &count, [plaintext bytes], (int)[plaintext length]) == 1 &&
+              count >= 0 && (NSUInteger)count <= [plaintext length];
     if (ok) {
         total = count;
-        ok = EVP_EncryptFinal_ex(context, (unsigned char *)[ciphertext mutableBytes] + total, &count) == 1;
-        total += count;
+        ok = EVP_EncryptFinal_ex(context, bytes + headerLength + total, &count) == 1 && count >= 0 &&
+             (NSUInteger)count <= [plaintext length] - total;
+        if (ok) total += (NSUInteger)count;
     }
+    if (ok) ok = total == [plaintext length];
     if (ok) ok = EVP_CIPHER_CTX_ctrl(context, EVP_CTRL_GCM_GET_TAG, sizeof(tag), tag) == 1;
     if (context) EVP_CIPHER_CTX_free(context);
+    if (ok) {
+        memcpy(bytes, kVCSecureStoreMagic, sizeof(kVCSecureStoreMagic));
+        memcpy(bytes + sizeof(kVCSecureStoreMagic), nonce, sizeof(nonce));
+        memcpy(bytes + sizeof(kVCSecureStoreMagic) + sizeof(nonce), tag, sizeof(tag));
+    } else {
+        OPENSSL_cleanse(bytes, [output length]);
+    }
+    OPENSSL_cleanse(nonce, sizeof(nonce));
+    OPENSSL_cleanse(tag, sizeof(tag));
     if (!ok) return nil;
-    [ciphertext setLength:(NSUInteger)total];
-
-    NSMutableData *output = [NSMutableData dataWithCapacity:sizeof(kVCSecureStoreMagic) + sizeof(nonce) + sizeof(tag) + [ciphertext length]];
-    [output appendBytes:kVCSecureStoreMagic length:sizeof(kVCSecureStoreMagic)];
-    [output appendBytes:nonce length:sizeof(nonce)];
-    [output appendBytes:tag length:sizeof(tag)];
-    [output appendData:ciphertext];
+    [output setLength:headerLength + total];
     return output;
 }
 
