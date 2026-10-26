@@ -26,6 +26,7 @@
     UILabel *_titleLabel;
 
     UITableView *_tableView;
+    CGRect _mainEmptyStateViewport;
     UIView *_logSelector;
     UIButton *_logSelectorButtons[2];
     UIView *_logSelectionIndicator;
@@ -459,6 +460,7 @@
                                             newItemCount:(NSInteger)newItemCount
                                               anchorIndex:(NSInteger)anchorIndex
                                           anchorViewportY:(CGFloat)anchorViewportY;
+- (CGRect)mainEmptyStateViewport;
 - (void)updateMainEmptyState;
 - (void)applyTheme;
 - (void)setMainReorderingSection:(NSInteger)section showStatus:(BOOL)showStatus;

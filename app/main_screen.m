@@ -324,6 +324,11 @@
         [self updatePhoneConnectionScrollInsets];
         [self updatePhoneConnectionLayout];
     }
+    if (_mainSwitchView && _tableView.backgroundView &&
+        [_configs count] == 0 && [_subscriptions count] == 0 &&
+        !CGRectEqualToRect(_mainEmptyStateViewport, [self mainEmptyStateViewport])) {
+        [self updateMainEmptyState];
+    }
 }
 
 - (BOOL)shouldAutorotateToInterfaceOrientation:(UIInterfaceOrientation)interfaceOrientation {

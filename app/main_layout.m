@@ -1015,6 +1015,19 @@ static NSArray *VCHeaderPresentationInputs(NSDictionary *subscription, NSUIntege
     [CATransaction commit];
 }
 
+- (CGRect)mainEmptyStateViewport {
+    if (!_tableView || !_statusLabel) return CGRectZero;
+    CGRect bounds = _tableView.bounds;
+    CGRect visible = CGRectIntersection(bounds, [self.view convertRect:self.view.bounds toView:_tableView]);
+    if (CGRectIsNull(visible) || CGRectIsEmpty(visible)) return CGRectZero;
+    CGRect status = [_statusLabel convertRect:_statusLabel.bounds toView:_tableView];
+    CGFloat top = MIN(CGRectGetMaxY(visible),
+                      MAX(CGRectGetMinY(visible) + 8.0f, CGRectGetMaxY(status) + 8.0f));
+    CGFloat bottom = MAX(top, CGRectGetMaxY(visible) - 8.0f);
+    return CGRectMake(CGRectGetMinX(visible) - CGRectGetMinX(bounds),
+                      top - CGRectGetMinY(bounds), visible.size.width, bottom - top);
+}
+
 - (void)updateMainEmptyState {
     if (!_tableView) return;
 
@@ -1044,17 +1057,40 @@ static NSArray *VCHeaderPresentationInputs(NSDictionary *subscription, NSUIntege
     background.backgroundColor = VCBackgroundColor();
     background.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
 
-    CGFloat containerWidth = bounds.size.width - 32.0f;
-    if (containerWidth > 300.0f) containerWidth = 300.0f;
-    if (containerWidth < 220.0f) containerWidth = 220.0f;
-    CGFloat containerHeight = 200.0f;
-    CGFloat reservedTop = IsPadDevice() ? 0.0f : (kVCMainContentStartY - kVCMainCompactContentStartY);
-    CGFloat availableHeight = bounds.size.height - reservedTop;
-    if (availableHeight < containerHeight) availableHeight = containerHeight;
-    CGFloat containerY = reservedTop + floorf((availableHeight - containerHeight) * 0.5f);
-    if (containerY < 12.0f) containerY = 12.0f;
+    _mainEmptyStateViewport = [self mainEmptyStateViewport];
+    if (CGRectIsEmpty(_mainEmptyStateViewport)) {
+        _tableView.backgroundView = background;
+        return;
+    }
+    if (_configurationLoading) {
+        UIActivityIndicatorView *spinner = [[[UIActivityIndicatorView alloc]
+            initWithActivityIndicatorStyle:UIActivityIndicatorViewStyleGray] autorelease];
+        spinner.color = VCSecondaryTextColor();
+        spinner.center = CGPointMake(floorf(CGRectGetMidX(_mainEmptyStateViewport)),
+                                     floorf(CGRectGetMidY(_mainEmptyStateViewport)));
+        spinner.autoresizingMask = UIViewAutoresizingFlexibleLeftMargin |
+                                  UIViewAutoresizingFlexibleRightMargin |
+                                  UIViewAutoresizingFlexibleTopMargin |
+                                  UIViewAutoresizingFlexibleBottomMargin;
+        [background addSubview:spinner];
+        [spinner startAnimating];
+        _tableView.backgroundView = background;
+        return;
+    }
 
-    UIView *container = [[[UIView alloc] initWithFrame:CGRectMake(floorf((bounds.size.width - containerWidth) * 0.5f),
+    CGFloat containerWidth = MAX(0.0f, _mainEmptyStateViewport.size.width - 32.0f);
+    if (containerWidth > 300.0f) containerWidth = 300.0f;
+    CGFloat containerHeight = MIN(200.0f, _mainEmptyStateViewport.size.height);
+    CGFloat circleSize = MIN(58.0f, MAX(0.0f, containerHeight - 110.0f));
+    CGFloat gapScale = MIN(1.0f, MAX(0.0f, (containerHeight - circleSize - 110.0f) / 32.0f));
+    CGFloat titleY = circleSize + 14.0f * gapScale;
+    CGFloat detailY = titleY + 24.0f + 5.0f * gapScale;
+    CGFloat buttonY = detailY + 42.0f + 13.0f * gapScale;
+    CGFloat containerY = _mainEmptyStateViewport.origin.y +
+                         floorf((_mainEmptyStateViewport.size.height - containerHeight) * 0.5f);
+
+    UIView *container = [[[UIView alloc] initWithFrame:CGRectMake(_mainEmptyStateViewport.origin.x +
+                                                                         floorf((_mainEmptyStateViewport.size.width - containerWidth) * 0.5f),
                                                                          containerY,
                                                                          containerWidth,
                                                                          containerHeight)] autorelease];
@@ -1064,22 +1100,24 @@ static NSArray *VCHeaderPresentationInputs(NSDictionary *subscription, NSUIntege
                                  UIViewAutoresizingFlexibleTopMargin |
                                  UIViewAutoresizingFlexibleBottomMargin;
 
-    UIView *iconCircle = [[[UIView alloc] initWithFrame:CGRectMake(floorf((containerWidth - 58.0f) * 0.5f),
+    UIView *iconCircle = [[[UIView alloc] initWithFrame:CGRectMake(floorf((containerWidth - circleSize) * 0.5f),
                                                                           0.0f,
-                                                                          58.0f,
-                                                                          58.0f)] autorelease];
+                                                                          circleSize,
+                                                                          circleSize)] autorelease];
     iconCircle.backgroundColor = VCCellBackgroundColor();
-    iconCircle.layer.cornerRadius = 29.0f;
+    iconCircle.layer.cornerRadius = circleSize * 0.5f;
     iconCircle.layer.borderWidth = 1.5f;
     iconCircle.layer.borderColor = VCAccentColor().CGColor;
 
-    UIImageView *icon = [[[UIImageView alloc] initWithFrame:CGRectMake(16.0f, 16.0f, 26.0f, 26.0f)] autorelease];
+    CGFloat iconSize = 26.0f * circleSize / 58.0f;
+    CGFloat iconInset = (circleSize - iconSize) * 0.5f;
+    UIImageView *icon = [[[UIImageView alloc] initWithFrame:CGRectMake(iconInset, iconInset, iconSize, iconSize)] autorelease];
     icon.image = TintImageWithColor(MakeIconImage(VCIconTypeAdd, 26.0f, YES), VCAccentColor());
-    icon.contentMode = UIViewContentModeCenter;
+    icon.contentMode = UIViewContentModeScaleAspectFit;
     [iconCircle addSubview:icon];
     [container addSubview:iconCircle];
 
-    UILabel *title = [[[UILabel alloc] initWithFrame:CGRectMake(0.0f, 72.0f, containerWidth, 24.0f)] autorelease];
+    UILabel *title = [[[UILabel alloc] initWithFrame:CGRectMake(0.0f, titleY, containerWidth, 24.0f)] autorelease];
     title.backgroundColor = [UIColor clearColor];
     title.textColor = VCPrimaryTextColor();
     title.font = [UIFont boldSystemFontOfSize:17.0f];
@@ -1087,7 +1125,7 @@ static NSArray *VCHeaderPresentationInputs(NSDictionary *subscription, NSUIntege
     title.text = @"Add your first connection";
     [container addSubview:title];
 
-    UILabel *detail = [[[UILabel alloc] initWithFrame:CGRectMake(8.0f, 101.0f, containerWidth - 16.0f, 42.0f)] autorelease];
+    UILabel *detail = [[[UILabel alloc] initWithFrame:CGRectMake(8.0f, detailY, containerWidth - 16.0f, 42.0f)] autorelease];
     detail.backgroundColor = [UIColor clearColor];
     detail.textColor = VCSecondaryTextColor();
     detail.font = [UIFont systemFontOfSize:13.0f];
@@ -1097,7 +1135,7 @@ static NSArray *VCHeaderPresentationInputs(NSDictionary *subscription, NSUIntege
     [container addSubview:detail];
 
     UIButton *addButton = [UIButton buttonWithType:UIButtonTypeCustom];
-    addButton.frame = CGRectMake(floorf((containerWidth - 164.0f) * 0.5f), 156.0f, 164.0f, 40.0f);
+    addButton.frame = CGRectMake(floorf((containerWidth - 164.0f) * 0.5f), buttonY, 164.0f, 40.0f);
     addButton.titleLabel.font = [UIFont boldSystemFontOfSize:14.0f];
     [addButton setTitle:@"Add connection" forState:UIControlStateNormal];
     [addButton setTitleColor:[UIColor whiteColor] forState:UIControlStateNormal];
