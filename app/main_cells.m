@@ -422,6 +422,43 @@ void VCApplyTouchFeedbackToButton(UIButton *button, id target) {
 
 @implementation VCSubscriptionHeaderCell
 
+- (void)updateDescriptionText:(NSString *)text {
+    NSString *value = [text length] ? text : @"";
+    if ([_providerDescriptionLabel.text isEqualToString:value]) return;
+    _descriptionMeasureValid = NO;
+    _providerDescriptionLabel.text = value;
+}
+
+- (CGFloat)descriptionHeightForWidth:(CGFloat)width {
+    if (!_showsDescription || ![_providerDescriptionLabel.text length]) return 0.0f;
+    if (!_descriptionMeasureValid || width != _descriptionMeasuredWidth) {
+        _descriptionMeasuredHeight = VCSubscriptionDescriptionHeight(_providerDescriptionLabel.text, width);
+        _descriptionMeasuredWidth = width;
+        _descriptionMeasureValid = YES;
+    }
+    return _descriptionMeasuredHeight;
+}
+
+- (NSDictionary *)headerPresentationForInputs:(NSArray *)inputs {
+    return [_headerPresentationInputs isEqual:inputs] ? _headerPresentation : nil;
+}
+
+- (void)rememberHeaderPresentation:(NSDictionary *)presentation inputs:(NSArray *)inputs {
+    NSArray *keys = [inputs copy];
+    NSDictionary *values = [presentation copy];
+    [_headerPresentationInputs release]; _headerPresentationInputs = keys;
+    [_headerPresentation release]; _headerPresentation = values;
+}
+
+- (void)prepareForReuse {
+    [super prepareForReuse];
+    [_headerPresentationInputs release]; _headerPresentationInputs = nil;
+    [_headerPresentation release]; _headerPresentation = nil;
+    _descriptionMeasureValid = NO;
+    _providerDescriptionLabel.text = nil;
+    _lastUpdatedLabel.text = nil;
+}
+
 - (id)initWithStyle:(UITableViewCellStyle)style reuseIdentifier:(NSString *)reuseIdentifier {
     self = [super initWithStyle:style reuseIdentifier:reuseIdentifier];
     if (!self) return nil;
@@ -496,6 +533,8 @@ void VCApplyTouchFeedbackToButton(UIButton *button, id target) {
 }
 
 - (void)dealloc {
+    [_headerPresentationInputs release];
+    [_headerPresentation release];
     [_descriptionClipView release];
     [_providerDescriptionLabel release];
     [_lastUpdatedLabel release];
@@ -528,7 +567,7 @@ void VCApplyTouchFeedbackToButton(UIButton *button, id target) {
                       target:(id)target {
     _showsDescription = showDescription && [description length] > 0;
     _showsActions = showActions;
-    _providerDescriptionLabel.text = [description length] > 0 ? description : @"";
+    [self updateDescriptionText:description];
     _lastUpdatedLabel.text = [lastUpdated length] > 0 ? lastUpdated : @"Updated: Never";
     _metadataLabels[0].text = configCount ? configCount : @"0";
     _metadataLabels[1].text = traffic ? traffic : @"";
@@ -687,8 +726,7 @@ void VCApplyTouchFeedbackToButton(UIButton *button, id target) {
         _metadataSeparators[i].frame = CGRectZero;
     }
     CGFloat y = 52.0f;
-    CGFloat descriptionHeight = VCSubscriptionDescriptionHeight(_providerDescriptionLabel.text,
-                                                                contentWidth);
+    CGFloat descriptionHeight = [self descriptionHeightForWidth:contentWidth];
     CGFloat revealHeight = (_showsDescription && descriptionHeight > 0.0f)
         ? descriptionHeight + 5.0f : 0.0f;
     _descriptionClipView.frame = CGRectMake(left, y, contentWidth, revealHeight);

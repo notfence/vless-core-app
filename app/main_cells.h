@@ -82,8 +82,16 @@ typedef NS_ENUM(NSInteger, VCMainListCellKind) {
     BOOL _showsActions;
     BOOL _pingLoading, _headerImagesValid, _headerImagesDark, _headerPingImageLoading;
     NSInteger _headerImagesAccent;
+    BOOL _descriptionMeasureValid;
+    CGFloat _descriptionMeasuredWidth, _descriptionMeasuredHeight;
+    NSArray *_headerPresentationInputs;
+    NSDictionary *_headerPresentation;
 }
 - (void)refreshHeaderImages;
+- (void)updateDescriptionText:(NSString *)text;
+- (CGFloat)descriptionHeightForWidth:(CGFloat)width;
+- (NSDictionary *)headerPresentationForInputs:(NSArray *)inputs;
+- (void)rememberHeaderPresentation:(NSDictionary *)presentation inputs:(NSArray *)inputs;
 - (void)configureDescription:(NSString *)description
                  configCount:(NSString *)configCount
                      traffic:(NSString *)traffic

@@ -1,6 +1,24 @@
 #import "main_screen.h"
 #import "main_cells.h"
 
+static NSArray *VCHeaderPresentationInputs(NSDictionary *subscription, NSUInteger count) {
+    id missing = [NSNull null];
+    id rawInfo = [subscription objectForKey:kSubscriptionUserInfoKey];
+    NSDictionary *info = [rawInfo isKindOfClass:[NSDictionary class]] ? rawInfo : nil;
+    NSMutableArray *input = [NSMutableArray arrayWithObjects:
+        [[VCSubscriptionDescription(subscription) ?: @"" copy] autorelease], @(count), nil];
+    for (NSString *key in @[kSubscriptionUploadKey, kSubscriptionDownloadKey, kSubscriptionTotalKey, kSubscriptionExpireKey]) {
+        id number = [info objectForKey:key];
+        [input addObject:[number isKindOfClass:[NSNumber class]] ? number : missing];
+    }
+    id updated = [VCSubscriptionMetadataDictionary(subscription) objectForKey:kSubscriptionLastUpdatedKey];
+    [input addObject:[updated isKindOfClass:[NSNumber class]] ? updated : missing];
+    [input addObject:@([VCSubscriptionProviderURL(subscription, kSubscriptionWebPageURLKey) length] > 0)];
+    [input addObject:@([VCSubscriptionProviderURL(subscription, kSubscriptionSupportURLKey) length] > 0)];
+    [input addObject:[[NSTimeZone defaultTimeZone] name] ?: @""];
+    return [[input copy] autorelease];
+}
+
 @implementation MainVC (VCMainLayout)
 
 - (void)recordMainLayoutEvent:(NSString *)action {
@@ -1358,21 +1376,29 @@
     }
 
     NSDictionary *subscription = [_subscriptions objectAtIndex:index];
+    NSUInteger count = [[self subscriptionItemsAtIndex:index] count];
+    VCSubscriptionHeaderCell *header = (VCSubscriptionHeaderCell *)cell;
+    NSArray *inputs = VCHeaderPresentationInputs(subscription, count);
+    NSDictionary *presentation = [header headerPresentationForInputs:inputs];
+    if (!presentation) {
+        presentation = @{@"description":[inputs objectAtIndex:0], @"count":[NSString stringWithFormat:@"%lu", (unsigned long)count],
+            @"traffic":[self subscriptionTrafficTextFromDictionary:subscription] ?: @"",
+            @"expiry":[self subscriptionExpiryTextFromDictionary:subscription] ?: @"",
+            @"updated":VCSubscriptionLastUpdatedText(subscription)};
+        [header rememberHeaderPresentation:presentation inputs:inputs];
+    }
     BOOL providerButtonsEnabled = (_reorderingSection != 1);
-    BOOL hasWebPage = providerButtonsEnabled &&
-        [VCSubscriptionProviderURL(subscription, kSubscriptionWebPageURLKey) length] > 0;
-    BOOL hasSupport = providerButtonsEnabled &&
-        [VCSubscriptionProviderURL(subscription, kSubscriptionSupportURLKey) length] > 0;
-    [(VCSubscriptionHeaderCell *)cell
-        configureDescription:VCSubscriptionDescription(subscription)
-                 configCount:[NSString stringWithFormat:@"%lu",
-                              (unsigned long)[[self subscriptionItemsAtIndex:index] count]]
-                     traffic:[self subscriptionTrafficTextFromDictionary:subscription]
-                      expiry:[self subscriptionExpiryTextFromDictionary:subscription]
-                 lastUpdated:VCSubscriptionLastUpdatedText(subscription)
+    BOOL hasWebPage = providerButtonsEnabled && [[inputs objectAtIndex:7] boolValue];
+    BOOL hasSupport = providerButtonsEnabled && [[inputs objectAtIndex:8] boolValue];
+    [header
+        configureDescription:[presentation objectForKey:@"description"]
+                 configCount:[presentation objectForKey:@"count"]
+                     traffic:[presentation objectForKey:@"traffic"]
+                      expiry:[presentation objectForKey:@"expiry"]
+                 lastUpdated:[presentation objectForKey:@"updated"]
              showDescription:([self subscriptionHeaderExpandedIndex] == index)
                  pingLoading:[self isSubscriptionPingInProgressAtIndex:index]
-                     canPing:([[self subscriptionItemsAtIndex:index] count] > 0)
+                     canPing:(count > 0)
                 showActions:providerButtonsEnabled
                   hasWebPage:hasWebPage
                    hasSupport:hasSupport
@@ -1383,12 +1409,13 @@
 - (void)refreshVisibleSubscriptionHeaderAccessories {
     if (!_tableView || !_subscriptionsSectionExpanded || _reorderingSection == 1) return;
 
-    for (NSInteger subIdx = 0; subIdx < (NSInteger)[_subscriptions count]; subIdx++) {
-        NSInteger row = [self rowForSubscriptionHeaderAtIndex:subIdx];
-        if (row < 0) continue;
-        NSIndexPath *indexPath = [NSIndexPath indexPathForRow:row inSection:1];
+    for (NSIndexPath *indexPath in [_tableView indexPathsForVisibleRows]) {
+        if (indexPath.section != 1) continue;
+        NSInteger subIdx = -1, itemIdx = -1;
+        BOOL isHeader = NO;
+        if (![self mapSubscriptionRow:indexPath.row toSubIndex:&subIdx itemIndex:&itemIdx isHeader:&isHeader] || !isHeader) continue;
         UITableViewCell *cell = [_tableView cellForRowAtIndexPath:indexPath];
-        if (!cell) continue;
+        if (![cell isKindOfClass:[VCSubscriptionHeaderCell class]]) continue;
 
         BOOL expanded = [self subscriptionHeaderExpandedIndex] == subIdx;
         BOOL loading = _updatingSubscriptionIndex == subIdx;
@@ -1401,10 +1428,11 @@
     if (!_tableView || !_subscriptionsSectionExpanded) return;
 
     NSInteger expandedIndex = [self subscriptionHeaderExpandedIndex];
-    for (NSInteger subIdx = 0; subIdx < (NSInteger)[_subscriptions count]; subIdx++) {
-        NSInteger row = [self rowForSubscriptionHeaderAtIndex:subIdx];
-        if (row < 0) continue;
-        NSIndexPath *indexPath = [NSIndexPath indexPathForRow:row inSection:1];
+    for (NSIndexPath *indexPath in [_tableView indexPathsForVisibleRows]) {
+        if (indexPath.section != 1) continue;
+        NSInteger subIdx = -1, itemIdx = -1;
+        BOOL isHeader = NO;
+        if (![self mapSubscriptionRow:indexPath.row toSubIndex:&subIdx itemIndex:&itemIdx isHeader:&isHeader] || !isHeader) continue;
         UITableViewCell *cell = [_tableView cellForRowAtIndexPath:indexPath];
         if (![cell isKindOfClass:[VCSubscriptionHeaderCell class]]) continue;
 
