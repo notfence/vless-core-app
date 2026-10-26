@@ -213,16 +213,23 @@
         return;
     }
 
-    NSString *discResp = [self sanitizeDaemonText:SendCommand(@"DISCONNECT\n")];
-    if (![discResp hasPrefix:@"OK"]) {
-        [self showStatus:[NSString stringWithFormat:@"%@ (disconnect failed: %@)", reason, discResp] ok:NO];
-        return;
-    }
-    _connected = NO;
-    _connectedWithProtectedLogs = NO;
-    [self stopUptimeTimer];
+    _connectionActionInProgress = YES;
+    NSUInteger generation = ++_connectionActionGeneration;
     [self updateConnectButton];
-    [self showStatus:reason ok:NO];
+    VCSendCommandAsync(@"DISCONNECT\n", ^(NSString *response) {
+        if (generation != _connectionActionGeneration) return;
+        _connectionActionInProgress = NO;
+        NSString *text = [self sanitizeDaemonText:response];
+        if ([text hasPrefix:@"OK"]) {
+            _connected = NO;
+            _connectedWithProtectedLogs = NO;
+            [self stopUptimeTimer];
+            [self showStatus:reason ok:NO];
+        } else {
+            [self showStatus:[NSString stringWithFormat:@"%@ (disconnect failed: %@)", reason, text] ok:NO];
+        }
+        [self updateConnectButton];
+    });
 }
 
 - (void)scheduleXHTTPConnectHealthCheckForURI:(NSString *)uri {
@@ -340,6 +347,7 @@
 
     dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_DEFAULT, 0), ^{
         NSAutoreleasePool *pool = [[NSAutoreleasePool alloc] init];
+        VCWaitForDaemonUICommands();
         NSString *disconnectResponse = [SendCommand(@"DISCONNECT\n") copy];
         NSString *routingResponse = nil;
         NSString *connectResponse = nil;
@@ -473,6 +481,7 @@
 
     dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_DEFAULT, 0), ^{
         NSAutoreleasePool *pool = [[NSAutoreleasePool alloc] init];
+        VCWaitForDaemonUICommands();
         NSString *routingResponse = disconnecting ? nil : [SendCommand(routingCommand) copy];
         NSString *response = (disconnecting || [routingResponse hasPrefix:@"OK"])
             ? [SendCommand(command) copy] : nil;

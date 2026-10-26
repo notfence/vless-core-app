@@ -179,10 +179,13 @@ void VCShowUpdateAvailableAlert(NSDictionary *result,
                                        NSInteger tag);
 
 NSString *ClearLogsViaDaemon(void);
+void VCSendCommandAsync(NSString *command, void (^completion)(NSString *));
+void VCWaitForDaemonUICommands(void);
 
 NSString *ReadDaemonLog(NSInteger index, NSUInteger maxBytes);
 
 NSString *ReadLogAtIndex(NSInteger index);
+void ReadLogAtIndexAsync(NSInteger index, void (^completion)(NSString *));
 
 UIFont *VCLogRegularFont(void);
 

@@ -32,6 +32,8 @@
     UITextView *_logView;
     NSTimer *_logTimer;
     NSTimer *_uptimeTimer;
+    BOOL _logReadInFlight, _logReadPending, _logClearInFlight;
+    NSUInteger _logReadGeneration;
     NSTimeInterval _connectedSince;
     NSString *_statusBaseText;
     NSArray *_pendingImportRefreshIndices;
@@ -506,6 +508,7 @@
 - (void)logSourceChanged:(UIButton *)sender;
 - (void)refreshLogs;
 - (void)forceRefreshLogs;
+- (void)requestLogRefresh;
 - (void)clearLogsPressed;
 - (void)refreshLogsTick:(NSTimer *)timer;
 @end

@@ -44,6 +44,7 @@ HOST_TESTS += $(HOST_BUILD_DIR)/test_main_detail
 HOST_TESTS += $(HOST_BUILD_DIR)/test_main_headers
 HOST_TESTS += $(HOST_BUILD_DIR)/test_main_layout
 HOST_TESTS += $(HOST_BUILD_DIR)/test_store_crypto
+HOST_TESTS += $(HOST_BUILD_DIR)/test_main_logs
 CORE_PARSE_SRC := uri utils xhttp_config xhttp_download xhttp_payload buffer_budget websocket grpc http_headers core_log
 CORE_PARSE_SRC += vmess_uri shadowsocks_uri shadowsocks_crypto blake3 trojan core_random deadline socket_util relay_memory connection_trace resolver
 CORE_PARSE_OBJ := $(addprefix $(HOST_BUILD_DIR)/core-parser/,$(addsuffix .o,$(CORE_PARSE_SRC)))
@@ -85,6 +86,7 @@ test: requirements $(HOST_TESTS)
 	$(HOST_BUILD_DIR)/test_main_headers
 	$(HOST_BUILD_DIR)/test_main_layout
 	$(HOST_BUILD_DIR)/test_store_crypto
+	$(HOST_BUILD_DIR)/test_main_logs
 	$(HOST_BUILD_DIR)/test_proxy_probe
 	$(HOST_BUILD_DIR)/test_core_config
 	VC_HOST_BUILD_DIR="$(HOST_BUILD_DIR)" VC_TEST_SANITIZE="$(SANITIZE)" python3 $(ROOT)/tests/test_core_bridge.py
@@ -248,6 +250,29 @@ $(HOST_BUILD_DIR)/store_decrypt.inc: ../common/foundation_logic.m extract_ui_met
 
 $(HOST_BUILD_DIR)/test_store_crypto: test_store_crypto.m $(HOST_BUILD_DIR)/store_encrypt.inc $(HOST_BUILD_DIR)/store_decrypt.inc ../common/app_constants.h check.h
 	$(HOST_CC) $(HOST_CPPFLAGS) $(HOST_OBJCFLAGS) $(HOST_CFLAGS) -I$(HOST_BUILD_DIR) $< -o $@ $(HOST_LIBS)
+
+$(HOST_BUILD_DIR)/daemon_async.inc: ../app/daemon_client.m extract_ui_methods.py Makefile
+	mkdir -p $(dir $@)
+	python3 extract_ui_methods.py $< $@ '?static dispatch_queue_t VCDaemonUIQueue(' '?void VCSendCommandAsync(' '?void VCWaitForDaemonUICommands('
+
+$(HOST_BUILD_DIR)/log_text.inc: ../app/diagnostics.m extract_ui_methods.py Makefile
+	mkdir -p $(dir $@)
+	python3 extract_ui_methods.py $< $@ '?static NSString *VCLogTextFromResponse('
+
+$(HOST_BUILD_DIR)/log_async.inc: ../app/diagnostics.m extract_ui_methods.py Makefile
+	mkdir -p $(dir $@)
+	python3 extract_ui_methods.py $< $@ '?void ReadLogAtIndexAsync('
+
+$(HOST_BUILD_DIR)/main_logs.inc: ../app/main_terminal.m extract_ui_methods.py Makefile
+	mkdir -p $(dir $@)
+	python3 extract_ui_methods.py $< $@ '- (void)refreshLogs' '?- (void)requestLogRefresh' '- (void)forceRefreshLogs' '- (void)clearLogsPressed'
+
+$(HOST_BUILD_DIR)/main_health_async.inc: ../app/main_connection.m extract_ui_methods.py Makefile
+	mkdir -p $(dir $@)
+	python3 extract_ui_methods.py $< $@ '- (void)xhttpConnectHealthCheckResultOnMain:'
+
+$(HOST_BUILD_DIR)/test_main_logs: test_main_logs.m $(HOST_BUILD_DIR)/daemon_async.inc $(HOST_BUILD_DIR)/log_text.inc $(HOST_BUILD_DIR)/log_async.inc $(HOST_BUILD_DIR)/main_logs.inc $(HOST_BUILD_DIR)/main_health_async.inc $(HOST_BUILD_DIR)/common/connection_logic.o check.h
+	$(HOST_CC) $(HOST_CPPFLAGS) $(HOST_OBJCFLAGS) $(HOST_CFLAGS) -fblocks -I$(HOST_BUILD_DIR) $< $(HOST_BUILD_DIR)/common/connection_logic.o -o $@ -L$(ROOT)/../toolchains/ios6/lib -Wl,-rpath,$(ROOT)/../toolchains/ios6/lib -lBlocksRuntime $(HOST_LIBS)
 
 $(HOST_BUILD_DIR)/app/proxy_probe.o: ../app/proxy_probe.m ../app/proxy_probe.h ../common/connection_logic.h | requirements
 	mkdir -p $(dir $@)

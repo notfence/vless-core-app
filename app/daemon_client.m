@@ -1,5 +1,30 @@
 #import "app_support.h"
 
+static dispatch_queue_t VCDaemonUIQueue(void) {
+    static dispatch_queue_t queue;
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{ queue = dispatch_queue_create("com.vlesscore.ui-commands", DISPATCH_QUEUE_SERIAL); });
+    return queue;
+}
+
+void VCSendCommandAsync(NSString *command, void (^completion)(NSString *)) {
+    dispatch_async(VCDaemonUIQueue(), ^{
+        NSAutoreleasePool *pool = [[NSAutoreleasePool alloc] init];
+        NSString *response = [SendCommand(command) copy];
+        if (completion) {
+            dispatch_async(dispatch_get_main_queue(), ^{ completion(response); [response release]; });
+        } else {
+            [response release];
+        }
+        [pool drain];
+    });
+}
+
+void VCWaitForDaemonUICommands(void) {
+    dispatch_sync(VCDaemonUIQueue(), ^{});
+}
+
+
 static BOOL VCApplyStoreFileProtection(NSString *temporaryPath) {
     BOOL ok = YES;
     NSDictionary *protectionAttributes = [NSDictionary dictionaryWithObject:NSFileProtectionComplete

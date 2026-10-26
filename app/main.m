@@ -23,7 +23,7 @@
     (void)application;
 
     VCRecordAppEvent(@"lifecycle", @"Application launched", nil);
-    ClearLogsViaDaemon();
+    VCSendCommandAsync(@"CLEAR_LOGS\n", nil);
     VCAppearanceApplyStatusBar();
     _window = [[UIWindow alloc] initWithFrame:[[UIScreen mainScreen] bounds]];
     _window.backgroundColor = VCBackgroundColor();

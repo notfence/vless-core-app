@@ -4,9 +4,8 @@ NSString *ClearLogsViaDaemon(void) {
     return SendCommand(@"CLEAR_LOGS\n");
 }
 
-NSString *ReadDaemonLog(NSInteger index, NSUInteger maxBytes) {
+static NSString *VCLogTextFromResponse(NSString *response, NSInteger index, NSUInteger maxBytes) {
     NSString *name = index == 1 ? @"core" : @"daemon";
-    NSString *response = SendCommand([NSString stringWithFormat:@"LOG\t%@\n", name]);
     if (![response hasPrefix:@"OK\n"]) {
         return [NSString stringWithFormat:@"(cannot read %@ log: %@)\n", name, response ? response : @"no response"];
     }
@@ -36,8 +35,20 @@ NSString *ReadDaemonLog(NSInteger index, NSUInteger maxBytes) {
     return txt;
 }
 
+NSString *ReadDaemonLog(NSInteger index, NSUInteger maxBytes) {
+    NSString *name = index == 1 ? @"core" : @"daemon";
+    return VCLogTextFromResponse(SendCommand([NSString stringWithFormat:@"LOG\t%@\n", name]), index, maxBytes);
+}
+
 NSString *ReadLogAtIndex(NSInteger index) {
     return ReadDaemonLog(index, 8192);
+}
+
+void ReadLogAtIndexAsync(NSInteger index, void (^completion)(NSString *)) {
+    NSString *name = index == 1 ? @"core" : @"daemon";
+    VCSendCommandAsync([NSString stringWithFormat:@"LOG\t%@\n", name], ^(NSString *response) {
+        if (completion) completion(VCLogTextFromResponse(response, index, 8192));
+    });
 }
 
 UIFont *VCLogRegularFont(void) {
@@ -474,14 +485,16 @@ static NSString *VCEventMetadata(NSDictionary *event) {
     if (buttonIndex == alertView.cancelButtonIndex) return;
 #pragma clang diagnostic pop
     [[VCAppEventRecorder sharedRecorder] clearEvents];
-    (void)SendCommand(@"CLEAR_EVENTS\n");
     [_events release];
     _events = [[NSArray alloc] init];
     self.navigationItem.rightBarButtonItem.enabled = NO;
     [_tableView reloadData];
-    [[NSNotificationCenter defaultCenter]
-        postNotificationName:kVCDiagnosticEventsClearedNotification
-                      object:nil];
+    VCSendCommandAsync(@"CLEAR_EVENTS\n", ^(NSString *response) {
+        (void)response;
+        [[NSNotificationCenter defaultCenter]
+            postNotificationName:kVCDiagnosticEventsClearedNotification
+                          object:nil];
+    });
 }
 
 - (UITableViewCell *)tableView:(UITableView *)tableView cellForRowAtIndexPath:(NSIndexPath *)indexPath {

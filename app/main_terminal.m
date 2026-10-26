@@ -32,6 +32,8 @@
                                                          repeats:YES] retain];
         }
     } else {
+        _logReadGeneration++;
+        _logReadPending = NO;
         [self rememberActiveLogPosition];
         [_logTimer invalidate];
         [_logTimer release];
@@ -118,6 +120,7 @@
     if (newIndex < 0 || newIndex > 1 || newIndex == _activeLogIndex) return;
 
     [self rememberActiveLogPosition];
+    _logReadGeneration++;
     _activeLogIndex = newIndex;
     [self updateLogSelectorAnimated:YES];
 
@@ -127,13 +130,12 @@
     BOOL followTail = _logContentOffsetsValid[newIndex]
         ? _logFollowsTail[newIndex]
         : YES;
-    NSString *text = [self isConnectionActionInProgress]
-        ? (_logTexts[newIndex] ? _logTexts[newIndex] : @"(waiting for connection action...)\n")
-        : ReadLogAtIndex(newIndex);
+    NSString *text = _logTexts[newIndex] ? _logTexts[newIndex] : @"";
     [self displayLogText:text
                  atIndex:newIndex
                   offset:savedOffset
               followTail:followTail];
+    [self refreshLogs];
 }
 
 - (void)refreshLogs {
@@ -145,22 +147,42 @@
         return;
     }
 
-    NSString *newText = ReadLogAtIndex(_activeLogIndex);
-    NSString *oldText = _logTexts[_activeLogIndex] ? _logTexts[_activeLogIndex] : @"";
-    if ([newText isEqualToString:oldText]) {
-        return;
-    }
+    [self requestLogRefresh];
+}
 
-    CGPoint savedOffset = _logView.contentOffset;
-    CGFloat maxOffsetY = [self maximumLogOffsetY];
-    BOOL wasNearBottom = (_logView.contentOffset.y >= (maxOffsetY - 20.0f));
-    [self displayLogText:newText
-                 atIndex:_activeLogIndex
-                  offset:savedOffset
-              followTail:wasNearBottom];
+- (void)requestLogRefresh {
+    if (!_showingTerminal || _logClearInFlight || [self isConnectionActionInProgress] ||
+        _connectedWithProtectedLogs || [self selectedSubscriptionIsHappEncrypted] ||
+        [[UIApplication sharedApplication] applicationState] != UIApplicationStateActive ||
+        _activeLogIndex < 0 || _activeLogIndex > 1) return;
+    if (_logReadInFlight) { _logReadPending = YES; return; }
+    _logReadInFlight = YES;
+    _logReadPending = NO;
+    NSUInteger generation = _logReadGeneration;
+    NSUInteger connectionGeneration = _connectionActionGeneration;
+    NSInteger index = _activeLogIndex;
+    ReadLogAtIndexAsync(index, ^(NSString *text) {
+        _logReadInFlight = NO;
+        if (generation == _logReadGeneration && connectionGeneration == _connectionActionGeneration &&
+            _showingTerminal && index == _activeLogIndex && !_logClearInFlight &&
+            !_connectedWithProtectedLogs && ![self selectedSubscriptionIsHappEncrypted] &&
+            ![self isConnectionActionInProgress] &&
+            [[UIApplication sharedApplication] applicationState] == UIApplicationStateActive &&
+            !_logView.tracking && !_logView.dragging && !_logView.decelerating && _logView.selectedRange.length == 0) {
+            if (![text isEqualToString:_logTexts[index] ? _logTexts[index] : @""]) {
+                CGPoint offset = _logView.contentOffset;
+                BOOL tail = offset.y >= [self maximumLogOffsetY] - 20.0f;
+                [self displayLogText:text atIndex:index offset:offset followTail:tail];
+            }
+        }
+        BOOL pending = _logReadPending;
+        _logReadPending = NO;
+        if (pending) [self refreshLogs];
+    });
 }
 
 - (void)forceRefreshLogs {
+    _logReadGeneration++;
     for (NSInteger i = 0; i < 2; i++) {
         [_logTexts[i] release];
         _logTexts[i] = nil;
@@ -168,27 +190,32 @@
         _logContentOffsetsValid[i] = NO;
         _logFollowsTail[i] = YES;
     }
-    [self displayLogText:ReadLogAtIndex(_activeLogIndex)
+    [self displayLogText:@""
                  atIndex:_activeLogIndex
                   offset:CGPointZero
               followTail:NO];
+    [self refreshLogs];
 }
 
 - (void)clearLogsPressed {
     VCRecordAppEvent(@"ui", @"Clear logs button pressed", nil);
-    if ([self isConnectionActionInProgress]) {
+    if (_logClearInFlight || [self isConnectionActionInProgress]) {
         [self showStatus:@"Busy" ok:NO];
         return;
     }
-    NSString *resp = [self sanitizeDaemonText:ClearLogsViaDaemon()];
-    [self forceRefreshLogs];
-
-    if ([resp hasPrefix:@"OK"]) {
-        [self showStatus:@"Logs cleared" ok:YES];
-    } else {
-        NSString *msg = ([resp length] > 0) ? resp : @"Failed to clear logs";
-        [self showStatus:msg ok:NO];
-    }
+    _logClearInFlight = YES;
+    _logReadGeneration++;
+    _logReadPending = NO;
+    NSUInteger connectionGeneration = _connectionActionGeneration;
+    VCSendCommandAsync(@"CLEAR_LOGS\n", ^(NSString *response) {
+        _logClearInFlight = NO;
+        if (connectionGeneration != _connectionActionGeneration || _connectedWithProtectedLogs ||
+            [self selectedSubscriptionIsHappEncrypted]) return;
+        [self forceRefreshLogs];
+        NSString *text = [self sanitizeDaemonText:response];
+        [self showStatus:[text hasPrefix:@"OK"] ? @"Logs cleared" : ([text length] ? text : @"Failed to clear logs")
+                     ok:[text hasPrefix:@"OK"]];
+    });
 }
 
 - (void)refreshLogsTick:(NSTimer *)timer {
