@@ -276,7 +276,7 @@
         [_pendingImportRefreshIndices release];
         _pendingImportRefreshIndices = nil;
         if (updateInProgress) {
-            [self showStatus:@"Subscriptions update is already running" ok:YES];
+            [self showStatus:@"A subscription update is already running" ok:YES];
         } else {
             VCRecordAppEvent(@"subscription", @"Subscription update blocked", @"connection action in progress");
             [self showStatus:@"Busy" ok:NO];

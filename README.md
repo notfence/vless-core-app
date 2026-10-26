@@ -2,7 +2,8 @@
 
 <h3><big>vless-core-app</big></h3>
 
-`vless-core-app` is an iOS 5–14 app + root daemon for full-device VLESS/SOCKS5 routing.
+`vless-core-app` is an iOS 5–14 app + root daemon for device-wide TCP routing
+with VLESS, Trojan, VMess AEAD, Shadowsocks, and SOCKS5.
 
 <br clear="left">
 
@@ -38,7 +39,7 @@ https://notfence.github.io/repo/
 
 Also you can use terminal app to install it:
 ```bash
-dpkg -i com.vlesscore.app_iphoneos-arm.deb
+dpkg -i /path/to/com.vlesscore.app_iphoneos-arm.deb
 ```
 
 ### Install your own build via SSH (scp + dpkg)
@@ -52,36 +53,70 @@ scp build/com.vlesscore.app_iphoneos-arm.deb root@<idevice-ip>:/var/root/
 dpkg -i com.vlesscore.app_iphoneos-arm.deb
 ```
 ## Uninstall
-### Uninstall via Cydia
-Just go to Cydia and remove it like usual tweak
+### Uninstall via Cydia/Sileo
+Just go to Cydia/Sileo and remove it like usual tweak
 ### Uninstall via terminal/SSH
 Execute this command:
 ```bash 
 dpkg -r com.vlesscore.app
 ```
 
-## Supported Protocols
+## Supported configurations
 
-Bundled core supports:
+The following transports apply to VLESS, Trojan, VMess AEAD, and Shadowsocks:
 
-- `VLESS + TCP + Reality (+ xtls-rprx-vision)`
-- `VLESS + TCP + TLS (+ xtls-rprx-vision)`
-- `VLESS + TCP` (no security)
-- `VLESS + XHTTP + Reality`
-- `VLESS + XHTTP + TLS`
-- `VLESS + XHTTP` (no security)
-- `VLESS + gRPC + Reality`
-- `VLESS + gRPC + TLS`
-- `VLESS + gRPC` (no security)
-- `VLESS + WebSocket + TLS`
-- `VLESS + WebSocket` (no security)
-- `SOCKS5`
+| Transport | No external security | TLS | REALITY |
+|---|---|---|---|
+| TCP / raw | ✅ | ✅ | ✅ |
+| WebSocket | ✅ | ✅ | ❌ |
+| gRPC gun/multi | ✅ | ✅ | ✅ |
+| XHTTP | ✅ | ✅ | ✅ |
+| HTTPUpgrade | ✅ | ✅ | ❌ |
 
-`fp=chrome/firefox/edge/random/randomized/qq`
+> [!NOTE]
+> WebSocket and HTTPUpgrade combining with REALITY is not supported by xray-core itself
 
-Protocol semantics are aligned with `xray-core` for the supported transports and URI parameters.
+SOCKS5 is supported as a separate upstream protocol, with optional
+username/password authentication. It does not use this transport matrix.
 
-For XHTTP, `mode=auto` follows xray's defaults: `packet-up` without security or with TLS, and `stream-one` with Reality.
+- VLESS supports VLESS Encryption and applicable `xtls-rprx-vision` flows.
+  These features are not available for the other protocols.
+- VMess supports `alterId=0` and `auto`, `aes-128-gcm`,
+  `chacha20-poly1305`, `none`, and `zero` body modes.
+- Shadowsocks supports four AEAD methods and three SS 2022 methods, including
+  AES SIP023 key chains. See the [CLI documentation](https://github.com/notfence/vless-core-cli#supported-configurations)
+  for method names and protocol restrictions.
+- Supported fingerprints: `chrome`, `firefox`, `edge`, `random`,
+  `randomized`, and `qq`.
+- XHTTP supports `auto`, `packet-up`, `stream-one`, and `stream-up`, XMUX,
+  and a separate download channel. `auto` selects `packet-up` with none/TLS.
+  With REALITY, it selects `stream-one`, or `stream-up` when a separate
+  download channel is configured.
+- HTTPUpgrade uses HTTP/1.1. With `ed=0` or no `ed`, it waits for
+  the Upgrade response. A nonzero `ed` enables early sending.
+
+## Import
+
+Import links from the clipboard, files, QR codes, or manual input. Supported
+sources include plain/Base64 subscriptions, HAPP, INCY links, and Karing backups.
+VMess accepts address links and Base64(JSON). Shadowsocks accepts SIP002 links
+and legacy fully Base64 links for ordinary AEAD. Large imports run in the
+background with progress and cancellation.
+
+## Ping
+
+Proxy GET tests the connection through the proxy. The 5–15 second timeout applies to each attempt. Preparation and queue
+waiting can increase total time. TCP and ICMP each use up to two attempts.
+
+| Result | Meaning |
+|---|---|
+| DNS | Could not resolve the server's IP address. |
+| TCP | Could not establish a TCP connection to the server. |
+| Transport | A TLS/REALITY or transport error occurred (XHTTP, gRPC, WebSocket, or HTTPUpgrade). |
+| Protocol | Failed to complete proxy protocol setup. |
+| Response | Failed to receive the expected response over the connection. |
+| Failed | No failure-stage details are available. |
+| A number | Measured ping time in milliseconds. |
 
 ## Build
 
@@ -100,44 +135,24 @@ Build or download it from:
 - `../vless-core-cli/third_party/curl-ios-arm64/bin/curl`
 - `../vless-core-cli/third_party/cacert.pem`
 
-Build them in `vless-core-cli`:
+See the [CLI build instructions](https://github.com/notfence/vless-core-cli#build)
+for preparing those files and dependencies. Build the app package with:
 
 ```bash
-# build vless-core-cli assets first
-cd /path/to/vless-core-cli
+cd /path/to/vless-core-app
 IOS_TOOLCHAIN=/path/to/ios6/toolchain
 APP_IOS_SDK=/path/to/iPhoneOS10.3.sdk
 ARM64_IOS_SDK=/path/to/iPhoneOS11.4.sdk
-make openssl-ios6 IOS_TOOLCHAIN=$IOS_TOOLCHAIN
-make openssl-ios-arm64 IOS_TOOLCHAIN=$IOS_TOOLCHAIN
-make zlib-ios6 IOS_TOOLCHAIN=$IOS_TOOLCHAIN
-make zlib-ios-arm64 IOS_TOOLCHAIN=$IOS_TOOLCHAIN
-make curl-ios6 IOS_TOOLCHAIN=$IOS_TOOLCHAIN
-make curl-ios-arm64 IOS_TOOLCHAIN=$IOS_TOOLCHAIN
-make third_party/cacert.pem
-make ios IOS_TOOLCHAIN=$IOS_TOOLCHAIN
-make ios-arm64 IOS_TOOLCHAIN=$IOS_TOOLCHAIN
-
-# then build app package
-cd /path/to/vless-core-app
 make clean
-make deb IOS_TOOLCHAIN=$IOS_TOOLCHAIN APP_IOS_SDK=$APP_IOS_SDK ARM64_IOS_SDK=$ARM64_IOS_SDK
+make deb IOS_TOOLCHAIN="$IOS_TOOLCHAIN" APP_IOS_SDK="$APP_IOS_SDK" ARM64_IOS_SDK="$ARM64_IOS_SDK"
 ```
 
-The historical `ios6` target and directory names now build ARMv7 components
-with an iOS 5.0 deployment target. Rebuild the dependencies above before
-packaging; `make deb` rejects stale ARMv7 binaries targeting a newer iOS.
+The historical `ios6` names refer to ARMv7 components targeting iOS 5.0.
+ARM64 targets iOS 11.0. `make deb` rejects incompatible input binaries.
 
 Output:
 
 - `build/com.vlesscore.app_iphoneos-arm.deb`
-By default, package build takes binaries from sibling repo:
-
-- `../vless-core-cli/vless-core-darwin-armv7`
-- `../vless-core-cli/vless-core-darwin-arm64`
-- `../vless-core-cli/third_party/curl-ios6-armv7/bin/curl`
-- `../vless-core-cli/third_party/curl-ios-arm64/bin/curl`
-- `../vless-core-cli/third_party/cacert.pem`
 
 Override paths if needed:
 
@@ -168,12 +183,13 @@ Package uses `gzip` compression for old iOS `dpkg` compatibility.
 
 ## Full-device backend
 
-The daemon uses `pf + redsocks` on every supported version. On iOS 11–14 it
+The daemon uses `pf + redsocks` for IPv4 TCP routing on every supported version. On iOS 11–14 it
 also installs a temporary, non-persistent PAC setting that sends
 CFNetwork/WebKit traffic through the local SOCKS listener, including Safari
 traffic that can bypass PF. Original proxy settings are restored on disconnect,
 helper failure, daemon restart, package upgrade, and package removal. The PAC
 state is not written to the persistent SystemConfiguration preferences.
+General UDP and IPv6 routing are not supported.
 
 ## License
 

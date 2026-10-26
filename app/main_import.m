@@ -384,7 +384,7 @@
     }
 
     if (_launchAutoUpdateInProgress) {
-        [self showStatus:@"Subscriptions update is already running" ok:YES];
+        [self showStatus:@"A subscription update is already running" ok:YES];
         return;
     }
 
@@ -945,7 +945,7 @@
         return;
     }
     if (_launchAutoUpdateInProgress) {
-        [self showStatus:@"Subscriptions update is already running" ok:YES];
+        [self showStatus:@"A subscription update is already running" ok:YES];
         return;
     }
 
@@ -1009,7 +1009,7 @@
         return;
     }
     if (_launchAutoUpdateInProgress) {
-        [self showStatus:@"Subscriptions update is already running" ok:YES];
+        [self showStatus:@"A subscription update is already running" ok:YES];
         return;
     }
 
@@ -1147,7 +1147,7 @@
 - (void)importFileAtURL:(NSURL *)url {
     if (_configurationLoading) {
         if (!_deferredImportURL) _deferredImportURL=[url copy];
-        else [self showStatus:@"Configurations are loading; retry this import when ready" ok:NO];
+        else [self showStatus:@"Configurations are loading. Try importing again when ready." ok:NO];
         return;
     }
     if (![url isKindOfClass:[NSURL class]] || ![url isFileURL]) {
@@ -1365,7 +1365,7 @@
             VCRecordAppEvent(@"import", @"Plain HTTP subscription declined", nil);
             @synchronized(self) { [_pendingProfileMetadata release]; _pendingProfileMetadata=nil; }
             if (cancellation) cancellation();
-            [self showStatus:@"HTTP subscription canceled" ok:YES];
+            [self showStatus:@"Subscription import canceled" ok:YES];
         }
         if (confirmation) Block_release(confirmation);
         if (cancellation) Block_release(cancellation);

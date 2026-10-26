@@ -25,59 +25,81 @@
 - (void)buildSections {
     NSArray *gettingStarted = [NSArray arrayWithObjects:
         [self question:@"How do I import?"
-                 answer:@"Tap + and choose Import from Clipboard, Import from File, Scan QR Code, or Manual Input. You can import vless://, trojan://, vmess://, ss:// and socks5:// configurations, HTTP/HTTPS subscriptions, happ:// links, incy:// links, and Karing backup ZIP files or LAN Send QR codes."],
+                 answer:@"Tap + and choose Import from Clipboard, Import from File, Scan QR Code, or Manual Input. Supported configuration schemes are vless://, trojan://, vmess://, ss://, and socks5://. You can also import HTTP/HTTPS subscriptions, HAPP and INCY links, and Karing backup ZIP files or LAN Send QR codes."],
+        [self question:@"How do I connect?"
+                 answer:@"Select a configuration, either standalone or inside a subscription, then tap Connect. Tap Disconnect to stop it. A red protocol label means the configuration contains an unsupported setting. The core checks the selected configuration before the daemon changes the network."],
         [self question:@"How do I delete or reorder items?"
-                 answer:@"Swipe a standalone configuration or subscription from right to left to delete it. To change the order, tap the list button beside Configurations or Subscriptions, drag the rows, then tap the checkmark to finish."],
-        [self question:@"Do I need to respring after installation?"
-                 answer:@"No. With the current package, wait for uicache to finish and for the installer to show “Installation done! You can now exit the installer.” A respring is only a fallback if the icon is still missing after installation has fully completed."],
+                 answer:@"Swipe a standalone configuration or subscription from right to left to delete it. To reorder the items, press and hold the button for the currently selected list (Configurations or Subscriptions), drag the rows, and then press and hold the same button again."],
+        [self question:@"Is a respring needed?"
+                 answer:@"Normally, no. Wait for the icon-cache update and the Installation done! message before opening the app. If the icon is still missing after installation completes, a respring may help."],
         nil];
 
     NSArray *subscriptions = [NSArray arrayWithObjects:
-        [self question:@"Where are the subscription details?"
-                 answer:@"Tap the info button beside a subscription. The details page shows its source, provider description, configuration count, traffic, and expiry when the provider supplies that data. You can also update or delete that subscription there."],
-        [self question:@"Why wasn't my subscription added?"
-                 answer:@"The URL must return at least one parseable supported proxy entry. Import can fail when the provider is unavailable, returns an empty or HTML response, has a certificate problem, or uses an unsupported format. The import alert shows a more specific reason when one is available."],
-        [self question:@"What does auto-update do?"
-                 answer:@"When enabled, subscriptions refresh once after a fresh app launch. It does not interrupt an active VPN connection. Use the refresh button to update all subscriptions manually, or open a subscription's details and choose Update Now to refresh only that one."],
+        [self question:@"Where are subscription details?"
+                 answer:@"Tap the info button beside a subscription to see its source, description, configuration count, traffic, and expiry when supplied. You can rename, update, or delete it there."],
+        [self question:@"How do I stop an import or update?"
+                 answer:@"The power icon shows activity or processing progress. Tap the main refresh button, which becomes a stop button during an import or update. Cancellation is available until final saving begins. A failed save preserves the previous store. The result reports valid profiles, duplicates, and unsupported entries."],
+        [self question:@"Why was an import rejected?"
+                 answer:@"A subscription must return at least one supported proxy entry. An unavailable provider, empty or HTML response, certificate error, or unsupported settings can prevent import. Invalid entries in a mixed list are skipped with safe reasons. Support for HAPP, INCY, and Karing imports does not include every feature of those applications."],
+        [self question:@"How are subscriptions updated?"
+                 answer:@"The main refresh button updates subscriptions. Update Now in a subscription's details updates only that subscription. Auto-update subscriptions runs after a fresh app launch without interrupting an active VPN connection. Preserve custom names keeps user-assigned subscription names after updates."],
+        [self question:@"How does sorting by ping work?"
+                 answer:@"Sort configs by ping is off by default. When enabled, lower successful latencies appear first within each subscription. It changes the displayed order, not the saved source order."],
+        nil];
+
+    NSArray *protocols = [NSArray arrayWithObjects:
+        [self question:@"Which protocols are supported?"
+                 answer:@"VLESS, Trojan, VMess AEAD, Shadowsocks, and upstream SOCKS5. For more details, please visit a vless-core-cli repo page."],
+        [self question:@"Which transports are supported?"
+                 answer:@"TCP/raw, gRPC gun/multi, and XHTTP with none, TLS, or REALITY. WebSocket and HTTPUpgrade support none or TLS (REALITY unsupported). HTTPUpgrade uses HTTP/1.1. SOCKS5 is a separate upstream protocol. Supported fingerprints are chrome, firefox, edge, random, randomized, and qq."],
+        [self question:@"What does XHTTP support?"
+                 answer:@"XHTTP supports auto, packet-up, stream-one, and stream-up modes, XMUX, and a separate download channel. Auto selects packet-up with none/TLS. With REALITY it selects stream-one, or stream-up when a separate download channel is configured. Use XMUX controls only whether its XMUX settings are used for a new connection."],
+        [self question:@"How does Use XMUX work?"
+                 answer:@"Use XMUX is enabled by default. It uses XHTTP XMUX settings already present in the configuration. When disabled, those settings are removed only from the temporary VPN or Proxy GET configuration, including its download channel. Saved links are unchanged. It does not add missing XMUX settings, disable HTTP/2 or the gRPC pool, or interrupt an existing connection."],
+        nil];
+
+    NSArray *pings = [NSArray arrayWithObjects:
+        [self question:@"What does each ping type check?"
+                 answer:@"Proxy GET sends an HTTP request through the selected proxy. TCP only checks a connection to the proxy server's port. ICMP sends an echo request to the server, which may block ICMP even when its proxy works. Choose the type in Settings → Network → Ping. The URL is used by Proxy GET and tunnel checks, not TCP or ICMP. Only HTTP is supported and redirects are not followed."],
+        [self question:@"What do ping errors mean?"
+                 answer:@"DNS: Could not resolve the server's IP address.\n"
+                         @"TCP: Could not establish a TCP connection to the server.\n"
+                         @"Transport: A TLS/REALITY or transport error occurred (XHTTP, gRPC, WebSocket, or HTTPUpgrade).\n"
+                         @"Protocol: Failed to complete proxy protocol setup.\n"
+                         @"Response: Failed to receive the expected response over the connection.\n"
+                         @"Failed: No failure-stage details are available."],
         nil];
 
     NSArray *connections = [NSArray arrayWithObjects:
         [self question:@"Why can't I connect?"
-                 answer:@"Make sure a configuration is selected, then check the message shown after pressing Connect. If the protocol text is red, the link contains an unsupported option. Otherwise, verify the server parameters, confirm that the server is online, and check both logs for the exact failure."],
-        [self question:@"What can the app connect to?"
-                 answer:@"Supported configurations:\n"
-                         @"• VLESS, Trojan, VMess AEAD, and Shadowsocks: TCP, gRPC gun/multi, and XHTTP with no external security, TLS, or Reality\n"
-                         @"• WebSocket with TLS or no external security; WS + Reality is not supported\n"
-                         @"• HTTPUpgrade with TLS (HTTP/1.1) or no external security. Reality and h2 are not supported\n"
-                         @"• XHTTP: auto, packet-up, stream-one, stream-up, XMUX, and a separate download server\n"
-                         @"• VLESS Encryption and applicable Vision; not available for other protocols\n"
-                         @"• VMess alterId=0 only; auto, AES-GCM, ChaCha20-Poly1305, none, or zero\n"
-                         @"• Shadowsocks AEAD and SS 2022; AES SIP023 key chains; no plugins or legacy stream ciphers. No external TLS does not disable Shadowsocks encryption\n"
-                         @"• SOCKS5\n"
-                         @"Supported fingerprints are chrome, firefox, edge, random, randomized, and qq."],
-        [self question:@"Why is the protocol text red?"
-                 answer:@"Red text means the transport, security type, mode, flow, or fingerprint is not supported. Existing entries remain visible but cannot connect. Subscription imports skip invalid entries and report safe reasons. Full cryptographic validation runs before the VPN changes the network."],
+                 answer:@"Check that a supported configuration is selected, then read the message shown after Connect. Verify the server address, port, credentials, and transport settings. The daemon and core logs can help identify the stage that failed. Logs are unavailable for encrypted HAPP subscriptions."],
         [self question:@"How does routing work?"
-                 answer:@"Open Settings → Routing. Enable it, choose the default Proxy, Direct, or Block action, then add ordered domain, IP/CIDR, or port rules. The first matching rule wins after the optional local-network bypass. Reconnect the VPN after changing the policy; existing connections are left untouched."],
+                 answer:@"Open Settings → Network → Routing. Enable it, choose the default Proxy, Direct, or Block action, then add ordered domain, suffix, IP/CIDR, or port rules. The first matching rule wins after the optional local-network bypass. Reconnect after changing the policy."],
         [self question:@"Does closing the app stop the VPN?"
-                 answer:@"No. The connection belongs to the vpnctld background daemon and remains active after the app is closed. Reopen the app to manage it, or press Disconnect to stop it. After a full app relaunch, the on-screen timer may restart at 00:00:00 even though the tunnel stayed connected."],
+                 answer:@"No. The vpnctld daemon manages the connection after the app closes. Reopen the app to manage it or press Disconnect to stop it."],
         nil];
 
     NSArray *troubleshooting = [NSArray arrayWithObjects:
         [self question:@"Where can I find the logs?"
-                 answer:@"Tap the terminal button on the main screen. The vpnctld log covers daemon and device-routing work; the vless-core log covers the selected proxy transport and server connection. The logs update live, and the trash button clears them. Logs are unavailable for encrypted HAPP subscriptions."],
+                 answer:@"Tap the terminal button on the main screen. The vpnctld log covers daemon and device routing. The vless-core log covers the proxy protocol and transport. Logs update while open and the trash button clears them. Settings → Debug → Debug and diagnostics provides state, tests, events, and a report. Review technical logs and reports before sharing them."],
         [self question:@"What does Stealth mode hide?"
-                 answer:@"Stealth mode masks configuration and subscription links in the interface. It does not change the connection or redact technical logs. Configurations and subscriptions are encrypted in the protected local store regardless of Stealth mode. Encrypted HAPP subscriptions are protected separately and never expose their links or connection logs."],
+                 answer:@"Stealth mode masks configuration and subscription links in the interface. It does not redact technical logs or change the connection. Configurations and subscriptions are encrypted in the local store regardless of Stealth mode. Encrypted HAPP subscriptions have separate restrictions on exposing links and connection logs."],
         nil];
 
     NSArray *compatibility = [NSArray arrayWithObject:
         [self question:@"Which devices are supported?"
-                 answer:@"A rootful jailbreak is required. vless-core supports iOS 5 through iOS 14. On iOS 5 - iOS 10 it uses the ARMv7 runtime, including ARM64 devices through 32-bit compatibility. On iOS 11 - iOS 14 it uses the native ARM64 runtime. The package selects the correct runtime automatically during installation."]];
+                 answer:@"A rootful jailbreak is required.\n"
+                        @"vless-core supports iOS 5 through iOS 14.\n"
+                        @"On iOS 5 - iOS 10 it uses the ARMv7 runtime, including ARM64 devices through 32-bit compatibility.\n"
+                        @"On iOS 11 - iOS 14 it uses the native ARM64 runtime.\n"
+                        @"The package selects the correct runtime automatically during installation."]];
 
     NSArray *newSections = [[NSArray alloc] initWithObjects:
         [self sectionWithTitle:@"Getting started" questions:gettingStarted],
         [self sectionWithTitle:@"Subscriptions" questions:subscriptions],
-        [self sectionWithTitle:@"Connections" questions:connections],
+        [self sectionWithTitle:@"Protocols and transports" questions:protocols],
+        [self sectionWithTitle:@"Ping" questions:pings],
+        [self sectionWithTitle:@"Connections and routing" questions:connections],
         [self sectionWithTitle:@"Privacy and troubleshooting" questions:troubleshooting],
         [self sectionWithTitle:@"Compatibility" questions:compatibility],
         nil];
@@ -512,7 +534,7 @@
 - (NSDictionary *)projectLicenseRow {
     return [NSDictionary dictionaryWithObjectsAndKeys:
             @"vless-core-app", @"title",
-            @"vless-core-app Source License 1.0. Click to read the license.", @"detail",
+            @"vless-core-app Source License 1.0. Tap to read the license.", @"detail",
             @"LICENSE", @"licenseResource",
             @"", @"licenseMarker",
             nil];
