@@ -12,6 +12,12 @@ static inline CGRect CGRectMake(CGFloat x, CGFloat y, CGFloat w, CGFloat h) { re
 typedef struct {
     CGRect button, state, selection, uptime, status, switcher, table, power, title;
 } VCMainGeometry;
+#define VC_PHONE_LAYOUT_STATE 1
+typedef struct {
+    CGFloat width, height, topInset, progress;
+    int terminal, valid;
+} VCPhoneLayoutState;
+int VCPhoneLayoutStateMatches(const VCPhoneLayoutState *state, CGFloat width, CGFloat height, CGFloat topInset, CGFloat progress, int terminal);
 extern const CGFloat kVCMainContentStartY;
 extern const CGFloat kVCMainCompactContentStartY;
 extern const CGFloat kVCMainSectionHeaderHeight;

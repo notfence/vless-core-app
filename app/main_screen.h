@@ -139,6 +139,7 @@
     BOOL _didScheduleAutomaticUpdateCheck;
     BOOL _launchAutoUpdateInProgress;
     BOOL _queuedMainDetailRelayout;
+    VCPhoneLayoutState _phoneLayoutState;
     BOOL _pendingInsecureImportUsesHappHeaders;
 }
 @end

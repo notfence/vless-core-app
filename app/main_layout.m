@@ -507,8 +507,13 @@ static NSArray *VCHeaderPresentationInputs(NSDictionary *subscription, NSUIntege
 }
 
 - (void)updatePhoneConnectionLayout {
-    if (IsPadDevice() || !_tableView || !_connectBtn || !_uptimeLabel || !_statusLabel) return;
-    if (_mainSectionTransitionInProgress) return;
+    if (IsPadDevice() || !_tableView || !_connectBtn || !_uptimeLabel || !_statusLabel ||
+        !_mainSwitchView || !_connectGlowView || !_compactConnectGlowView || !_connectPowerIcon ||
+        !_connectButtonTitle || !_connectionStateLabel || !_selectionLabel ||
+        (_showingTerminal && (!_logSelector || !_logView)) || _mainSectionTransitionInProgress) {
+        _phoneLayoutState.valid = NO;
+        return;
+    }
 
     CGFloat collapseDistance = kVCMainContentStartY - kVCMainCompactContentStartY;
     CGFloat progress = 0.0f;
@@ -519,41 +524,57 @@ static NSArray *VCHeaderPresentationInputs(NSDictionary *subscription, NSUIntege
     }
 
     CGFloat width = self.view.bounds.size.width;
+    CGFloat height = self.view.bounds.size.height;
     CGFloat topInset = VCMainStatusBarInset();
     VCMainGeometry geometry = VCPhoneGeometry(width, topInset, progress);
+    if (VCPhoneLayoutStateMatches(&_phoneLayoutState, width, height, topInset, progress, _showingTerminal) &&
+        CGRectEqualToRect(_connectBtn.frame, geometry.button) && CGRectEqualToRect(_mainSwitchView.frame, geometry.switcher) &&
+        _compactConnectGlowView.layer.shadowPath &&
+        _connectBtn.layer.cornerRadius == _connectBtn.bounds.size.height * 0.5f &&
+        _compactConnectGlowView.layer.cornerRadius == _connectBtn.layer.cornerRadius &&
+        fabs(_tableView.scrollIndicatorInsets.top - collapseDistance * (1.0f - progress)) < 0.001f &&
+        fabs([_connectButtonTitle.font pointSize] - (16.0f - 3.5f * progress)) <= 0.35f &&
+        fabs([_uptimeLabel.font pointSize] - (13.0f - progress)) <= 0.35f &&
+        fabs([_statusLabel.font pointSize] - (12.5f - progress)) <= 0.35f) return;
 
     [CATransaction begin];
     [CATransaction setDisableActions:YES];
-    _mainSwitchView.frame = geometry.switcher;
-    _connectBtn.frame = geometry.button;
-    _connectBtn.layer.cornerRadius = _connectBtn.bounds.size.height * 0.5f;
-    _connectGlowView.frame = CGRectInset(_connectBtn.frame, -18.0f, -18.0f);
-    _connectGlowView.alpha = 1.0f - progress;
-    _compactConnectGlowView.frame = _connectBtn.frame;
-    _compactConnectGlowView.layer.cornerRadius = _connectBtn.layer.cornerRadius;
-    _compactConnectGlowView.layer.shadowPath = [UIBezierPath bezierPathWithRoundedRect:_compactConnectGlowView.bounds
+    if (!CGRectEqualToRect(_mainSwitchView.frame, geometry.switcher)) _mainSwitchView.frame = geometry.switcher;
+    if (!CGRectEqualToRect(_connectBtn.frame, geometry.button)) _connectBtn.frame = geometry.button;
+    CGFloat corner = _connectBtn.bounds.size.height * 0.5f;
+    if (_connectBtn.layer.cornerRadius != corner) _connectBtn.layer.cornerRadius = corner;
+    CGRect glow = CGRectInset(_connectBtn.frame, -18.0f, -18.0f);
+    if (!CGRectEqualToRect(_connectGlowView.frame, glow)) _connectGlowView.frame = glow;
+    if (_connectGlowView.alpha != 1.0f - progress) _connectGlowView.alpha = 1.0f - progress;
+    CGRect oldShadowBounds = _compactConnectGlowView.bounds;
+    CGFloat oldCorner = _compactConnectGlowView.layer.cornerRadius;
+    if (!CGRectEqualToRect(_compactConnectGlowView.frame, _connectBtn.frame)) _compactConnectGlowView.frame = _connectBtn.frame;
+    if (oldCorner != corner) _compactConnectGlowView.layer.cornerRadius = corner;
+    if (!CGRectEqualToRect(oldShadowBounds, _compactConnectGlowView.bounds) || oldCorner != corner || !_compactConnectGlowView.layer.shadowPath)
+        _compactConnectGlowView.layer.shadowPath = [UIBezierPath bezierPathWithRoundedRect:_compactConnectGlowView.bounds
                                                                           cornerRadius:_compactConnectGlowView.layer.cornerRadius].CGPath;
-    _compactConnectGlowView.alpha = progress;
-    _connectPowerIcon.frame = geometry.power;
-    _connectButtonTitle.frame = geometry.title;
+    if (_compactConnectGlowView.alpha != progress) _compactConnectGlowView.alpha = progress;
+    if (!CGRectEqualToRect(_connectPowerIcon.frame, geometry.power)) _connectPowerIcon.frame = geometry.power;
+    if (!CGRectEqualToRect(_connectButtonTitle.frame, geometry.title)) _connectButtonTitle.frame = geometry.title;
     CGFloat buttonFontSize = 16.0f - 3.5f * progress;
     if (fabs([_connectButtonTitle.font pointSize] - buttonFontSize) > 0.35f) {
         _connectButtonTitle.font = [UIFont boldSystemFontOfSize:buttonFontSize];
         VCSetLabelMinimumScaleFactor(_connectButtonTitle, 0.75f);
     }
 
-    _connectionStateLabel.frame = geometry.state;
-    _connectionStateLabel.textAlignment = progress < 0.5f ? NSTextAlignmentCenter : NSTextAlignmentLeft;
-    _selectionLabel.frame = geometry.selection;
-    _selectionLabel.textAlignment = _connectionStateLabel.textAlignment;
-    _uptimeLabel.frame = geometry.uptime;
+    if (!CGRectEqualToRect(_connectionStateLabel.frame, geometry.state)) _connectionStateLabel.frame = geometry.state;
+    NSInteger alignment = progress < 0.5f ? NSTextAlignmentCenter : NSTextAlignmentLeft;
+    if (_connectionStateLabel.textAlignment != alignment) _connectionStateLabel.textAlignment = alignment;
+    if (!CGRectEqualToRect(_selectionLabel.frame, geometry.selection)) _selectionLabel.frame = geometry.selection;
+    if (_selectionLabel.textAlignment != alignment) _selectionLabel.textAlignment = alignment;
+    if (!CGRectEqualToRect(_uptimeLabel.frame, geometry.uptime)) _uptimeLabel.frame = geometry.uptime;
     CGFloat uptimeFontSize = 13.0f - progress;
     if (fabs([_uptimeLabel.font pointSize] - uptimeFontSize) > 0.35f) {
         _uptimeLabel.font = [UIFont boldSystemFontOfSize:uptimeFontSize];
     }
-    _uptimeLabel.textAlignment = _connectionStateLabel.textAlignment;
+    if (_uptimeLabel.textAlignment != alignment) _uptimeLabel.textAlignment = alignment;
 
-    _statusLabel.frame = geometry.status;
+    if (!CGRectEqualToRect(_statusLabel.frame, geometry.status)) _statusLabel.frame = geometry.status;
     CGFloat statusFontSize = 12.5f - progress;
     if (fabs([_statusLabel.font pointSize] - statusFontSize) > 0.35f) {
         _statusLabel.font = [UIFont systemFontOfSize:statusFontSize];
@@ -563,24 +584,24 @@ static NSArray *VCHeaderPresentationInputs(NSDictionary *subscription, NSUIntege
         CGFloat logY = topInset + kVCMainContentStartY - collapseDistance * progress;
         CGRect selectorFrame = _logSelector.frame;
         selectorFrame.origin.y = logY + 2.0f;
-        _logSelector.frame = selectorFrame;
+        if (!CGRectEqualToRect(_logSelector.frame, selectorFrame)) _logSelector.frame = selectorFrame;
 
         CGRect logFrame = _logView.frame;
         logFrame.origin.y = logY + 32.0f;
         logFrame.size.height = self.view.bounds.size.height - logFrame.origin.y;
         if (logFrame.size.height < 120.0f) logFrame.size.height = 120.0f;
-        _logView.frame = logFrame;
+        if (!CGRectEqualToRect(_logView.frame, logFrame)) _logView.frame = logFrame;
     }
 
     CGFloat labelAlpha = fabs(progress * 2.0f - 1.0f);
-    _connectionStateLabel.alpha = labelAlpha;
-    _selectionLabel.alpha = labelAlpha;
-    _uptimeLabel.alpha = labelAlpha;
-    _statusLabel.alpha = labelAlpha;
+    if (_connectionStateLabel.alpha != labelAlpha) _connectionStateLabel.alpha = labelAlpha;
+    if (_selectionLabel.alpha != labelAlpha) _selectionLabel.alpha = labelAlpha;
+    if (_uptimeLabel.alpha != labelAlpha) _uptimeLabel.alpha = labelAlpha;
+    if (_statusLabel.alpha != labelAlpha) _statusLabel.alpha = labelAlpha;
 
     UIEdgeInsets indicators = _tableView.scrollIndicatorInsets;
     indicators.top = collapseDistance * (1.0f - progress);
-    _tableView.scrollIndicatorInsets = indicators;
+    if (_tableView.scrollIndicatorInsets.top != indicators.top) _tableView.scrollIndicatorInsets = indicators;
     [CATransaction commit];
 
     if (progress <= 0.001f) {
@@ -588,6 +609,8 @@ static NSArray *VCHeaderPresentationInputs(NSDictionary *subscription, NSUIntege
     } else if (progress >= 0.999f) {
         _phoneConnectionCompact = YES;
     }
+    _phoneLayoutState = (VCPhoneLayoutState){width, height, topInset, progress, _showingTerminal,
+        width > 0.0f && height > 0.0f && isfinite(width) && isfinite(height) && isfinite(topInset) && isfinite(progress)};
 }
 
 - (void)updatePadConnectionLayout {
@@ -722,6 +745,7 @@ static NSArray *VCHeaderPresentationInputs(NSDictionary *subscription, NSUIntege
 }
 
 - (void)prepareMainTableStructuralTransition {
+    _phoneLayoutState.valid = NO;
     if (!_mainSectionTransitionInProgress && !IsPadDevice() && _tableView) {
         _mainTableOffsetBeforeTransition = _tableView.contentOffset.y;
         _phoneConnectionCompactBeforeTransition = (_tableView.contentOffset.y >= -0.5f)

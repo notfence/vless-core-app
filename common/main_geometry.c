@@ -1,6 +1,11 @@
 #include "main_geometry.h"
 #include <math.h>
 
+int VCPhoneLayoutStateMatches(const VCPhoneLayoutState *state, CGFloat width, CGFloat height, CGFloat topInset, CGFloat progress, int terminal) {
+    return state && state->valid && state->width == width && state->height == height &&
+        state->topInset == topInset && state->progress == progress && state->terminal == terminal;
+}
+
 const CGFloat kVCMainContentStartY = 266.0f;
 const CGFloat kVCMainCompactContentStartY = 138.0f;
 const CGFloat kVCMainSectionHeaderHeight = 48.0f;

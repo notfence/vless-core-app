@@ -193,6 +193,7 @@
     [self.view addSubview:_tableView];
 
     _mainSwitchView = [[self createMainSwitcherWithWidth:b.size.width - 20.0f] retain];
+    _phoneLayoutState.valid = NO;
     _mainSwitchView.frame = CGRectMake(10.0f,
                                        topInset + (collapsiblePhoneLayout ? kVCMainCompactContentStartY
                                                                          : kVCMainContentStartY),
