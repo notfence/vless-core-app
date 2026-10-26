@@ -181,6 +181,7 @@ void VCShowUpdateAvailableAlert(NSDictionary *result,
 NSString *ClearLogsViaDaemon(void);
 void VCSendCommandAsync(NSString *command, void (^completion)(NSString *));
 void VCWaitForDaemonUICommands(void);
+NSString *VCReadDaemonStatus(void);
 
 NSString *ReadDaemonLog(NSInteger index, NSUInteger maxBytes);
 

@@ -28,6 +28,7 @@
 }
 
 - (void)refreshUptimeText {
+    if (![self isMainUIActive]) return;
     if (_connected && _connectedSince > 0) {
         NSTimeInterval delta = [[NSDate date] timeIntervalSince1970] - _connectedSince;
         _uptimeLabel.text = [self formatDuration:delta];
@@ -37,17 +38,10 @@
 }
 
 - (void)startUptimeTimerWithDaemonResponse:(NSString *)response {
-    [_uptimeTimer invalidate];
-    [_uptimeTimer release];
-    _uptimeTimer = nil;
-
+    BOOL hadTimer = _uptimeTimer != nil;
     _connectedSince = VCConnectedSince(response, [[NSDate date] timeIntervalSince1970]);
-    [self refreshUptimeText];
-    _uptimeTimer = [[NSTimer scheduledTimerWithTimeInterval:1.0
-                                                     target:self
-                                                   selector:@selector(uptimeTick:)
-                                                   userInfo:nil
-                                                    repeats:YES] retain];
+    [self updatePeriodicUIActivity];
+    if (hadTimer) [self refreshUptimeText];
 }
 
 - (void)stopUptimeTimer {
@@ -60,23 +54,25 @@
 
 - (void)uptimeTick:(NSTimer *)timer {
     (void)timer;
+    if (![self isMainUIActive]) return;
     [self refreshUptimeText];
     [self reconcileConnectionStateWithDaemon];
 }
 
 - (void)reconcileConnectionStateWithDaemon {
-    if (!_connected || [self isConnectionActionInProgress] || _daemonStatusCheckInFlight) return;
+    if (![self isMainUIActive] || !_connected || [self isConnectionActionInProgress] || _daemonStatusCheckInFlight) return;
 
     _daemonStatusCheckInFlight = YES;
     NSTimeInterval expectedConnectedSince = _connectedSince;
     NSUInteger generation = _connectionActionGeneration;
     dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_DEFAULT, 0), ^{
         NSAutoreleasePool *pool = [[NSAutoreleasePool alloc] init];
-        NSString *response = [self sanitizeDaemonText:SendCommand(@"STATUS\n")];
+        NSString *response = [self sanitizeDaemonText:VCReadDaemonStatus()];
         BOOL disconnected = [response hasPrefix:@"OK disconnected"];
 
         dispatch_async(dispatch_get_main_queue(), ^{
             _daemonStatusCheckInFlight = NO;
+            if (![self isMainUIActive]) return;
             if (!VCConnectionLossApplies(disconnected, _connected, generation, _connectionActionGeneration,
                                          [self isConnectionActionInProgress], expectedConnectedSince, _connectedSince)) {
                 return;
@@ -96,7 +92,47 @@
 - (void)applicationDidBecomeActiveNotification:(NSNotification *)notification {
     (void)notification;
     [self refreshPingNetworkState];
-    [self reconcileConnectionStateWithDaemon];
+    if (!_pingNetworkTimer && ([_pingDisplayByURI count] || [_standalonePingCancellationsByURI count] ||
+        [_subscriptionPingTokenByIdentifier count] || [_pingNetworkStarts count])) {
+        _pingNetworkTimer = [[NSTimer scheduledTimerWithTimeInterval:1.0 target:self selector:@selector(pingNetworkTick:)
+                                                        userInfo:nil repeats:YES] retain];
+    }
+    [self updatePeriodicUIActivity];
+    if (_mainScreenVisible) [self queryInitialStatus];
+}
+
+- (BOOL)isMainUIActive {
+    return _mainScreenVisible && [[UIApplication sharedApplication] applicationState] == UIApplicationStateActive;
+}
+
+- (void)updatePeriodicUIActivity {
+    BOOL active = [self isMainUIActive];
+    if (!active || !_connected) {
+        [_uptimeTimer invalidate]; [_uptimeTimer release]; _uptimeTimer = nil;
+    } else if (!_uptimeTimer) {
+        [self refreshUptimeText];
+        _uptimeTimer = [[NSTimer scheduledTimerWithTimeInterval:1.0 target:self selector:@selector(uptimeTick:)
+                                                     userInfo:nil repeats:YES] retain];
+    }
+    if (!active || !_showingTerminal) {
+        [_logTimer invalidate]; [_logTimer release]; _logTimer = nil;
+    } else if (!_logTimer) {
+        [self refreshLogs];
+        _logTimer = [[NSTimer scheduledTimerWithTimeInterval:1.0 target:self selector:@selector(refreshLogsTick:)
+                                                  userInfo:nil repeats:YES] retain];
+    }
+    if (_periodicUIActive && !active) {
+        _logReadGeneration++;
+        _logReadPending = NO;
+    }
+    _periodicUIActive = active;
+}
+
+- (void)applicationDidEnterBackgroundNotification:(NSNotification *)notification {
+    (void)notification;
+    [self updatePeriodicUIActivity];
+    [_pingNetworkTimer invalidate]; [_pingNetworkTimer release]; _pingNetworkTimer = nil;
+    _pingNetworkDirty = YES;
 }
 
 - (void)showStatus:(NSString *)text ok:(BOOL)ok {
@@ -160,7 +196,7 @@
 }
 
 - (NSInteger)currentDaemonSocksPort {
-    NSString *status = [self sanitizeDaemonText:SendCommand(@"STATUS\n")];
+    NSString *status = [self sanitizeDaemonText:VCReadDaemonStatus()];
     if (![status hasPrefix:@"OK connected"]) return -1;
     return [self socksPortFromDaemonStatusText:status];
 }
@@ -520,18 +556,35 @@
 }
 
 - (void)queryInitialStatus {
-    [self showStatus:@"Checking daemon..." ok:YES];
+    if (_daemonStatusCheckInFlight) return;
+    _daemonStatusCheckInFlight = YES;
+    BOOL initial = !_didQueryInitialDaemonStatus;
+    if (initial) {
+        [self showStatus:@"Checking daemon..." ok:YES];
+    }
     NSUInteger generation = _connectionActionGeneration;
 
     dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_DEFAULT, 0), ^{
         NSAutoreleasePool *pool = [[NSAutoreleasePool alloc] init];
-        NSString *resp = [self sanitizeDaemonText:SendCommand(@"STATUS\n")];
+        NSString *resp = [self sanitizeDaemonText:VCReadDaemonStatus()];
         BOOL connectedNow = [resp hasPrefix:@"OK connected"];
+        BOOL disconnectedNow = [resp hasPrefix:@"OK disconnected"];
         BOOL protectedLogsNow = connectedNow &&
             [resp rangeOfString:@"protected=1"].location != NSNotFound;
 
         dispatch_async(dispatch_get_main_queue(), ^{
+            _daemonStatusCheckInFlight = NO;
+            if (![self isMainUIActive]) return;
             if (generation != _connectionActionGeneration || VCConnectionActionInProgress(_connectionActionInProgress, _reconnectInProgress, [_pendingReconnectURI length] > 0)) return;
+            if (!connectedNow && !disconnectedNow) {
+                if (initial) [self showStatus:[resp length] ? resp : @"Daemon unavailable" ok:NO];
+                return;
+            }
+            BOOL wasConnected = _connected;
+            BOOL changed = connectedNow != _connected || protectedLogsNow != _connectedWithProtectedLogs ||
+                (connectedNow && _connectedSince != VCConnectedSince(resp, [[NSDate date] timeIntervalSince1970]));
+            _didQueryInitialDaemonStatus = YES;
+            if (!initial && !changed) return;
             if (connectedNow) {
                 VCRecordAppEvent(@"connection", @"Existing VPN session detected", protectedLogsNow ? @"protected_logs=1" : @"protected_logs=0");
                 _connected = YES;
@@ -539,11 +592,11 @@
                 [self startUptimeTimerWithDaemonResponse:resp];
                 [self showStatus:@"Connected" ok:YES];
             } else {
-                VCRecordAppEvent(@"connection", @"No existing VPN session", nil);
+                VCRecordAppEvent(@"connection", !initial && wasConnected ? @"Daemon reported connection lost" : @"No existing VPN session", nil);
                 _connected = NO;
                 _connectedWithProtectedLogs = NO;
                 [self stopUptimeTimer];
-                [self showStatus:@"Ready" ok:YES];
+                [self showStatus:!initial && wasConnected ? @"Connection lost" : @"Ready" ok:initial || !wasConnected];
             }
             [self updateConnectButton];
         });

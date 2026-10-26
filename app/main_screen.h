@@ -124,6 +124,7 @@
     BOOL _reconnectInProgress;
     BOOL _pendingReconnectProtectLogs;
     BOOL _daemonStatusCheckInFlight;
+    BOOL _didQueryInitialDaemonStatus, _mainScreenVisible, _periodicUIActive;
     BOOL _showingTerminal;
     BOOL _autoUpdateSubscriptions;
     BOOL _preserveCustomSubscriptionNames;
@@ -231,6 +232,9 @@
 - (void)uptimeTick:(NSTimer *)timer;
 - (void)reconcileConnectionStateWithDaemon;
 - (void)applicationDidBecomeActiveNotification:(NSNotification *)notification;
+- (void)applicationDidEnterBackgroundNotification:(NSNotification *)notification;
+- (BOOL)isMainUIActive;
+- (void)updatePeriodicUIActivity;
 - (void)showStatus:(NSString *)text ok:(BOOL)ok;
 - (BOOL)isXHTTPTransportURI:(NSString *)uri;
 - (NSString *)xhttpPinKeyFromURI:(NSString *)uri;

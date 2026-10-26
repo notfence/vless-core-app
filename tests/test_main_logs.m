@@ -67,6 +67,7 @@ static void VCRecordAppEvent(id a,id b,id c) { (void)a; (void)b; (void)c; }
 - (id)init { if ((self=[super init])) { _showingTerminal=YES; _logView=[[LogView alloc] init]; } return self; }
 - (void)dealloc { [_logView release]; [lastText release]; [_logTexts[0] release]; [_logTexts[1] release]; [super dealloc]; }
 - (BOOL)isConnectionActionInProgress { return busy || _connectionActionInProgress; }
+- (BOOL)isMainUIActive { return YES; }
 - (BOOL)selectedSubscriptionIsHappEncrypted { return protectedLogs; }
 - (double)maximumLogOffsetY { return 100; }
 - (void)displayLogText:(NSString *)text atIndex:(NSInteger)index offset:(CGPoint)offset followTail:(BOOL)tail { (void)offset; (void)tail; displayed++; [lastText release]; lastText=[text copy]; [_logTexts[index] release]; _logTexts[index]=[text copy]; }

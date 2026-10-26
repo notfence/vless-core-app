@@ -133,9 +133,10 @@ int main(void) {
     [owner refreshPingNetworkState];
     [owner stopAllPings]; runOne(0); runOne(1);
     CHECK("network/cancel-prevents-deferred-start",owner->begun==2);
+    network=@"wifi-c";
     [owner refreshPingNetworkState]; runOne(0);
     applicationState=UIApplicationStateBackground; runOne(1);
-    CHECK("network/background-does-not-publish-results",owner->_pingNetworkDirty);
+    CHECK("network/background-does-not-publish-results",owner->_pingNetworkDirty && owner->_pingNetworkGeneration==2);
     NSUInteger before=scans;
     [owner refreshPingNetworkState];
     CHECK("network/background-does-not-scan",queuedCount[0]==0 && scans==before);

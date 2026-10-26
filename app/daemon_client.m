@@ -24,6 +24,12 @@ void VCWaitForDaemonUICommands(void) {
     dispatch_sync(VCDaemonUIQueue(), ^{});
 }
 
+NSString *VCReadDaemonStatus(void) {
+    static VCStatusCoordinator *coordinator;
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{ coordinator = [[VCStatusCoordinator alloc] initWithCommand:SendCommand]; });
+    return [coordinator readStatus];
+}
 
 static BOOL VCApplyStoreFileProtection(NSString *temporaryPath) {
     BOOL ok = YES;

@@ -11,6 +11,10 @@
                                              selector:@selector(applicationDidBecomeActiveNotification:)
                                                  name:UIApplicationDidBecomeActiveNotification
                                                object:nil];
+    [[NSNotificationCenter defaultCenter] addObserver:self
+                                             selector:@selector(applicationDidEnterBackgroundNotification:)
+                                                 name:UIApplicationDidEnterBackgroundNotification
+                                               object:nil];
 
     [self loadData];
     _pingDisplayByURI = [[NSMutableDictionary alloc] init];
@@ -281,6 +285,16 @@
 
 - (void)viewWillAppear:(BOOL)animated {
     [super viewWillAppear:animated];
+    _mainScreenVisible = YES;
+    [self.view setNeedsLayout];
+    [self updatePeriodicUIActivity];
+    [self queryInitialStatus];
+}
+
+- (void)viewWillDisappear:(BOOL)animated {
+    [super viewWillDisappear:animated];
+    _mainScreenVisible = NO;
+    [self updatePeriodicUIActivity];
 }
 
 - (void)didReceiveMemoryWarning {
@@ -303,6 +317,7 @@
 
 - (void)viewDidLayoutSubviews {
     [super viewDidLayoutSubviews];
+    if (![self isMainUIActive]) return;
     if (IsPadDevice()) {
         [self updatePadConnectionLayout];
     } else {

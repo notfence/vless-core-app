@@ -10,6 +10,46 @@
 #include <string.h>
 #include <sys/stat.h>
 
+@implementation VCStatusCoordinator
+- (id)initWithCommand:(NSString *(*)(NSString *))command {
+    if ((self = [super init])) {
+        _condition = [[NSCondition alloc] init];
+        _command = command;
+    }
+    return self;
+}
+- (void)dealloc {
+    [_condition release];
+    [_response release];
+    [super dealloc];
+}
+- (NSString *)readStatus {
+    [_condition lock];
+    if (_inFlight) {
+        NSUInteger generation = _generation;
+        while (_inFlight && generation == _generation) [_condition wait];
+        NSString *response = [_response retain];
+        [_condition unlock];
+        return [response autorelease];
+    }
+    _inFlight = YES;
+    [_condition unlock];
+    NSString *response = nil;
+    @try {
+        response = _command ? [_command(@"STATUS\n") copy] : nil;
+    } @finally {
+        [_condition lock];
+        [_response release];
+        _response = [response retain];
+        _generation++;
+        _inFlight = NO;
+        [_condition broadcast];
+        [_condition unlock];
+    }
+    return [response autorelease];
+}
+@end
+
 NSDictionary *VCProbeReportFromLog(NSString *text) {
     if (![text isKindOfClass:[NSString class]]) return nil;
     NSArray *numericKeys = @[@"v", @"id", @"success", @"dns_ms", @"tcp_ms", @"transport_ms", @"protocol_ms", @"carry_ms", @"total_ms"];

@@ -3,6 +3,17 @@
 #import <Foundation/Foundation.h>
 #include <sys/types.h>
 
+@interface VCStatusCoordinator : NSObject {
+    NSCondition *_condition;
+    NSString *(*_command)(NSString *);
+    NSString *_response;
+    NSUInteger _generation;
+    BOOL _inFlight;
+}
+- (id)initWithCommand:(NSString *(*)(NSString *))command;
+- (NSString *)readStatus;
+@end
+
 @interface VCPingCancellation : NSObject {
     NSLock *_lock;
     BOOL _cancelled;

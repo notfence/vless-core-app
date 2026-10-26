@@ -22,16 +22,7 @@
                          [self updatePhoneConnectionLayout];
                      }];
 
-    if (_showingTerminal) {
-        [self refreshLogs];
-        if (!_logTimer) {
-            _logTimer = [[NSTimer scheduledTimerWithTimeInterval:1.0
-                                                          target:self
-                                                        selector:@selector(refreshLogsTick:)
-                                                        userInfo:nil
-                                                         repeats:YES] retain];
-        }
-    } else {
+    if (!_showingTerminal) {
         _logReadGeneration++;
         _logReadPending = NO;
         [self rememberActiveLogPosition];
@@ -39,7 +30,7 @@
         [_logTimer release];
         _logTimer = nil;
     }
-
+    [self updatePeriodicUIActivity];
     [self updateTopButtonsIcons];
 }
 
@@ -151,7 +142,7 @@
 }
 
 - (void)requestLogRefresh {
-    if (!_showingTerminal || _logClearInFlight || [self isConnectionActionInProgress] ||
+    if (![self isMainUIActive] || !_showingTerminal || _logClearInFlight || [self isConnectionActionInProgress] ||
         _connectedWithProtectedLogs || [self selectedSubscriptionIsHappEncrypted] ||
         [[UIApplication sharedApplication] applicationState] != UIApplicationStateActive ||
         _activeLogIndex < 0 || _activeLogIndex > 1) return;
@@ -164,7 +155,7 @@
     ReadLogAtIndexAsync(index, ^(NSString *text) {
         _logReadInFlight = NO;
         if (generation == _logReadGeneration && connectionGeneration == _connectionActionGeneration &&
-            _showingTerminal && index == _activeLogIndex && !_logClearInFlight &&
+            [self isMainUIActive] && _showingTerminal && index == _activeLogIndex && !_logClearInFlight &&
             !_connectedWithProtectedLogs && ![self selectedSubscriptionIsHappEncrypted] &&
             ![self isConnectionActionInProgress] &&
             [[UIApplication sharedApplication] applicationState] == UIApplicationStateActive &&
@@ -190,7 +181,7 @@
         _logContentOffsetsValid[i] = NO;
         _logFollowsTail[i] = YES;
     }
-    [self displayLogText:@""
+    if ([self isMainUIActive]) [self displayLogText:@""
                  atIndex:_activeLogIndex
                   offset:CGPointZero
               followTail:NO];

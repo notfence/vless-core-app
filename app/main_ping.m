@@ -31,6 +31,12 @@ static void VCPingNetworkChanged(SCNetworkReachabilityRef target, SCNetworkReach
         NSString *signature = [VCPingNetworkSignature() copy];
         dispatch_async(dispatch_get_main_queue(), ^{
             _pingNetworkCheckInFlight = NO;
+            if ([[UIApplication sharedApplication] applicationState] == UIApplicationStateBackground) {
+                _pingNetworkDirty = YES;
+                _pingNetworkCheckPending = NO;
+                [signature release];
+                return;
+            }
             BOOL available = signature != nil;
             _publishingPingNetwork = YES;
             BOOL changed = signature && VCPingUpdateNetwork(self,signature,&_pingNetworkSignature,&_pingNetworkGeneration,_pingDisplayByURI);
@@ -250,7 +256,7 @@ static void VCPingNetworkChanged(SCNetworkReachabilityRef target, SCNetworkReach
     }
     if (![_pingOwnedMetadata objectForKey:uri]) _pingDisplayMayContainUnowned = YES;
     [_pingDisplayByURI setObject:kVCPingLoadingValue forKey:uri];
-    if (!_pingNetworkTimer) {
+    if (!_pingNetworkTimer && [[UIApplication sharedApplication] applicationState] == UIApplicationStateActive) {
         _pingNetworkTimer = [[NSTimer scheduledTimerWithTimeInterval:1.0 target:self selector:@selector(pingNetworkTick:)
                                                          userInfo:nil repeats:YES] retain];
     }

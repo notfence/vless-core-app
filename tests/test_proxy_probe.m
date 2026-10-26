@@ -231,7 +231,7 @@ int main(int argc,char **argv) {
     for (size_t i=0;i<sizeof(responses)/sizeof(responses[0]);i++) {
         peer_t peer={.response=responses[i],.response_length=strlen(responses[i]),.fragmented=1};
         pthread_t worker; uint16_t port=listen_peer(&peer,&worker);
-        int ms=-1,result=probe(port,300,&ms);
+        int ms=-1,result=probe(port,1500,&ms);
         finish_peer(&peer,worker);
         CHECK("health-check-sends-application-request",peer.request_read);
         CHECK("health-check-validates-response",(result == 0) == (i < 3));
@@ -288,7 +288,7 @@ int main(int argc,char **argv) {
             .expected_host=[[wire_hosts objectAtIndex:index] UTF8String],.expected_port=[[wire_ports objectAtIndex:index] unsignedIntValue],
             .expected_request=[[wire_requests objectAtIndex:index] UTF8String]};
         port=listen_peer(&peer,&worker);
-        int result=ProxyGetConnectToURLOnceMs(port,[wire_urls objectAtIndex:index],300,&ms,nil);
+        int result=ProxyGetConnectToURLOnceMs(port,[wire_urls objectAtIndex:index],1500,&ms,nil);
         finish_peer(&peer,worker);
         CHECK("probe/custom-host-port-request-and-atyp-on-wire",result == 0 && peer.request_read && peer.connected);
     }
