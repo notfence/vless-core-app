@@ -39,6 +39,9 @@
 
 @interface SettingsVC : UIViewController <UITableViewDataSource, UITableViewDelegate, UIAlertViewDelegate, VCUpdateCheckerDelegate, VCAccentColorVCDelegate, VCPingSettingsVCDelegate> {
     UITableView *_tableView;
+    UITableViewCell *_settingsSizingCell;
+    CGFloat _settingsTableWidth, _settingsVisibleTableWidth, _settingsRowWidth, _settingsTextLeft, _settingsRightInset;
+    BOOL _settingsHeightRefreshPending;
     UISwitch *_autoUpdateSwitch;
     UISwitch *_preserveCustomNamesSwitch;
     UISwitch *_sortSubscriptionsByPingSwitch;

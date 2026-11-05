@@ -4,6 +4,7 @@
 #import "appearance.h"
 #import "help_controllers.h"
 #import "routing.h"
+#import "settings_icons.h"
 
 @class SettingsVC;
 static NSInteger const kVCSettingsProxyPingURLAlertTag=7101;
@@ -19,6 +20,181 @@ static VCMarqueeLabel *VCSettingsMarqueeForCell(UITableViewCell *cell, NSInteger
     }
     return marquee;
 }
+
+typedef struct {
+    CGRect icon, title, detail, accessory;
+    CGFloat height;
+    BOOL expanded;
+} VCSettingsRowLayout;
+
+static CGSize VCSettingsTextSize(NSString *text, UIFont *font, CGFloat width) {
+    if (![text length] || !font || width <= 0.0f) return CGSizeZero;
+    CGSize size = [text sizeWithFont:font constrainedToSize:CGSizeMake(width, CGFLOAT_MAX)
+                      lineBreakMode:NSLineBreakByWordWrapping];
+    return CGSizeMake(ceil(size.width), ceil(size.height));
+}
+
+static VCSettingsRowLayout VCSettingsMeasureRow(CGFloat width, CGFloat textLeft, CGFloat inset,
+                                               CGSize accessory, NSString *title, UIFont *titleFont,
+                                               NSString *detail, UIFont *detailFont) {
+    VCSettingsRowLayout layout = {0};
+    layout.height = 44.0f;
+    CGFloat gap = accessory.width > 0.0f ? 8.0f : 0.0f;
+    CGFloat titleWidth = width - inset - textLeft - accessory.width - gap;
+    CGFloat detailWidth = width - inset - textLeft;
+    if (!isfinite(width) || !isfinite(titleWidth) || !isfinite(detailWidth) ||
+        titleWidth <= 0.0f || detailWidth <= 0.0f) return layout;
+    CGSize titleSize = VCSettingsTextSize(title, titleFont, titleWidth);
+    CGSize detailSize = VCSettingsTextSize(detail, detailFont, titleWidth);
+    layout.expanded = titleSize.height > ceil(titleFont.lineHeight) + 0.5f ||
+                      detailSize.height > ceil(detailFont.lineHeight) + 0.5f;
+    CGFloat center;
+    if (layout.expanded) {
+        detailSize = VCSettingsTextSize(detail, detailFont, detailWidth);
+        CGFloat headerHeight = MAX(24.0f, MAX(accessory.height, titleSize.height));
+        CGFloat detailTop = 8.0f + headerHeight + ([detail length] ? 4.0f : 0.0f);
+        layout.height = MAX(44.0f, ceil(detailTop + detailSize.height + 8.0f));
+        center = 8.0f + headerHeight * 0.5f;
+        layout.title = CGRectMake(textLeft, center - titleSize.height * 0.5f, titleWidth, titleSize.height);
+        layout.detail = CGRectMake(textLeft, detailTop, detailWidth, detailSize.height);
+    } else {
+        CGFloat textHeight = titleSize.height + detailSize.height;
+        layout.height = MAX(44.0f, ceil(MAX(accessory.height + 8.0f, textHeight + 6.0f)));
+        center = layout.height * 0.5f;
+        layout.title = CGRectMake(textLeft, center - textHeight * 0.5f, titleWidth, titleSize.height);
+        layout.detail = CGRectMake(textLeft, center - textHeight * 0.5f + titleSize.height, titleWidth, detailSize.height);
+    }
+    layout.icon = CGRectMake(inset, center - 12.0f, 24.0f, 24.0f);
+    if (accessory.width > 0.0f) {
+        layout.accessory = CGRectMake(width - inset - accessory.width, center - accessory.height * 0.5f,
+                                     accessory.width, accessory.height);
+    }
+    return layout;
+}
+
+@interface VCSettingsTableCell : UITableViewCell {
+    VCSettingsIconType _settingsIconType;
+    UIColor *_settingsIconColor;
+    CGFloat _settingsIconScale;
+    UILabel *_settingsTitleLabel, *_settingsDetailLabel;
+    VCSettingsRowLayout _settingsRowLayout;
+    CGFloat _settingsLayoutWidth, _settingsTextLeft, _settingsRightInset;
+    CGSize _settingsAccessorySize;
+    BOOL _settingsLayoutValid;
+}
+- (void)applySettingsIcon:(VCSettingsIconType)icon;
+- (void)applyAdaptiveTitle:(NSString *)title detail:(NSString *)detail;
+- (CGFloat)settingsTextLeft;
+- (CGFloat)settingsRightInset;
+@end
+
+@implementation VCSettingsTableCell
+
+- (void)applySettingsIcon:(VCSettingsIconType)icon {
+    UIColor *color = VCAccentColor();
+    CGFloat scale = [UIScreen mainScreen].scale;
+    if (self.imageView.image && _settingsIconType == icon &&
+        [_settingsIconColor isEqual:color] && _settingsIconScale == scale) return;
+    self.imageView.image = VCSettingsIconImage(icon);
+    self.imageView.isAccessibilityElement = NO;
+    [_settingsIconColor release];
+    _settingsIconColor = [color retain];
+    _settingsIconType = icon;
+    _settingsIconScale = scale;
+}
+
+- (void)layoutSubviews {
+    [super layoutSubviews];
+    if (!_settingsTitleLabel || !_settingsDetailLabel) return;
+    CGRect nativeTitle = [self.textLabel convertRect:self.textLabel.bounds toView:self];
+    CGRect nativeIcon = [self.imageView convertRect:self.imageView.bounds toView:self];
+    CGFloat width = self.bounds.size.width;
+    CGFloat left = nativeTitle.origin.x;
+    CGFloat inset = self.imageView.image ? nativeIcon.origin.x : left;
+    CGSize accessory = self.accessoryView ? self.accessoryView.bounds.size :
+        CGSizeMake(self.accessoryType == UITableViewCellAccessoryCheckmark ? 24.0f : 0.0f,
+                   self.accessoryType == UITableViewCellAccessoryCheckmark ? 24.0f : 0.0f);
+    if (!_settingsLayoutValid || _settingsLayoutWidth != width || _settingsTextLeft != left ||
+        _settingsRightInset != inset || !CGSizeEqualToSize(_settingsAccessorySize, accessory)) {
+        _settingsRowLayout = VCSettingsMeasureRow(width, left, inset, accessory,
+            _settingsTitleLabel.text, _settingsTitleLabel.font, _settingsDetailLabel.text, _settingsDetailLabel.font);
+        _settingsLayoutWidth = width;
+        _settingsTextLeft = left;
+        _settingsRightInset = inset;
+        _settingsAccessorySize = accessory;
+        _settingsLayoutValid = YES;
+    }
+    CGFloat offset = MAX(0.0f, (self.bounds.size.height - _settingsRowLayout.height) * 0.5f);
+    CGRect title = _settingsRowLayout.title, detail = _settingsRowLayout.detail;
+    title.origin.y += offset;
+    detail.origin.y += offset;
+    _settingsTitleLabel.frame = title;
+    _settingsDetailLabel.frame = detail;
+    if (title.size.width <= 0.0f) return;
+    CGRect icon = _settingsRowLayout.icon;
+    icon.origin.y += offset;
+    self.imageView.frame = [self.imageView.superview convertRect:icon fromView:self];
+    if (self.accessoryView) {
+        CGRect frame = _settingsRowLayout.accessory;
+        frame.origin.y += offset;
+        self.accessoryView.frame = [self.accessoryView.superview convertRect:frame fromView:self];
+    }
+}
+
+- (void)applyAdaptiveTitle:(NSString *)title detail:(NSString *)detail {
+    if (!_settingsTitleLabel) {
+        _settingsTitleLabel = [[UILabel alloc] initWithFrame:CGRectZero];
+        _settingsDetailLabel = [[UILabel alloc] initWithFrame:CGRectZero];
+        for (UILabel *label in [NSArray arrayWithObjects:_settingsTitleLabel, _settingsDetailLabel, nil]) {
+            label.backgroundColor = [UIColor clearColor];
+            label.userInteractionEnabled = NO;
+            label.isAccessibilityElement = NO;
+            label.numberOfLines = 0;
+            label.lineBreakMode = NSLineBreakByWordWrapping;
+            label.adjustsFontSizeToFitWidth = NO;
+            [self addSubview:label];
+        }
+    }
+    if (![_settingsTitleLabel.text isEqualToString:title] || ![_settingsDetailLabel.text isEqualToString:detail] ||
+        ![_settingsTitleLabel.font isEqual:self.textLabel.font] || ![_settingsDetailLabel.font isEqual:self.detailTextLabel.font]) {
+        _settingsLayoutValid = NO;
+    }
+    _settingsTitleLabel.font = self.textLabel.font;
+    _settingsDetailLabel.font = self.detailTextLabel.font;
+    _settingsTitleLabel.text = title;
+    _settingsDetailLabel.text = detail;
+    _settingsTitleLabel.textColor = _settingsTitleLabel.highlightedTextColor = VCPrimaryTextColor();
+    _settingsDetailLabel.textColor = _settingsDetailLabel.highlightedTextColor = VCSecondaryTextColor();
+    _settingsTitleLabel.hidden = ![title length];
+    _settingsDetailLabel.hidden = ![detail length];
+    self.textLabel.textColor = self.detailTextLabel.textColor = [UIColor clearColor];
+    self.textLabel.highlightedTextColor = self.detailTextLabel.highlightedTextColor = [UIColor clearColor];
+    [self setNeedsLayout];
+}
+
+- (CGFloat)settingsTextLeft {
+    return _settingsTextLeft;
+}
+
+- (CGFloat)settingsRightInset {
+    return _settingsRightInset;
+}
+
+- (void)prepareForReuse {
+    [super prepareForReuse];
+    _settingsTitleLabel.text = _settingsDetailLabel.text = @"";
+    _settingsTitleLabel.hidden = _settingsDetailLabel.hidden = YES;
+    _settingsLayoutValid = NO;
+}
+
+- (void)dealloc {
+    [_settingsIconColor release];
+    [_settingsTitleLabel release];
+    [_settingsDetailLabel release];
+    [super dealloc];
+}
+
+@end
 
 static void VCApplyStaticSettingsCell(UITableViewCell *cell, NSString *title, NSString *detail) {
     if (!cell) return;
@@ -40,6 +216,10 @@ static void VCApplySettingsCell(UITableViewCell *cell, NSString *title, NSString
     NSString *detailText = cell.detailTextLabel.text;
     UIColor *titleColor = cell.textLabel.textColor;
     UIColor *detailColor = cell.detailTextLabel.textColor;
+    if ([cell isKindOfClass:[VCSettingsTableCell class]]) {
+        [(VCSettingsTableCell *)cell applyAdaptiveTitle:titleText detail:detailText];
+        return;
+    }
     [cell setNeedsLayout];
     [cell layoutIfNeeded];
 
@@ -591,6 +771,80 @@ static void VCApplySettingsCell(UITableViewCell *cell, NSString *title, NSString
 @synthesize automaticUpdateChecks = _automaticUpdateChecks;
 @synthesize delegate = _delegate;
 
+- (void)prepareSettingsMetricsForTable:(UITableView *)tableView {
+    CGFloat width = tableView.bounds.size.width;
+    if (width <= 0.0f || !isfinite(width)) return;
+    if (!_settingsSizingCell) {
+        _settingsSizingCell = [[UITableViewCell alloc] initWithStyle:UITableViewCellStyleSubtitle reuseIdentifier:nil];
+        _settingsSizingCell.imageView.image = VCSettingsIconImage(VCSettingsIconAutoUpdate);
+        _settingsSizingCell.textLabel.text = @"Settings";
+        _settingsSizingCell.detailTextLabel.text = @"Settings";
+    }
+    if (_settingsTableWidth == width) return;
+    _settingsTableWidth = width;
+    _settingsSizingCell.frame = CGRectMake(0.0f, 0.0f, width, 44.0f);
+    [_settingsSizingCell setNeedsLayout];
+    [_settingsSizingCell layoutIfNeeded];
+    CGRect title = [_settingsSizingCell.textLabel convertRect:_settingsSizingCell.textLabel.bounds toView:_settingsSizingCell];
+    CGRect icon = [_settingsSizingCell.imageView convertRect:_settingsSizingCell.imageView.bounds toView:_settingsSizingCell];
+    _settingsRowWidth = width;
+    _settingsTextLeft = title.origin.x;
+    _settingsRightInset = icon.origin.x;
+}
+
+- (void)scheduleSettingsHeightRefresh {
+    if (_settingsHeightRefreshPending) return;
+    _settingsHeightRefreshPending = YES;
+    [self performSelector:@selector(refreshSettingsRowHeights) withObject:nil afterDelay:0.0];
+}
+
+- (void)refreshSettingsRowHeights {
+    _settingsHeightRefreshPending = NO;
+    BOOL animations = [UIView areAnimationsEnabled];
+    [UIView setAnimationsEnabled:NO];
+    [_tableView beginUpdates];
+    [_tableView endUpdates];
+    [UIView setAnimationsEnabled:animations];
+}
+
+- (void)recordSettingsMetricsFromCell:(VCSettingsTableCell *)cell {
+    CGFloat width = cell.bounds.size.width, left = [cell settingsTextLeft], inset = [cell settingsRightInset];
+    if (width <= 0.0f || left <= 0.0f || inset < 0.0f) return;
+    if (fabs(_settingsRowWidth - width) < 0.01f && fabs(_settingsTextLeft - left) < 0.01f &&
+        fabs(_settingsRightInset - inset) < 0.01f) return;
+    _settingsRowWidth = width;
+    _settingsTextLeft = left;
+    _settingsRightInset = inset;
+    [self scheduleSettingsHeightRefresh];
+}
+
+- (CGSize)settingsAccessorySizeForIndexPath:(NSIndexPath *)indexPath {
+    UIView *accessory = nil;
+    if (indexPath.section == 0) {
+        if (indexPath.row == 0) accessory = _autoUpdateSwitch;
+        else if (indexPath.row == 1) accessory = _preserveCustomNamesSwitch;
+        else if (indexPath.row == 2) accessory = _stealthSwitch;
+        else if (indexPath.row == 3) accessory = _sortSubscriptionsByPingSwitch;
+    } else if (indexPath.section == 1 && indexPath.row == 3) accessory = _useXmuxSwitch;
+    else if (indexPath.section == 3 && indexPath.row == 0) accessory = _automaticUpdateChecksSwitch;
+    else if (indexPath.section == 5) accessory = _preferGitHubLegacySwitch;
+    if (accessory) return accessory.bounds.size;
+    if (indexPath.section == 2 && indexPath.row < 2) {
+        BOOL checked = _darkTheme == (indexPath.row == 1);
+        return checked ? CGSizeMake(24.0f, 24.0f) : CGSizeZero;
+    }
+    return CGSizeMake(20.0f, 20.0f);
+}
+
+- (CGFloat)tableView:(UITableView *)tableView heightForRowAtIndexPath:(NSIndexPath *)indexPath {
+    [self prepareSettingsMetricsForTable:tableView];
+    VCSettingsRowLayout layout = VCSettingsMeasureRow(_settingsRowWidth, _settingsTextLeft, _settingsRightInset,
+        [self settingsAccessorySizeForIndexPath:indexPath], [self settingsTitleTextForIndexPath:indexPath],
+        _settingsSizingCell.textLabel.font, [self settingsDetailTextForIndexPath:indexPath],
+        _settingsSizingCell.detailTextLabel.font);
+    return layout.height;
+}
+
 - (void)closePressed {
     VCRecordAppEvent(@"ui", @"Settings closed", nil);
     [self dismissViewControllerAnimated:YES completion:nil];
@@ -848,6 +1102,24 @@ static void VCApplySettingsCell(UITableViewCell *cell, NSString *title, NSString
     if (fabs(_footerWidth - width) > 0.5f) {
         [self updateSettingsFooterForWidth:width];
     }
+    if (_settingsVisibleTableWidth != width) {
+        _settingsVisibleTableWidth = width;
+        [self prepareSettingsMetricsForTable:_tableView];
+        [_tableView layoutIfNeeded];
+        for (NSIndexPath *indexPath in [_tableView indexPathsForVisibleRows]) {
+            VCSettingsTableCell *cell = (VCSettingsTableCell *)[_tableView cellForRowAtIndexPath:indexPath];
+            [cell setNeedsLayout];
+            [cell layoutIfNeeded];
+            [self recordSettingsMetricsFromCell:cell];
+        }
+        [self scheduleSettingsHeightRefresh];
+    }
+}
+
+- (void)viewWillDisappear:(BOOL)animated {
+    [NSObject cancelPreviousPerformRequestsWithTarget:self selector:@selector(refreshSettingsRowHeights) object:nil];
+    _settingsHeightRefreshPending = NO;
+    [super viewWillDisappear:animated];
 }
 
 - (void)viewDidAppear:(BOOL)animated {
@@ -859,9 +1131,7 @@ static void VCApplySettingsCell(UITableViewCell *cell, NSString *title, NSString
     for (NSIndexPath *indexPath in [_tableView indexPathsForVisibleRows]) {
         UITableViewCell *cell = [_tableView cellForRowAtIndexPath:indexPath];
         if (!cell) continue;
-        [self applySettingsMarqueesToCell:cell
-                                    title:[self settingsTitleTextForIndexPath:indexPath]
-                                   detail:[self settingsDetailTextForIndexPath:indexPath]];
+        [self applySettingsCell:cell atIndexPath:indexPath];
     }
 }
 
@@ -891,10 +1161,10 @@ static void VCApplySettingsCell(UITableViewCell *cell, NSString *title, NSString
     return @"About";
 }
 
-- (void)applySettingsMarqueesToCell:(UITableViewCell *)cell
-                               title:(NSString *)title
-                              detail:(NSString *)detail {
-    VCApplySettingsCell(cell,title,detail);
+- (void)applySettingsCell:(UITableViewCell *)cell atIndexPath:(NSIndexPath *)indexPath {
+    [(VCSettingsTableCell *)cell applySettingsIcon:VCSettingsIconForRow(indexPath.section, indexPath.row)];
+    VCApplySettingsCell(cell, [self settingsTitleTextForIndexPath:indexPath],
+                        [self settingsDetailTextForIndexPath:indexPath]);
 }
 
 - (NSString *)settingsTitleTextForIndexPath:(NSIndexPath *)indexPath {
@@ -1024,14 +1294,12 @@ static void VCApplySettingsCell(UITableViewCell *cell, NSString *title, NSString
         static NSString *kSwitchCellId = @"SettingsSwitchCell";
         UITableViewCell *cell = [tableView dequeueReusableCellWithIdentifier:kSwitchCellId];
         if (!cell) {
-            cell = [[[UITableViewCell alloc] initWithStyle:UITableViewCellStyleSubtitle reuseIdentifier:kSwitchCellId] autorelease];
+            cell = [[[VCSettingsTableCell alloc] initWithStyle:UITableViewCellStyleSubtitle reuseIdentifier:kSwitchCellId] autorelease];
         }
         cell.selectionStyle = UITableViewCellSelectionStyleNone;
         [_autoUpdateSwitch setOn:_autoUpdate animated:NO];
         cell.accessoryView = _autoUpdateSwitch;
-        [self applySettingsMarqueesToCell:cell
-                                    title:@"Auto-update subscriptions"
-                                   detail:@"Refresh subscriptions on app open"];
+        [self applySettingsCell:cell atIndexPath:indexPath];
         return cell;
     }
 
@@ -1039,15 +1307,13 @@ static void VCApplySettingsCell(UITableViewCell *cell, NSString *title, NSString
         static NSString *kPreserveCustomNamesCellId = @"SettingsPreserveCustomNamesCell";
         UITableViewCell *cell = [tableView dequeueReusableCellWithIdentifier:kPreserveCustomNamesCellId];
         if (!cell) {
-            cell = [[[UITableViewCell alloc] initWithStyle:UITableViewCellStyleSubtitle
+            cell = [[[VCSettingsTableCell alloc] initWithStyle:UITableViewCellStyleSubtitle
                                            reuseIdentifier:kPreserveCustomNamesCellId] autorelease];
         }
         cell.selectionStyle = UITableViewCellSelectionStyleNone;
         [_preserveCustomNamesSwitch setOn:_preserveCustomNames animated:NO];
         cell.accessoryView = _preserveCustomNamesSwitch;
-        [self applySettingsMarqueesToCell:cell
-                                    title:@"Preserve custom names"
-                                   detail:@"Keep renamed subscriptions after updates"];
+        [self applySettingsCell:cell atIndexPath:indexPath];
         return cell;
     }
 
@@ -1055,14 +1321,12 @@ static void VCApplySettingsCell(UITableViewCell *cell, NSString *title, NSString
         static NSString *kStealthCellId = @"SettingsStealthCell";
         UITableViewCell *cell = [tableView dequeueReusableCellWithIdentifier:kStealthCellId];
         if (!cell) {
-            cell = [[[UITableViewCell alloc] initWithStyle:UITableViewCellStyleSubtitle reuseIdentifier:kStealthCellId] autorelease];
+            cell = [[[VCSettingsTableCell alloc] initWithStyle:UITableViewCellStyleSubtitle reuseIdentifier:kStealthCellId] autorelease];
         }
         cell.selectionStyle = UITableViewCellSelectionStyleNone;
         [_stealthSwitch setOn:_stealthMode animated:NO];
         cell.accessoryView = _stealthSwitch;
-        [self applySettingsMarqueesToCell:cell
-                                    title:@"Stealth mode"
-                                   detail:@"Hide links in configs and subscriptions"];
+        [self applySettingsCell:cell atIndexPath:indexPath];
         return cell;
     }
 
@@ -1070,23 +1334,23 @@ static void VCApplySettingsCell(UITableViewCell *cell, NSString *title, NSString
         static NSString *kPingSortCellId = @"SettingsPingSortCell";
         UITableViewCell *cell = [tableView dequeueReusableCellWithIdentifier:kPingSortCellId];
         if (!cell) {
-            cell = [[[UITableViewCell alloc] initWithStyle:UITableViewCellStyleSubtitle reuseIdentifier:kPingSortCellId] autorelease];
+            cell = [[[VCSettingsTableCell alloc] initWithStyle:UITableViewCellStyleSubtitle reuseIdentifier:kPingSortCellId] autorelease];
         }
         cell.selectionStyle = UITableViewCellSelectionStyleNone;
         [_sortSubscriptionsByPingSwitch setOn:_sortSubscriptionsByPing animated:NO];
         cell.accessoryView = _sortSubscriptionsByPingSwitch;
-        [self applySettingsMarqueesToCell:cell title:[self settingsTitleTextForIndexPath:indexPath] detail:[self settingsDetailTextForIndexPath:indexPath]];
+        [self applySettingsCell:cell atIndexPath:indexPath];
         return cell;
     }
 
     if (indexPath.section == 1 && indexPath.row == 3) {
         static NSString *identifier = @"SettingsUseXmuxCell";
         UITableViewCell *cell = [tableView dequeueReusableCellWithIdentifier:identifier];
-        if (!cell) cell = [[[UITableViewCell alloc] initWithStyle:UITableViewCellStyleSubtitle reuseIdentifier:identifier] autorelease];
+        if (!cell) cell = [[[VCSettingsTableCell alloc] initWithStyle:UITableViewCellStyleSubtitle reuseIdentifier:identifier] autorelease];
         cell.selectionStyle = UITableViewCellSelectionStyleNone;
         [_useXmuxSwitch setOn:_useXmux animated:NO];
         cell.accessoryView = _useXmuxSwitch;
-        [self applySettingsMarqueesToCell:cell title:[self settingsTitleTextForIndexPath:indexPath] detail:[self settingsDetailTextForIndexPath:indexPath]];
+        [self applySettingsCell:cell atIndexPath:indexPath];
         return cell;
     }
 
@@ -1094,15 +1358,13 @@ static void VCApplySettingsCell(UITableViewCell *cell, NSString *title, NSString
         static NSString *kNetworkCellId = @"SettingsNetworkCell";
         UITableViewCell *cell = [tableView dequeueReusableCellWithIdentifier:kNetworkCellId];
         if (!cell) {
-            cell = [[[UITableViewCell alloc] initWithStyle:UITableViewCellStyleSubtitle
+            cell = [[[VCSettingsTableCell alloc] initWithStyle:UITableViewCellStyleSubtitle
                                            reuseIdentifier:kNetworkCellId] autorelease];
         }
         cell.selectionStyle = UITableViewCellSelectionStyleBlue;
         cell.accessoryType = UITableViewCellAccessoryNone;
         cell.accessoryView = VCCreateDisclosureAccessoryView();
-        [self applySettingsMarqueesToCell:cell
-                                    title:[self settingsTitleTextForIndexPath:indexPath]
-                                   detail:[self settingsDetailTextForIndexPath:indexPath]];
+        [self applySettingsCell:cell atIndexPath:indexPath];
         return cell;
     }
 
@@ -1110,25 +1372,19 @@ static void VCApplySettingsCell(UITableViewCell *cell, NSString *title, NSString
         static NSString *kThemeCellId = @"SettingsThemeCell";
         UITableViewCell *cell = [tableView dequeueReusableCellWithIdentifier:kThemeCellId];
         if (!cell) {
-            cell = [[[UITableViewCell alloc] initWithStyle:UITableViewCellStyleSubtitle reuseIdentifier:kThemeCellId] autorelease];
+            cell = [[[VCSettingsTableCell alloc] initWithStyle:UITableViewCellStyleSubtitle reuseIdentifier:kThemeCellId] autorelease];
         }
         cell.selectionStyle = UITableViewCellSelectionStyleBlue;
-        cell.imageView.image = nil;
         if (indexPath.row == 2) {
             cell.accessoryType = UITableViewCellAccessoryNone;
             cell.accessoryView = VCCreateDisclosureAccessoryView();
-            cell.imageView.image = VCAppearanceAccentSwatchImage(VCAccentColor());
-            [self applySettingsMarqueesToCell:cell
-                                        title:@"Accent Color"
-                                       detail:VCAppearanceAccentName()];
+            [self applySettingsCell:cell atIndexPath:indexPath];
         } else {
             BOOL darkRow = (indexPath.row == 1);
             cell.accessoryView = nil;
             cell.accessoryType = (_darkTheme == darkRow) ? UITableViewCellAccessoryCheckmark
                                                          : UITableViewCellAccessoryNone;
-            [self applySettingsMarqueesToCell:cell
-                                        title:(darkRow ? @"Dark" : @"Light")
-                                       detail:(darkRow ? @"Use the dark color scheme" : @"Use the light color scheme")];
+            [self applySettingsCell:cell atIndexPath:indexPath];
         }
         return cell;
     }
@@ -1137,16 +1393,14 @@ static void VCApplySettingsCell(UITableViewCell *cell, NSString *title, NSString
         static NSString *kAutomaticChecksCellId = @"SettingsAutomaticChecksCell";
         UITableViewCell *cell = [tableView dequeueReusableCellWithIdentifier:kAutomaticChecksCellId];
         if (!cell) {
-            cell = [[[UITableViewCell alloc] initWithStyle:UITableViewCellStyleSubtitle
+            cell = [[[VCSettingsTableCell alloc] initWithStyle:UITableViewCellStyleSubtitle
                                            reuseIdentifier:kAutomaticChecksCellId] autorelease];
         }
         cell.selectionStyle = UITableViewCellSelectionStyleNone;
         [_automaticUpdateChecksSwitch setOn:_automaticUpdateChecks animated:NO];
         cell.accessoryType = UITableViewCellAccessoryNone;
         cell.accessoryView = _automaticUpdateChecksSwitch;
-        [self applySettingsMarqueesToCell:cell
-                                    title:@"Automatic checks"
-                                   detail:@"Check for new releases once a day"];
+        [self applySettingsCell:cell atIndexPath:indexPath];
         return cell;
     }
 
@@ -1154,7 +1408,7 @@ static void VCApplySettingsCell(UITableViewCell *cell, NSString *title, NSString
         static NSString *kUpdateCellId = @"SettingsUpdateCell";
         UITableViewCell *cell = [tableView dequeueReusableCellWithIdentifier:kUpdateCellId];
         if (!cell) {
-            cell = [[[UITableViewCell alloc] initWithStyle:UITableViewCellStyleSubtitle reuseIdentifier:kUpdateCellId] autorelease];
+            cell = [[[VCSettingsTableCell alloc] initWithStyle:UITableViewCellStyleSubtitle reuseIdentifier:kUpdateCellId] autorelease];
         }
         cell.selectionStyle = _updateChecker ? UITableViewCellSelectionStyleNone
                                              : UITableViewCellSelectionStyleBlue;
@@ -1169,9 +1423,7 @@ static void VCApplySettingsCell(UITableViewCell *cell, NSString *title, NSString
         } else {
             cell.accessoryView = VCCreateDisclosureAccessoryView();
         }
-        [self applySettingsMarqueesToCell:cell
-                                    title:@"Check for Updates"
-                                   detail:[self updateCheckDetailText]];
+        [self applySettingsCell:cell atIndexPath:indexPath];
         return cell;
     }
 
@@ -1179,14 +1431,12 @@ static void VCApplySettingsCell(UITableViewCell *cell, NSString *title, NSString
         static NSString *kDebugCellId = @"SettingsDebugCell";
         UITableViewCell *cell = [tableView dequeueReusableCellWithIdentifier:kDebugCellId];
         if (!cell) {
-            cell = [[[UITableViewCell alloc] initWithStyle:UITableViewCellStyleSubtitle reuseIdentifier:kDebugCellId] autorelease];
+            cell = [[[VCSettingsTableCell alloc] initWithStyle:UITableViewCellStyleSubtitle reuseIdentifier:kDebugCellId] autorelease];
         }
         cell.selectionStyle = UITableViewCellSelectionStyleBlue;
         cell.accessoryType = UITableViewCellAccessoryNone;
         cell.accessoryView = VCCreateDisclosureAccessoryView();
-        [self applySettingsMarqueesToCell:cell
-                                    title:@"Debug and diagnostics"
-                                   detail:@"Live state, connection tests, events and reports"];
+        [self applySettingsCell:cell atIndexPath:indexPath];
         return cell;
     }
 
@@ -1194,16 +1444,14 @@ static void VCApplySettingsCell(UITableViewCell *cell, NSString *title, NSString
         static NSString *kGitHubLegacyCellId = @"SettingsGitHubLegacyCell";
         UITableViewCell *cell = [tableView dequeueReusableCellWithIdentifier:kGitHubLegacyCellId];
         if (!cell) {
-            cell = [[[UITableViewCell alloc] initWithStyle:UITableViewCellStyleSubtitle
+            cell = [[[VCSettingsTableCell alloc] initWithStyle:UITableViewCellStyleSubtitle
                                            reuseIdentifier:kGitHubLegacyCellId] autorelease];
         }
         cell.selectionStyle = UITableViewCellSelectionStyleNone;
         cell.accessoryType = UITableViewCellAccessoryNone;
         [_preferGitHubLegacySwitch setOn:VCPreferGitHubLegacy() animated:NO];
         cell.accessoryView = _preferGitHubLegacySwitch;
-        [self applySettingsMarqueesToCell:cell
-                                    title:@"Prefer GitHub Legacy"
-                                   detail:@"Open GitHub links in the app before the browser"];
+        [self applySettingsCell:cell atIndexPath:indexPath];
         return cell;
     }
 
@@ -1211,14 +1459,12 @@ static void VCApplySettingsCell(UITableViewCell *cell, NSString *title, NSString
         static NSString *kAboutCellId = @"SettingsAboutCell";
         UITableViewCell *cell = [tableView dequeueReusableCellWithIdentifier:kAboutCellId];
         if (!cell) {
-            cell = [[[UITableViewCell alloc] initWithStyle:UITableViewCellStyleSubtitle reuseIdentifier:kAboutCellId] autorelease];
+            cell = [[[VCSettingsTableCell alloc] initWithStyle:UITableViewCellStyleSubtitle reuseIdentifier:kAboutCellId] autorelease];
         }
         cell.selectionStyle = UITableViewCellSelectionStyleBlue;
         cell.accessoryType = UITableViewCellAccessoryNone;
         cell.accessoryView = VCCreateDisclosureAccessoryView();
-        [self applySettingsMarqueesToCell:cell
-                                    title:@"About vless-core"
-                                   detail:@"Version and core binary info"];
+        [self applySettingsCell:cell atIndexPath:indexPath];
         return cell;
     }
 
@@ -1226,14 +1472,12 @@ static void VCApplySettingsCell(UITableViewCell *cell, NSString *title, NSString
         static NSString *kCreditsCellId = @"SettingsCreditsCell";
         UITableViewCell *cell = [tableView dequeueReusableCellWithIdentifier:kCreditsCellId];
         if (!cell) {
-            cell = [[[UITableViewCell alloc] initWithStyle:UITableViewCellStyleSubtitle reuseIdentifier:kCreditsCellId] autorelease];
+            cell = [[[VCSettingsTableCell alloc] initWithStyle:UITableViewCellStyleSubtitle reuseIdentifier:kCreditsCellId] autorelease];
         }
         cell.selectionStyle = UITableViewCellSelectionStyleBlue;
         cell.accessoryType = UITableViewCellAccessoryNone;
         cell.accessoryView = VCCreateDisclosureAccessoryView();
-        [self applySettingsMarqueesToCell:cell
-                                    title:@"Credits"
-                                   detail:@"Dependencies, licenses and special thanks"];
+        [self applySettingsCell:cell atIndexPath:indexPath];
         return cell;
     }
 
@@ -1241,36 +1485,33 @@ static void VCApplySettingsCell(UITableViewCell *cell, NSString *title, NSString
         static NSString *kFAQCellId = @"SettingsFAQCell";
         UITableViewCell *cell = [tableView dequeueReusableCellWithIdentifier:kFAQCellId];
         if (!cell) {
-            cell = [[[UITableViewCell alloc] initWithStyle:UITableViewCellStyleSubtitle reuseIdentifier:kFAQCellId] autorelease];
+            cell = [[[VCSettingsTableCell alloc] initWithStyle:UITableViewCellStyleSubtitle reuseIdentifier:kFAQCellId] autorelease];
         }
         cell.selectionStyle = UITableViewCellSelectionStyleBlue;
         cell.accessoryType = UITableViewCellAccessoryNone;
         cell.accessoryView = VCCreateDisclosureAccessoryView();
-        [self applySettingsMarqueesToCell:cell
-                                    title:@"FAQ"
-                                   detail:@"Common questions and quick answers"];
+        [self applySettingsCell:cell atIndexPath:indexPath];
         return cell;
     }
 
     static NSString *kGitHubCellId = @"SettingsGitHubCell";
     UITableViewCell *cell = [tableView dequeueReusableCellWithIdentifier:kGitHubCellId];
     if (!cell) {
-        cell = [[[UITableViewCell alloc] initWithStyle:UITableViewCellStyleSubtitle reuseIdentifier:kGitHubCellId] autorelease];
+        cell = [[[VCSettingsTableCell alloc] initWithStyle:UITableViewCellStyleSubtitle reuseIdentifier:kGitHubCellId] autorelease];
     }
     cell.selectionStyle = UITableViewCellSelectionStyleBlue;
     cell.accessoryType = UITableViewCellAccessoryNone;
     cell.accessoryView = VCCreateDisclosureAccessoryView();
-    [self applySettingsMarqueesToCell:cell
-                                title:@"Project on GitHub"
-                               detail:@"github.com/notfence/vless-core-app"];
+    [self applySettingsCell:cell atIndexPath:indexPath];
     return cell;
 }
 
 - (void)tableView:(UITableView *)tableView willDisplayCell:(UITableViewCell *)cell forRowAtIndexPath:(NSIndexPath *)indexPath {
     (void)tableView;
-    [self applySettingsMarqueesToCell:cell
-                                title:[self settingsTitleTextForIndexPath:indexPath]
-                               detail:[self settingsDetailTextForIndexPath:indexPath]];
+    [self applySettingsCell:cell atIndexPath:indexPath];
+    [cell setNeedsLayout];
+    [cell layoutIfNeeded];
+    [self recordSettingsMetricsFromCell:(VCSettingsTableCell *)cell];
 }
 
 - (void)tableView:(UITableView *)tableView willDisplayHeaderView:(UIView *)view forSection:(NSInteger)section {
@@ -1369,6 +1610,8 @@ static void VCApplySettingsCell(UITableViewCell *cell, NSString *title, NSString
 
 - (void)dealloc {
     _updateChecker.delegate = nil;
+    [NSObject cancelPreviousPerformRequestsWithTarget:self selector:@selector(refreshSettingsRowHeights) object:nil];
+    [_settingsSizingCell release];
     [_updateChecker release];
     [_availableReleaseURL release];
     [_tableView release];

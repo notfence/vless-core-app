@@ -106,8 +106,28 @@ def main():
     marquee_settings_cell = settings_source.split('static void VCApplySettingsCell(', 1)[1].split('\n}', 1)[0]
     if 'VCApplyStaticSettingsCell(cell,title,detail);' not in marquee_settings_cell or 'VCSettingsMarqueeForCell(' not in marquee_settings_cell:
         raise AssertionError('app/main-settings-must-keep-marquee-on-top-of-shared-native-style')
-    if 'VCApplySettingsCell(cell,title,detail);' not in parent_settings:
+    if 'VCApplySettingsCell(' not in parent_settings:
         raise AssertionError('app/ping-and-main-settings-must-share-one-card-renderer')
+    settings_apply = parent_settings.split('- (void)applySettingsCell:', 1)[1].split('\n}', 1)[0]
+    if settings_apply.index('applySettingsIcon:') > settings_apply.index('VCApplySettingsCell('):
+        raise AssertionError('app/settings-icons-must-reserve-space-before-text-layout')
+    settings_rows = parent_settings.split('- (UITableViewCell *)tableView:(UITableView *)tableView cellForRowAtIndexPath:', 1)[1].split('\n}', 1)[0]
+    if 'UITableViewCell alloc' in settings_rows or 'VCSettingsTableCell alloc' not in settings_rows or 'cell.imageView.image =' in settings_rows:
+        raise AssertionError('app/settings-rows-must-use-icon-cells-without-overriding-their-images')
+    settings_display = parent_settings.split('willDisplayCell:', 1)[1].split('\n}', 1)[0]
+    if 'applySettingsCell:cell atIndexPath:indexPath' not in settings_display or 'applySettingsIcon:' in ping_settings:
+        raise AssertionError('app/settings-icons-must-refresh-visible-rows-without-changing-ping-submenu')
+    settings_height = parent_settings.split('heightForRowAtIndexPath:', 1)[1].split('\n}', 1)[0]
+    settings_cell = settings_source.split('@implementation VCSettingsTableCell', 1)[1].split('@end', 1)[0]
+    if 'VCSettingsMeasureRow(' not in settings_height or 'VCSettingsMeasureRow(' not in settings_cell:
+        raise AssertionError('app/settings-height-and-layout-must-share-one-measurement')
+    if 'applyAdaptiveTitle:titleText detail:detailText' not in settings_source or 'label.numberOfLines = 0' not in settings_cell or 'label.userInteractionEnabled = NO' not in settings_cell:
+        raise AssertionError('app/settings-labels-must-wrap-without-intercepting-controls')
+    if 'recordSettingsMetricsFromCell:' not in settings_display or 'cancelPreviousPerformRequestsWithTarget:self selector:@selector(refreshSettingsRowHeights)' not in parent_settings:
+        raise AssertionError('app/settings-height-refresh-must-use-real-row-metrics-and-stop-on-leaving')
+    settings_viewport = parent_settings.split('- (void)viewDidLayoutSubviews {', 1)[1].split('\n}', 1)[0]
+    if '_settingsVisibleTableWidth != width' not in settings_viewport or settings_viewport.index('[_tableView layoutIfNeeded]') > settings_viewport.index('recordSettingsMetricsFromCell:'):
+        raise AssertionError('app/settings-rotation-must-measure-updated-real-cell-frames')
     for required in ('UISlider alloc', 'kVCPingTimeoutMinimumSeconds', 'kVCPingTimeoutMaximumSeconds', 'VCNormalizedPingTimeoutSeconds', 'kDefaultsPingTimeoutSecondsKey', 'UIControlEventTouchUpInside', 'UIControlEventTouchUpOutside', 'UIControlEventTouchCancel'):
         if required not in ping_settings:
             raise AssertionError('app/ping-timeout-slider-must-be-bounded-snapped-and-saved-after-drag')

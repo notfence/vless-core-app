@@ -40,6 +40,8 @@ HOST_TESTS += $(HOST_BUILD_DIR)/test_main_network
 HOST_TESTS += $(HOST_BUILD_DIR)/test_temp_probe
 HOST_TESTS += $(HOST_BUILD_DIR)/test_temp_spawn $(HOST_BUILD_DIR)/test_probe_log
 HOST_TESTS += $(HOST_BUILD_DIR)/test_main_images
+HOST_TESTS += $(HOST_BUILD_DIR)/test_settings_icons
+HOST_TESTS += $(HOST_BUILD_DIR)/test_settings_layout
 HOST_TESTS += $(HOST_BUILD_DIR)/test_main_detail
 HOST_TESTS += $(HOST_BUILD_DIR)/test_main_headers
 HOST_TESTS += $(HOST_BUILD_DIR)/test_main_layout
@@ -85,6 +87,8 @@ test: requirements $(HOST_TESTS)
 	$(HOST_BUILD_DIR)/test_temp_spawn
 	$(HOST_BUILD_DIR)/test_probe_log
 	$(HOST_BUILD_DIR)/test_main_images
+	$(HOST_BUILD_DIR)/test_settings_icons
+	$(HOST_BUILD_DIR)/test_settings_layout
 	$(HOST_BUILD_DIR)/test_main_detail
 	$(HOST_BUILD_DIR)/test_main_headers
 	$(HOST_BUILD_DIR)/test_main_layout
@@ -207,6 +211,32 @@ $(HOST_BUILD_DIR)/main_header_images.inc: ../app/main_cells.m extract_ui_methods
 	python3 extract_ui_methods.py $< $@ '?- (void)refreshHeaderImages'
 
 $(HOST_BUILD_DIR)/test_main_images: test_main_images.m $(HOST_BUILD_DIR)/main_header_images.inc check.h
+	$(HOST_CC) $(HOST_CPPFLAGS) $(HOST_OBJCFLAGS) $(HOST_CFLAGS) -I$(HOST_BUILD_DIR) $< -o $@ $(HOST_LIBS)
+
+$(HOST_BUILD_DIR)/settings_icon_types.inc: ../app/settings_icons.h extract_ui_methods.py Makefile
+	mkdir -p $(dir $@)
+	python3 extract_ui_methods.py $< $@ 'typedef NS_ENUM(NSInteger, VCSettingsIconType)'
+
+$(HOST_BUILD_DIR)/settings_icon_draw.inc: ../app/settings_icons.m extract_ui_methods.py Makefile
+	mkdir -p $(dir $@)
+	python3 extract_ui_methods.py $< $@ 'static void VCSettingsDrawIcon(' 'VCSettingsIconType VCSettingsIconForRow(' 'UIImage *VCSettingsIconImage('
+
+$(HOST_BUILD_DIR)/settings_icon_cell.inc: ../app/settings.m extract_ui_methods.py Makefile
+	mkdir -p $(dir $@)
+	python3 extract_ui_methods.py $< $@ '- (void)applySettingsIcon:(VCSettingsIconType)icon {' '- (void)layoutSubviews' '- (void)applyAdaptiveTitle:(NSString *)title detail:(NSString *)detail {' '- (CGFloat)settingsTextLeft {' '- (CGFloat)settingsRightInset {' '- (void)prepareForReuse' '- (void)dealloc'
+
+$(HOST_BUILD_DIR)/test_settings_icons: test_settings_icons.m $(HOST_BUILD_DIR)/settings_icon_types.inc $(HOST_BUILD_DIR)/settings_icon_draw.inc $(HOST_BUILD_DIR)/settings_icon_cell.inc $(HOST_BUILD_DIR)/settings_row_type.inc $(HOST_BUILD_DIR)/settings_row_layout.inc check.h ../common/main_geometry.h
+	$(HOST_CC) $(HOST_CPPFLAGS) $(HOST_OBJCFLAGS) $(HOST_CFLAGS) -I$(HOST_BUILD_DIR) $< -o $@ $(HOST_LIBS)
+
+$(HOST_BUILD_DIR)/settings_row_type.inc: ../app/settings.m extract_ui_methods.py Makefile
+	mkdir -p $(dir $@)
+	python3 extract_ui_methods.py $< $@ 'typedef struct {'
+
+$(HOST_BUILD_DIR)/settings_row_layout.inc: ../app/settings.m extract_ui_methods.py Makefile
+	mkdir -p $(dir $@)
+	python3 extract_ui_methods.py $< $@ 'static CGSize VCSettingsTextSize(' 'static VCSettingsRowLayout VCSettingsMeasureRow('
+
+$(HOST_BUILD_DIR)/test_settings_layout: test_settings_layout.m $(HOST_BUILD_DIR)/settings_row_type.inc $(HOST_BUILD_DIR)/settings_row_layout.inc check.h ../common/main_geometry.h
 	$(HOST_CC) $(HOST_CPPFLAGS) $(HOST_OBJCFLAGS) $(HOST_CFLAGS) -I$(HOST_BUILD_DIR) $< -o $@ $(HOST_LIBS)
 
 $(HOST_BUILD_DIR)/main_detail_cache.inc: ../app/main_cells.m extract_ui_methods.py Makefile
