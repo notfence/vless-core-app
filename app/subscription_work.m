@@ -11,6 +11,7 @@
         [self showStatus:@"Another import or update is already running" ok:NO]; return nil;
     }
     _subscriptionTask=[[VCSubscriptionTask alloc] initWithPreserveNames:_preserveCustomSubscriptionNames kind:kind observer:self selector:@selector(subscriptionTaskProgress:)];
+    if (_photoQRQueue) { _photoQRTaskConfigs=[_configs count]; _photoQRTaskSubscriptions=[_subscriptions count]; }
     NSDictionary *metadata=nil;
     @synchronized(self) { metadata=[_pendingProfileMetadata autorelease]; _pendingProfileMetadata=nil; }
     [_subscriptionTask profileMetadataPrepared:metadata];
@@ -26,6 +27,15 @@
     if (task != _subscriptionTask) return;
     NSDictionary *progress=[task consumeProgress];
     BOOL cancelled=task.isCancelled;
+    if (_photoQRQueue) {
+        if (success) {
+            _photoQRAdded+=([_configs count]>=_photoQRTaskConfigs ? [_configs count]-_photoQRTaskConfigs : 0)+([_subscriptions count]>=_photoQRTaskSubscriptions ? [_subscriptions count]-_photoQRTaskSubscriptions : 0);
+            _photoQRDuplicates+=[[progress objectForKey:@"duplicates"] unsignedIntegerValue];
+            _photoQRRejected+=[[progress objectForKey:@"skipped"] unsignedIntegerValue];
+        }
+        if (cancelled) _photoQRCancelled=YES;
+        [self performSelector:@selector(advancePhotoQRImport) withObject:nil afterDelay:0];
+    }
     BOOL connect=success && !cancelled && _connectAfterSubscriptionTask == task && !_connected &&
         _selectedSubIndex >= 0 && _selectedSubIndex < (NSInteger)[_subscriptions count] &&
         [[[_subscriptions objectAtIndex:_selectedSubIndex] objectForKey:@"url"] isEqual:_connectAfterSubscriptionURL] &&
@@ -63,6 +73,7 @@
 }
 
 - (void)cancelSubscriptionTask {
+    if (_photoQRQueue && ![_subscriptionTask isCommitting]) _photoQRCancelled=YES;
     if ([_subscriptionTask cancelWithReason:nil]) {
         _refreshBtn.enabled=NO;
         [self subscriptionTaskProgress:_subscriptionTask];
@@ -70,11 +81,16 @@
 }
 
 - (void)startTextImport:(NSString *)text filePath:(NSString *)path {
+    [self startTextImports:text ? @[text] : nil filePath:path separateQR:NO];
+}
+
+- (void)startTextImports:(NSArray *)texts filePath:(NSString *)path separateQR:(BOOL)separate {
     VCSubscriptionTask *task=[self beginSubscriptionTask];
     if (!task) return;
     NSArray *baseConfigs=[_configs copy],*baseSubscriptions=[_subscriptions copy];
     NSUInteger revision=_configurationRevision;
-    NSString *input=[text copy],*filePath=[path copy];
+    NSArray *inputs=[[NSArray alloc] initWithArray:texts ?: @[] copyItems:YES];
+    NSString *input=[inputs count] ? [inputs objectAtIndex:0] : nil,*filePath=[path copy];
     [task setPhase:@"Reading import data"];
     dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_DEFAULT,0), ^{
         NSAutoreleasePool *pool=[[NSAutoreleasePool alloc] init];
@@ -83,9 +99,12 @@
             NSString *failure=nil,*decoded=input;
             NSArray *karingEntries=nil,*links=nil;
             NSDictionary *report=nil;
-            NSData *data=filePath ? VCReadSubscriptionFile(filePath,&failure) : [input dataUsingEncoding:NSUTF8StringEncoding];
+            NSData *data=separate ? nil : filePath ? VCReadSubscriptionFile(filePath,&failure) : [input dataUsingEncoding:NSUTF8StringEncoding];
             if ([data length] > kVCMaximumSubscriptionBytes) failure=@"Import data exceeds 32 MiB";
-            if (!failure && VCKaringBackupDataLooksLikeZip(data)) karingEntries=VCKaringSubscriptionsFromBackupData(data,&failure);
+            if (separate) {
+                report=[VCProfiles() textImportReportFromTexts:inputs]; links=[report objectForKey:@"uris"];
+                failure=[report objectForKey:@"error"];
+            } else if (!failure && VCKaringBackupDataLooksLikeZip(data)) karingEntries=VCKaringSubscriptionsFromBackupData(data,&failure);
             else if (!failure) {
                 if (!decoded) decoded=[self decodeImportTextData:data];
                 decoded=[self safeTrim:decoded];
@@ -133,6 +152,7 @@
             NSDictionary *warnings=@{@"skipped":@(skipped),@"issues":issues};
             dispatch_async(dispatch_get_main_queue(), ^{
                 if (task != _subscriptionTask || task.isCancelled || revision != _configurationRevision || failure) {
+                    if (_photoQRQueue && !task.isCancelled) _photoQRFailures++;
                     if (failure) [self showStatus:failure ok:NO];
                     else if (!task.isCancelled) [self showStatus:@"Import skipped: configurations changed" ok:NO];
                     [self finishSubscriptionTask:task success:NO]; return;
@@ -144,6 +164,7 @@
                     [self importKaringSubscriptionEntries:karingEntries]; return;
                 }
                 void (^finish)(BOOL)=^(BOOL saved) {
+                    if (!saved && _photoQRQueue && !task.isCancelled) _photoQRFailures++;
                     if (saved && accepted) {
                         _configurationsSectionExpanded=YES; _subscriptionsSectionExpanded=NO;
                         _selectedConfigIndex=[_configs count]-1; _selectedSubIndex=_selectedSubItemIndex=-1;
@@ -161,7 +182,7 @@
             });
         } @finally {
             VCSetCurrentSubscriptionTask(previous); [previous release];
-            [baseConfigs release]; [baseSubscriptions release]; [input release]; [filePath release]; [pool drain];
+            [baseConfigs release]; [baseSubscriptions release]; [inputs release]; [filePath release]; [pool drain];
         }
     });
 }

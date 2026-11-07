@@ -77,6 +77,7 @@ def source_contracts():
     for key in ("UISupportedInterfaceOrientations", "UISupportedInterfaceOrientations~ipad"):
         check(f"plist/{key}/both-landscapes", {"UIInterfaceOrientationLandscapeLeft", "UIInterfaceOrientationLandscapeRight"}.issubset(info[key]))
     check("plist/camera-usage", bool(info["NSCameraUsageDescription"]))
+    check("plist/photo-library-usage", info.get("NSPhotoLibraryUsageDescription") == "Select a photo to import QR codes.")
     check("plist/launch-catalog", {entry["UILaunchImageName"] for entry in info["UILaunchImages"]} == {"Default", "Default-568h", "Default-667h", "Default-736h", "Default-Portrait", "Default-Landscape"})
     for name in LAUNCHES:
         png_contract(name, (ROOT / "app/icons" / name).read_bytes())
@@ -141,16 +142,32 @@ def macho_contract(name, data, cpu, minimum):
     offset = 32 if is64 else 28
     minos = None
     signature = None
+    libraries = set()
+    symbols = b""
     for _ in range(ncmds):
         command, size = struct.unpack_from("<II", data, offset)
         check(f"macho/{name}/command-bounds", size >= 8 and offset + size <= len(data))
         if command == 0x25: minos = struct.unpack_from("<I", data, offset + 8)[0]
         if command == 0x32: minos = struct.unpack_from("<I", data, offset + 12)[0]
+        if command in (0xc, 0x80000018):
+            string_offset = struct.unpack_from("<I", data, offset + 8)[0]
+            check(f"macho/{name}/library-name-bounds", 24 <= string_offset < size)
+            libraries.add(data[offset + string_offset:offset + size].split(b"\0", 1)[0])
+        if command == 0x2:
+            string_offset, string_size = struct.unpack_from("<II", data, offset + 16)
+            check(f"macho/{name}/symbol-strings-bounds", string_offset + string_size <= len(data))
+            symbols = data[string_offset:string_offset + string_size]
         if command == 0x1d:
             start, length = struct.unpack_from("<II", data, offset + 8)
             signature = data[start:start + length]
         offset += size
     check(f"macho/{name}/minimum-ios", minos == minimum << 16)
+    if name in ("Applications/vless-core.app/vless-core", "Applications/vless-core.app/vless-core-arm64"):
+        native = cpu == 0x100000C
+        check(f"macho/{name}/photo-backend-framework", any(path.endswith(b"/Vision.framework/Vision") for path in libraries) == native)
+        check(f"macho/{name}/legacy-decoder-isolated", (b"_zbar_scan_image\0" in symbols) != native)
+        if native:
+            check(f"macho/{name}/no-zbar-symbols", b"_zbar_" not in symbols and b"_VCQRPhotoDecode\0" not in symbols)
     check(f"macho/{name}/signature", signature is not None and len(signature) >= 12)
     magic, length, count = struct.unpack_from(">III", signature)
     check(f"signature/{name}/superblob", magic == 0xfade0cc0 and length <= len(signature))
@@ -199,6 +216,7 @@ def deb_contract(path):
         macho_contract(name, data, cpu, minimum)
     info = plistlib.loads(files[("data.tar.gz", "Applications/vless-core.app/Info.plist")][1])
     check("deb/ios5-and-build-metadata", info["MinimumOSVersion"] == "5.0" and info["VCBuildDate"] != "development build")
+    check("deb/photo-library-usage", info.get("NSPhotoLibraryUsageDescription") == "Select a photo to import QR codes.")
     for name in LAUNCHES: png_contract(name, files[("data.tar.gz", "Applications/vless-core.app/" + name)][1])
     flag_members={name.removeprefix("Applications/vless-core.app/flags/"):data for (archive,name),(_,data) in files.items() if archive=="data.tar.gz" and name.startswith("Applications/vless-core.app/flags/")}
     expected_flags={p.name:p.read_bytes() for p in (ROOT/"app/icons/flags").glob("*.png")}

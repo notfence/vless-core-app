@@ -540,6 +540,7 @@
 
             void (^finishImport)(BOOL)=^(BOOL saved) {
             _launchAutoUpdateInProgress=NO;
+            if (_photoQRQueue && !task.isCancelled) _photoQRFailures+=saved ? failedCount : 1;
             if (!saved) {
                 [self finishSubscriptionTask:task success:NO];
                 [importedSubs release]; [insecureURLs release]; [failureTexts release];
@@ -914,7 +915,9 @@
         }
     }
 
+    if (_photoQRQueue) _photoQRDuplicates+=duplicateCount;
     if ([urls count] == 0) {
+        if (_photoQRQueue) [self performSelector:@selector(advancePhotoQRImport) withObject:nil afterDelay:0];
         @synchronized(self) { [_pendingProfileMetadata release]; _pendingProfileMetadata=nil; }
         VCRecordAppEvent(@"import", @"Karing backup produced no new subscriptions",
                          [NSString stringWithFormat:@"entries=%lu duplicates=%lu",
@@ -1119,6 +1122,7 @@
                                  [NSString stringWithFormat:@"error=%@ duration_ms=%.0f",
                                   VCDiagnosticErrorSummary(copiedError),
                                   ([NSDate timeIntervalSinceReferenceDate] - diagnosticStarted) * 1000.0]);
+                if (_photoQRQueue) _photoQRFailures++;
                 NSString *message = ([copiedError length] > 0)
                     ? [NSString stringWithFormat:@"Karing sync failed: %@", copiedError]
                     : @"Karing sync failed: no LAN address responded";
@@ -1197,12 +1201,6 @@
 }
 
 - (void)startQRImportFlow {
-    if (![UIImagePickerController isSourceTypeAvailable:UIImagePickerControllerSourceTypeCamera]) {
-        VCRecordAppEvent(@"import", @"QR scanner unavailable", @"reason=camera_unavailable");
-        [self showStatus:@"Camera is unavailable" ok:NO];
-        return;
-    }
-
     QRScanVC *scanner = [[[QRScanVC alloc] init] autorelease];
     scanner.delegate = self;
     scanner.modalPresentationStyle = UIModalPresentationFullScreen;
@@ -1270,6 +1268,45 @@
     VCRecordAppEvent(@"import", @"QR scan canceled", nil);
 }
 
+- (void)qrScanVC:(UIViewController *)vc didScanTexts:(NSArray *)texts {
+    (void)vc;
+    NSArray *payloads=[texts copy];
+    [self dismissViewControllerAnimated:YES completion:^{
+        if (_subscriptionTask || _configurationLoading || _configurationDraft || _launchAutoUpdateInProgress || _photoQRQueue) {
+            [self showStatus:@"Another import or update is already running" ok:NO]; [payloads release]; return;
+        }
+        _photoQRQueue=[[NSMutableArray alloc] init];
+        _photoQRAdded=_photoQRDuplicates=_photoQRRejected=_photoQRFailures=0; _photoQRCancelled=NO;
+        NSMutableArray *regular=[NSMutableArray array],*special=[NSMutableArray array];
+        for (NSString *text in payloads) {
+            NSString *value=[self safeTrim:text];
+            if ([value rangeOfString:@"karing://" options:NSCaseInsensitiveSearch|NSAnchoredSearch].location==0) {
+                NSDictionary *descriptor=VCKaringLANDownloadDescriptor(value,NULL);
+                if (descriptor) [special addObject:descriptor]; else _photoQRRejected++;
+            } else [regular addObject:value ?: @""];
+        }
+        if ([regular count]) [_photoQRQueue addObject:regular];
+        [_photoQRQueue addObjectsFromArray:special];
+        [payloads release]; [self advancePhotoQRImport];
+    }];
+}
+
+- (void)advancePhotoQRImport {
+    [NSObject cancelPreviousPerformRequestsWithTarget:self selector:@selector(advancePhotoQRImport) object:nil];
+    if (!_photoQRQueue || _subscriptionTask || _configurationDraft || _configurationCommitInProgress || _pendingPlainHTTPConfirmation || _pendingInsecureImportURLs) return;
+    if (!_photoQRCancelled && [_photoQRQueue count]) {
+        id next=[[[_photoQRQueue objectAtIndex:0] retain] autorelease];
+        [_photoQRQueue removeObjectAtIndex:0];
+        if ([next isKindOfClass:[NSArray class]]) [self startTextImports:next filePath:nil separateQR:YES];
+        else [self receiveKaringBackupWithDescriptor:next];
+        [self performSelector:@selector(advancePhotoQRImport) withObject:nil afterDelay:0];
+        return;
+    }
+    NSString *summary=[NSString stringWithFormat:@"QR import%@: %lu added, %lu duplicates, %lu rejected, %lu failed sources",_photoQRCancelled ? @" cancelled" : @"",(unsigned long)_photoQRAdded,(unsigned long)_photoQRDuplicates,(unsigned long)_photoQRRejected,(unsigned long)_photoQRFailures];
+    [_photoQRQueue release]; _photoQRQueue=nil;
+    [self showStatus:summary ok:!_photoQRCancelled && !_photoQRFailures && (_photoQRAdded || _photoQRDuplicates)];
+}
+
 - (void)qrScanVC:(UIViewController *)vc didScanText:(NSString *)text {
     (void)vc;
     NSString *payload = [[self safeTrim:text] copy];
@@ -1324,6 +1361,7 @@
 }
 
 - (void)alertView:(UIAlertView *)alertView clickedButtonAtIndex:(NSInteger)buttonIndex {
+    if (_photoQRQueue) [self performSelector:@selector(advancePhotoQRImport) withObject:nil afterDelay:0];
     if (alertView.tag == VCAlertTagUpdateAvailable) {
         if (buttonIndex != alertView.cancelButtonIndex) {
             VCOpenGitHubLatestRelease(_availableReleaseURL);
@@ -1363,6 +1401,7 @@
             confirmation();
         } else {
             VCRecordAppEvent(@"import", @"Plain HTTP subscription declined", nil);
+            if (_photoQRQueue) _photoQRCancelled=YES;
             @synchronized(self) { [_pendingProfileMetadata release]; _pendingProfileMetadata=nil; }
             if (cancellation) cancellation();
             [self showStatus:@"Subscription import canceled" ok:YES];
@@ -1408,6 +1447,7 @@
         } else {
             VCRecordAppEvent(@"import", @"Insecure subscription fetch declined",
                              [NSString stringWithFormat:@"count=%lu", (unsigned long)[urlStrings count]]);
+            if (_photoQRQueue) _photoQRRejected+=[urlStrings count];
             [self showStatus:([urlStrings count] == 1 ? @"Subscription import canceled"
                                                       : @"Insecure subscriptions skipped")
                           ok:YES];

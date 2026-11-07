@@ -67,6 +67,10 @@
     void (^_configurationDraftCompletion)(BOOL);
     UIBackgroundTaskIdentifier _configurationBackgroundTask;
     VCSubscriptionTask *_subscriptionTask;
+    NSMutableArray *_photoQRQueue;
+    NSUInteger _photoQRAdded,_photoQRDuplicates,_photoQRRejected,_photoQRFailures;
+    NSUInteger _photoQRTaskConfigs,_photoQRTaskSubscriptions;
+    BOOL _photoQRCancelled;
     VCSubscriptionTask *_connectAfterSubscriptionTask;
     NSString *_connectAfterSubscriptionURL;
     NSMutableDictionary *_pingDisplayByURI;
@@ -221,6 +225,7 @@
 - (void)subscriptionTaskProgress:(VCSubscriptionTask *)task;
 - (void)cancelSubscriptionTask;
 - (void)startTextImport:(NSString *)text filePath:(NSString *)path;
+- (void)startTextImports:(NSArray *)texts filePath:(NSString *)path separateQR:(BOOL)separate;
 @end
 
 @interface MainVC (VCMainConnection)
@@ -404,6 +409,7 @@
 - (void)importBrowserDidCancel:(UIViewController *)browser;
 - (void)importBrowser:(UIViewController *)browser didSelectFileAtPath:(NSString *)path;
 - (void)startQRImportFlow;
+- (void)advancePhotoQRImport;
 - (void)plusPressed;
 - (void)actionSheet:(UIActionSheet *)actionSheet didDismissWithButtonIndex:(NSInteger)buttonIndex;
 - (void)qrScanVCDidCancel:(UIViewController *)vc;

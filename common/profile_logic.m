@@ -1501,6 +1501,47 @@ failure:
     return [self textImportReportFromText:text allowIncy:YES allowBase64:YES];
 }
 
+- (NSDictionary *)textImportReportFromTexts:(NSArray *)texts {
+    VCSubscriptionTask *task=VCCurrentSubscriptionTask();
+    NSMutableArray *uris=[NSMutableArray array],*issues=[NSMutableArray array];
+    NSMutableDictionary *metadata=[NSMutableDictionary dictionary];
+    NSMutableSet *seen=[NSMutableSet set];
+    NSUInteger bytes=0,skipped=0;
+    for (id text in texts) {
+        if (![text isKindOfClass:[NSString class]]) return @{@"error":@"Invalid QR import data",@"uris":@[]};
+        NSUInteger size=[text lengthOfBytesUsingEncoding:NSUTF8StringEncoding];
+        if (size>kVCMaximumSubscriptionBytes-bytes) return @{@"error":@"Import data exceeds 32 MiB",@"uris":@[]};
+        bytes+=size;
+    }
+    for (NSString *text in texts) {
+        if (task.isCancelled) return VCSubscriptionCancelledReport(task);
+        NSAutoreleasePool *pool=[[NSAutoreleasePool alloc] init];
+        NSString *lower=[[self safeTrim:text] lowercaseString];
+        BOOL unsupportedHapp=[lower hasPrefix:@"happ://"] && ![lower hasPrefix:@"happ://add/"] && ![lower hasPrefix:@"happ://crypt4/"] && ![lower hasPrefix:@"happ://crypt5/"];
+        if (unsupportedHapp || [text rangeOfCharacterFromSet:[NSCharacterSet characterSetWithRange:NSMakeRange(0,1)]].location!=NSNotFound) {
+            skipped++; [task addAccepted:0 skipped:1];
+            if ([issues count]<16) [issues addObject:@"Invalid or unsupported QR import data"];
+            [pool drain]; continue;
+        }
+        NSDictionary *report=[self textImportReportFromText:text];
+        NSUInteger rejected=[[report objectForKey:@"skipped"] unsignedIntegerValue];
+        NSArray *values=[report objectForKey:@"uris"];
+        if ([report objectForKey:@"error"]) values=@[];
+        if ([report objectForKey:@"error"] || (![values count] && !rejected)) {
+            rejected++; [task addAccepted:0 skipped:1];
+        }
+        skipped+=rejected;
+        if (rejected && [issues count]<16) [issues addObject:@"Invalid or unsupported QR import data"];
+        for (NSString *uri in values) {
+            if ([seen containsObject:uri]) [task recordDuplicate];
+            else { [seen addObject:uri]; [uris addObject:uri]; }
+        }
+        if (![report objectForKey:@"error"]) [metadata addEntriesFromDictionary:[report objectForKey:@"metadata"] ?: @{}];
+        [pool drain];
+    }
+    return @{@"uris":uris,@"metadata":metadata,@"skipped":@(skipped),@"issues":issues};
+}
+
 - (NSDictionary *)importReportFromHappJSONData:(NSData *)data {
     VCSubscriptionTask *task=VCCurrentSubscriptionTask();
     if (task.isCancelled) return VCSubscriptionCancelledReport(task);

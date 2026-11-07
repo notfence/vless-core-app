@@ -54,8 +54,6 @@ include $(ROOT)/common/zbar_sources.mk
 ZBAR_HEADERS := $(shell find $(ZBAR_DIR) -type f -name '*.h')
 ZBAR_OBJ := $(patsubst $(ZBAR_DIR)/%.c,$(BUILD_DIR)/zbar/%.o,$(ZBAR_SRC))
 ZBAR_LIB := $(BUILD_DIR)/libzbar-qr.a
-ZBAR_ARM64_OBJ := $(patsubst $(ZBAR_DIR)/%.c,$(BUILD_DIR)/arm64/zbar/%.o,$(ZBAR_SRC))
-ZBAR_ARM64_LIB := $(BUILD_DIR)/arm64/libzbar-qr.a
 
 COMMON_APP_SRC := common/foundation_logic.m common/profile_logic.m common/secure_store.m common/connection_logic.m common/main_geometry.c common/list_logic.m common/subscription_task.m common/flag_logic.c
 COMMON_APP_HEADERS := $(wildcard common/*.h)
@@ -63,6 +61,7 @@ APP_SCREEN_SRC := app/main.m app/main_screen.m app/main_state.m app/main_connect
 APP_SUPPORT_SRC := app/app_support.m app/daemon_client.m app/network_ping.m app/proxy_probe.m app/runtime_info.m app/subscription_fetch.m app/update_checker.m app/diagnostics.m app/appearance.m app/connection_button.m app/main_cells.m app/settings.m app/help_controllers.m app/routing.m app/qr_scanner.m app/subscription_info.m app/import_browser.m
 APP_SRC := $(APP_SCREEN_SRC) $(APP_SUPPORT_SRC) app/flag_label.m $(COMMON_APP_SRC) integrations/happ/happ_crypto.c integrations/karing/karing_backup.m integrations/incy/incy_links.m
 APP_SRC += app/settings_icons.m
+APP_SRC += common/qr_photo.c app/qr_photo_source.m
 APP_HEADERS := $(wildcard app/*.h) integrations/happ/happ_crypto.h integrations/karing/karing_backup.h integrations/incy/incy_links.h daemon/vpnctld_protocol.h $(COMMON_APP_HEADERS)
 APP_HEADERS += ../vless-core-cli/include/json.h
 APP_OBJ := \
@@ -70,7 +69,7 @@ APP_OBJ := \
 	$(patsubst %.c,$(BUILD_DIR)/app/%.o,$(filter %.c,$(APP_SRC)))
 APP_ARM64_OBJ := \
 	$(patsubst %.m,$(BUILD_DIR)/arm64/app/%.o,$(filter %.m,$(APP_SRC))) \
-	$(patsubst %.c,$(BUILD_DIR)/arm64/app/%.o,$(filter %.c,$(APP_SRC)))
+	$(patsubst %.c,$(BUILD_DIR)/arm64/app/%.o,$(filter-out common/qr_photo.c,$(filter %.c,$(APP_SRC))))
 APP_OBJ += $(BUILD_DIR)/app/core-json.o
 APP_ARM64_OBJ += $(BUILD_DIR)/arm64/app/core-json.o
 DAEMON_SRC := daemon/vpnctld.c daemon/core_config.c common/daemon_policy.c common/control_auth.c common/helper_monitor.c common/dns_relay.c daemon/socket_peer_pid.c daemon/legacy_loopback.c daemon/legacy_dns.c daemon/vpnicon_statusbar.c daemon/system_proxy.c
@@ -80,11 +79,12 @@ BOOTSTRAP_SRC := daemon/vpnctld_bootstrap.c
 APP_CFLAGS := -fno-objc-arc -Wall -Wextra -O2 -arch armv7 -miphoneos-version-min=$(LEGACY_IOS_MIN_VERSION) -isysroot $(APP_IOS_SDK) -Iintegrations/happ -Iintegrations/karing -I$(ZBAR_DIR) -I$(OPENSSL_IOS_INCLUDE)
 APP_LDFLAGS := -Wl,-pie -Wl,-platform_version,ios,$(LEGACY_IOS_MIN_VERSION),$(APP_IOS_SDK_VERSION) -framework UIKit -framework Foundation -framework CoreGraphics -framework QuartzCore -framework AVFoundation -framework CoreMedia -framework CoreVideo -framework SystemConfiguration -liconv -lsqlite3 -lz $(OPENSSL_IOS_CRYPTO_LIB)
 ZBAR_CFLAGS := -w -O2 -arch armv7 -miphoneos-version-min=$(LEGACY_IOS_MIN_VERSION) -isysroot $(APP_IOS_SDK) -I$(ZBAR_DIR)
-APP_ARM64_CFLAGS := -fno-objc-arc -Wall -Wextra -O2 -arch arm64 -miphoneos-version-min=$(ARM64_IOS_MIN_VERSION) -isysroot $(ARM64_IOS_SDK) -Iintegrations/happ -Iintegrations/karing -I$(ZBAR_DIR) -I$(OPENSSL_IOS_ARM64_INCLUDE)
+APP_ARM64_CFLAGS := -fno-objc-arc -Wall -Wextra -O2 -arch arm64 -miphoneos-version-min=$(ARM64_IOS_MIN_VERSION) -isysroot $(ARM64_IOS_SDK) -Iintegrations/happ -Iintegrations/karing -I$(OPENSSL_IOS_ARM64_INCLUDE)
 APP_ARM64_LDFLAGS := -Wl,-pie -framework UIKit -framework Foundation -framework CoreGraphics -framework QuartzCore -framework AVFoundation -framework CoreMedia -framework CoreVideo -framework SystemConfiguration -liconv -lsqlite3 -lz $(OPENSSL_IOS_ARM64_CRYPTO_LIB)
 APP_LDFLAGS += -framework CoreText
 APP_ARM64_LDFLAGS += -framework CoreText
-ZBAR_ARM64_CFLAGS := -w -O2 -arch arm64 -miphoneos-version-min=$(ARM64_IOS_MIN_VERSION) -isysroot $(ARM64_IOS_SDK) -I$(ZBAR_DIR)
+APP_LDFLAGS += -framework ImageIO -framework AssetsLibrary
+APP_ARM64_LDFLAGS += -framework ImageIO -framework AssetsLibrary -framework Vision
 ARM64_RUNTIME_DEFINES := -DVC_CORE_EXECUTABLE_PATH='"/usr/bin/vless-core-darwin-arm64"' -DVC_CORE_EXECUTABLE_NAME='"vless-core-darwin-arm64"'
 APP_ARM64_CFLAGS += $(ARM64_RUNTIME_DEFINES)
 
@@ -209,14 +209,6 @@ $(ZBAR_LIB): check-ios-toolchain $(ZBAR_OBJ)
 	$(IOS_AR) rcs $@ $(ZBAR_OBJ)
 	$(IOS_RANLIB) $@
 
-$(BUILD_DIR)/arm64/zbar/%.o: $(ZBAR_DIR)/%.c $(ZBAR_HEADERS) | preflight
-	mkdir -p $(dir $@)
-	PATH="$(IOS_BIN):$$PATH" $(IOS_RUNTIME_ENV) $(IOS_CC) $(ZBAR_ARM64_CFLAGS) -c $< -o $@
-
-$(ZBAR_ARM64_LIB): check-ios-toolchain $(ZBAR_ARM64_OBJ)
-	$(IOS_AR) rcs $@ $(ZBAR_ARM64_OBJ)
-	$(IOS_RANLIB) $@
-
 $(BUILD_DIR)/app/%.o: %.m $(APP_HEADERS) | preflight
 	mkdir -p $(dir $@)
 	PATH="$(IOS_BIN):$$PATH" $(IOS_RUNTIME_ENV) $(IOS_CC) $(APP_CFLAGS) -c $< -o $@
@@ -238,9 +230,9 @@ $(APP_ARMV7_BIN): check-ios-toolchain $(APP_OBJ) $(ZBAR_LIB) | preflight
 	PATH="$(IOS_BIN):$$PATH" $(IOS_RUNTIME_ENV) $(IOS_CC) -arch armv7 -miphoneos-version-min=$(LEGACY_IOS_MIN_VERSION) -isysroot $(IOS_SDK) $(APP_OBJ) $(ZBAR_LIB) -o $@ $(APP_LDFLAGS)
 	@$(IOS_OTOOL) -hv $@ | grep -qw PIE || (echo "Refusing non-PIE iOS binary: $@"; exit 1)
 
-$(APP_ARM64_BIN): check-ios-toolchain $(APP_ARM64_OBJ) $(ZBAR_ARM64_LIB) | preflight
+$(APP_ARM64_BIN): check-ios-toolchain $(APP_ARM64_OBJ) | preflight
 	mkdir -p $(dir $@)
-	PATH="$(IOS_BIN):$$PATH" $(IOS_RUNTIME_ENV) $(IOS_CC) $(APP_ARM64_CFLAGS) $(APP_ARM64_OBJ) $(ZBAR_ARM64_LIB) -o $@ $(APP_ARM64_LDFLAGS)
+	PATH="$(IOS_BIN):$$PATH" $(IOS_RUNTIME_ENV) $(IOS_CC) $(APP_ARM64_CFLAGS) $(APP_ARM64_OBJ) -o $@ $(APP_ARM64_LDFLAGS)
 	@$(IOS_OTOOL) -hv $@ | grep -qw PIE || (echo "Refusing non-PIE iOS binary: $@"; exit 1)
 
 $(DAEMON_ARMV7_BIN): check-ios-toolchain $(DAEMON_SRC) $(DAEMON_HEADERS) | preflight

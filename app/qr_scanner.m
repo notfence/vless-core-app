@@ -1,8 +1,28 @@
 #import "qr_scanner.h"
+#import "qr_photo_source.h"
+#import <AssetsLibrary/AssetsLibrary.h>
+
+static UIImage *VCQRPhotoIcon(void) {
+    UIGraphicsBeginImageContextWithOptions(CGSizeMake(28,28),NO,0);
+    CGContextRef context=UIGraphicsGetCurrentContext();
+    if (!context) { UIGraphicsEndImageContext(); return nil; }
+    CGContextSetStrokeColorWithColor(context,[UIColor whiteColor].CGColor);
+    CGContextSetLineWidth(context,2); CGContextSetLineCap(context,kCGLineCapRound); CGContextSetLineJoin(context,kCGLineJoinRound);
+    UIBezierPath *border=[UIBezierPath bezierPathWithRoundedRect:CGRectMake(2,4,24,20) cornerRadius:3];
+    [border setLineWidth:2]; [border stroke];
+    CGContextStrokeEllipseInRect(context,CGRectMake(7,8,4,4));
+    CGContextMoveToPoint(context,3,21); CGContextAddLineToPoint(context,11,14);
+    CGContextAddLineToPoint(context,16,18); CGContextAddLineToPoint(context,20,14); CGContextAddLineToPoint(context,25,19); CGContextStrokePath(context);
+    UIImage *image=UIGraphicsGetImageFromCurrentImageContext(); UIGraphicsEndImageContext(); return image;
+}
 
 @implementation QRScanVC
 
 @synthesize delegate = _delegate;
+
+- (BOOL)canScanWithCamera {
+    return _scannerVisible && !_didFinish && !_photoPickerOpen && !_photoReading && !_scannerBackground && !_photoErrorAlert;
+}
 
 - (UIStatusBarStyle)preferredStatusBarStyle {
     return VCAppearancePreferredStatusBarStyle();
@@ -46,6 +66,7 @@
 }
 
 - (void)torchPressed {
+    if (![self canScanWithCamera]) return;
     [self setTorchEnabled:!_torchEnabled];
 }
 
@@ -83,10 +104,12 @@
 }
 
 - (void)focusTapped:(UITapGestureRecognizer *)gesture {
+    if (![self canScanWithCamera]) return;
     if (!_camera || !_previewLayer || [gesture state] != UIGestureRecognizerStateEnded) return;
 
     CGPoint viewPoint = [gesture locationInView:self.view];
     if (CGRectContainsPoint(_hintLabel.frame, viewPoint) ||
+        CGRectContainsPoint(_photoButton.frame, viewPoint) ||
         CGRectContainsPoint(_cancelButton.frame, viewPoint) ||
         (!_torchButton.hidden && CGRectContainsPoint(_torchButton.frame, viewPoint))) {
         return;
@@ -192,13 +215,14 @@
 }
 
 - (void)deliverScanResult:(NSString *)rawValue {
-    if (_didFinish) return;
+    if (![self canScanWithCamera]) return;
     NSString *value = [rawValue stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
     if (![value isKindOfClass:[NSString class]] || [value length] == 0) return;
 
     _didFinish = YES;
     _pendingScanResult = [value copy];
     _cancelButton.enabled = NO;
+    _photoButton.enabled = NO;
     _torchButton.enabled = NO;
     [self setScannerHintText:@"Succeeded ✅"];
     _hintLabel.backgroundColor = [UIColor colorWithRed:0.08f green:0.55f blue:0.22f alpha:0.9f];
@@ -213,6 +237,7 @@
     [self performSelector:@selector(notifyDelegateOfScanResult) withObject:nil afterDelay:0.45];
 }
 
+#if __IPHONE_OS_VERSION_MIN_REQUIRED < 110000
 - (BOOL)tryDecodeFrameWithZBar:(CMSampleBufferRef)sampleBuffer decodedText:(NSString **)decodedText {
     if (!sampleBuffer || !decodedText) return NO;
 
@@ -390,6 +415,7 @@
 
     return NO;
 }
+#endif
 
 - (NSString *)configureCaptureSession {
     AVCaptureDevice *camera = [AVCaptureDevice defaultDeviceWithMediaType:AVMediaTypeVideo];
@@ -428,7 +454,9 @@
             _metadataOutput = nil;
             return @"Native QR recognition is unavailable";
         }
-    } else {
+    }
+#if __IPHONE_OS_VERSION_MIN_REQUIRED < 110000
+    else {
         _videoOutput = [[AVCaptureVideoDataOutput alloc] init];
         _videoOutput.alwaysDiscardsLateVideoFrames = YES;
         NSDictionary *settings = [NSDictionary dictionaryWithObject:[NSNumber numberWithUnsignedInt:kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange]
@@ -445,6 +473,7 @@
             return @"Legacy QR recognition is unavailable";
         }
     }
+#endif
     return nil;
 }
 
@@ -462,6 +491,7 @@
 }
 
 - (void)finishCaptureSessionConfigurationWithError:(NSString *)errorText {
+    if (![self canScanWithCamera]) return;
     if ([errorText length] > 0) {
         [self setScannerHintText:errorText];
         return;
@@ -533,6 +563,19 @@
     [_cancelButton addTarget:self action:@selector(cancelPressed) forControlEvents:UIControlEventTouchUpInside];
     [self.view addSubview:_cancelButton];
 
+    _photoButton=[UIButton buttonWithType:UIButtonTypeCustom];
+    _photoButton.backgroundColor=_cancelButton.backgroundColor;
+    _photoButton.layer.cornerRadius=8; _photoButton.layer.borderWidth=1;
+    _photoButton.layer.borderColor=_cancelButton.layer.borderColor;
+    _photoIcon=[VCQRPhotoIcon() retain];
+    [_photoButton setImage:_photoIcon forState:UIControlStateNormal];
+    _photoButton.accessibilityLabel=@"Import QR from photo";
+    [_photoButton addTarget:self action:@selector(photoPressed) forControlEvents:UIControlEventTouchUpInside];
+    [self.view addSubview:_photoButton];
+    _photoIndicator=[[UIActivityIndicatorView alloc] initWithActivityIndicatorStyle:UIActivityIndicatorViewStyleWhite];
+    _photoIndicator.hidesWhenStopped=YES;
+    [_photoButton addSubview:_photoIndicator];
+
     _cancelButtonLabel = [[UILabel alloc] initWithFrame:CGRectZero];
     _cancelButtonLabel.backgroundColor = [UIColor clearColor];
     _cancelButtonLabel.text = @"Cancel";
@@ -558,6 +601,10 @@
     [self.view addGestureRecognizer:_focusGesture];
 
     _sessionQueue = dispatch_queue_create("com.vlesscore.qrscan.session", DISPATCH_QUEUE_SERIAL);
+    _photoQueue=dispatch_queue_create("com.vlesscore.qrscan.photo",DISPATCH_QUEUE_SERIAL);
+    dispatch_set_target_queue(_photoQueue,dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_LOW,0));
+    [[NSNotificationCenter defaultCenter] addObserver:self selector:@selector(scannerEnteredBackground:) name:UIApplicationDidEnterBackgroundNotification object:nil];
+    [[NSNotificationCenter defaultCenter] addObserver:self selector:@selector(scannerBecameActive:) name:UIApplicationDidBecomeActiveNotification object:nil];
 }
 
 - (void)viewDidLayoutSubviews {
@@ -576,19 +623,23 @@
     CGFloat hintWidth = MIN(190.0f, b.size.width - (pad * 2.0f) - 56.0f);
     _hintLabel.frame = CGRectMake(floor((b.size.width - hintWidth) * 0.5f), top, hintWidth, 42.0f);
     _torchButton.frame = CGRectMake(b.size.width - pad - 44.0f, top, 44.0f, 44.0f);
-    _cancelButton.frame = CGRectMake(pad, b.size.height - 62.0f - pad, b.size.width - (pad * 2.0f), 62.0f);
+    _photoButton.frame=CGRectMake(pad,b.size.height-62.0f-pad,62,62);
+    _photoIndicator.center=CGPointMake(31,31);
+    _cancelButton.frame = CGRectMake(pad+74, b.size.height - 62.0f - pad, b.size.width - (pad * 2.0f)-74, 62.0f);
     _cancelButtonLabel.frame = _cancelButton.bounds;
+    if (_photoPopover.popoverVisible) [_photoPopover presentPopoverFromRect:_photoButton.frame inView:self.view permittedArrowDirections:UIPopoverArrowDirectionAny animated:NO];
 }
 
 - (void)viewWillAppear:(BOOL)animated {
     [super viewWillAppear:animated];
-    _didFinish = NO;
+    if (_didFinish || _photoReading || _photoPickerOpen || _photoErrorAlert) return;
     _zbarPassIndex = 0;
     _scanEnabledAt = HUGE_VAL;
     _nextZBarScanAt = HUGE_VAL;
     [_pendingScanResult release];
     _pendingScanResult = nil;
     _cancelButton.enabled = YES;
+    _photoButton.enabled = YES;
     _torchButton.enabled = YES;
     [self setScannerHintText:@"Scan a QR code"];
     _hintLabel.backgroundColor = [UIColor colorWithWhite:0.0f alpha:0.58f];
@@ -598,7 +649,7 @@
 
 - (void)viewDidAppear:(BOOL)animated {
     [super viewDidAppear:animated];
-    if (_didFinish) return;
+    if (_didFinish || _photoReading || _photoPickerOpen || _photoErrorAlert || _scannerBackground) return;
     _scannerVisible = YES;
     _scanEnabledAt = CACurrentMediaTime() + 1.0;
     _nextZBarScanAt = _scanEnabledAt;
@@ -619,9 +670,153 @@
     [self setCaptureSessionRunning:NO];
 }
 
+- (void)resumeScannerAfterPhoto {
+    _photoReading=NO;
+    [_photoIndicator stopAnimating];
+    [_photoButton setImage:_photoIcon forState:UIControlStateNormal];
+    _photoButton.enabled=!_didFinish;
+    if (!_didFinish) { _cancelButton.enabled=YES; _torchButton.enabled=YES; }
+    if (_didFinish || _photoPickerOpen || _photoErrorAlert || _scannerBackground || !self.view.window) return;
+    _scannerVisible=YES;
+    [self setScannerHintText:@"Scan a QR code"];
+    _scanEnabledAt=CACurrentMediaTime()+1; _nextZBarScanAt=_scanEnabledAt;
+    if (_captureSession) [self finishCaptureSessionConfigurationWithError:nil];
+    else [self beginCaptureSessionConfiguration];
+}
+
+- (void)showPhotoError:(NSString *)message {
+    if (_didFinish || _scannerBackground) return;
+    if (_photoErrorAlert) return;
+    _photoErrorAlert=[[UIAlertView alloc] initWithTitle:@"QR import" message:message delegate:self cancelButtonTitle:@"OK" otherButtonTitles:nil];
+    _scannerVisible=NO;
+    [self setTorchEnabled:NO]; [self setCaptureSessionRunning:NO];
+    [self resumeScannerAfterPhoto]; [_photoErrorAlert show];
+}
+
+- (void)alertView:(UIAlertView *)alertView didDismissWithButtonIndex:(NSInteger)buttonIndex {
+    (void)buttonIndex;
+    if (alertView!=_photoErrorAlert) return;
+    _photoErrorAlert.delegate=nil; [_photoErrorAlert release]; _photoErrorAlert=nil;
+    [self resumeScannerAfterPhoto];
+}
+
+- (void)closePhotoPicker:(void (^)(void))completion {
+    _photoPicker.delegate=nil;
+    _photoPickerOpen=NO;
+    if (_photoPopover) {
+        _photoPopover.delegate=nil; [_photoPopover dismissPopoverAnimated:YES];
+        [_photoPopover release]; _photoPopover=nil;
+        [_photoPicker release]; _photoPicker=nil;
+        if (completion) completion();
+    } else {
+        [_photoPicker release]; _photoPicker=nil;
+        [self dismissViewControllerAnimated:!_scannerBackground completion:completion];
+    }
+}
+
+- (void)photoPressed {
+    if (_didFinish || _photoReading || _photoPickerOpen || _scannerBackground) return;
+    if (![UIImagePickerController isSourceTypeAvailable:UIImagePickerControllerSourceTypePhotoLibrary]) {
+        [self showPhotoError:@"Photo library is unavailable"]; return;
+    }
+    if ([ALAssetsLibrary respondsToSelector:@selector(authorizationStatus)]) {
+        ALAuthorizationStatus status=[ALAssetsLibrary authorizationStatus];
+        if (status==ALAuthorizationStatusDenied || status==ALAuthorizationStatusRestricted) {
+            [self showPhotoError:@"Photo library access is denied. Allow access in the device settings."]; return;
+        }
+    }
+    _photoPickerOpen=YES; _scannerVisible=NO;
+    _torchButton.enabled=NO;
+    [self setTorchEnabled:NO]; [self setCaptureSessionRunning:NO];
+    [NSObject cancelPreviousPerformRequestsWithTarget:self selector:@selector(configureContinuousCameraFocus) object:nil];
+    [NSObject cancelPreviousPerformRequestsWithTarget:self selector:@selector(hideFocusIndicator) object:nil];
+    _focusIndicator.alpha=0;
+    _photoPicker=[[UIImagePickerController alloc] init];
+    _photoPicker.sourceType=UIImagePickerControllerSourceTypePhotoLibrary;
+    _photoPicker.mediaTypes=@[@"public.image"]; _photoPicker.allowsEditing=NO; _photoPicker.delegate=self;
+    if (IsPadDevice()) {
+        _photoPopover=[[UIPopoverController alloc] initWithContentViewController:_photoPicker];
+        _photoPopover.delegate=self;
+        [_photoPopover presentPopoverFromRect:_photoButton.frame inView:self.view permittedArrowDirections:UIPopoverArrowDirectionAny animated:YES];
+    } else [self presentViewController:_photoPicker animated:YES completion:nil];
+}
+
+- (void)imagePickerControllerDidCancel:(UIImagePickerController *)picker {
+    if (picker!=_photoPicker) return;
+    [self closePhotoPicker:^{ [self resumeScannerAfterPhoto]; }];
+}
+
+- (void)popoverControllerDidDismissPopover:(UIPopoverController *)popover {
+    if (popover!=_photoPopover) return;
+    _photoPicker.delegate=nil; [_photoPicker release]; _photoPicker=nil;
+    _photoPopover.delegate=nil; [_photoPopover release]; _photoPopover=nil;
+    _photoPickerOpen=NO; [self resumeScannerAfterPhoto];
+}
+
+- (void)imagePickerController:(UIImagePickerController *)picker didFinishPickingMediaWithInfo:(NSDictionary *)info {
+    if (picker!=_photoPicker || !_photoPickerOpen || _didFinish) return;
+    NSURL *url=nil;
+#if __IPHONE_OS_VERSION_MAX_ALLOWED >= 110000
+    if ([[UIDevice currentDevice].systemVersion integerValue]>=11) url=[info objectForKey:UIImagePickerControllerImageURL];
+#endif
+    if (!url) url=[info objectForKey:UIImagePickerControllerReferenceURL];
+    if (![url isKindOfClass:[NSURL class]]) url=nil;
+    _photoReading=YES;
+    _photoButton.enabled=NO; [_photoButton setImage:nil forState:UIControlStateNormal]; [_photoIndicator startAnimating];
+    [self setScannerHintText:@"Reading QR codes…"];
+    NSUInteger generation=++_photoGeneration;
+    [_photoOperation cancel]; [_photoOperation release];
+    _photoOperation=[[NSOperation alloc] init];
+    NSOperation *operation=_photoOperation;
+    [self closePhotoPicker:^{
+        if (_didFinish || _scannerBackground || operation.isCancelled || generation!=_photoGeneration) return;
+        dispatch_async(_photoQueue,^{
+            NSAutoreleasePool *pool=[[NSAutoreleasePool alloc] init];
+            NSString *error=nil;
+            NSArray *texts=[VCReadPhotoQR(url,operation,&error) copy];
+            NSString *failure=[error copy];
+            dispatch_async(dispatch_get_main_queue(),^{
+                if (!_didFinish && !_scannerBackground && generation==_photoGeneration && !operation.isCancelled) {
+                    [_photoOperation release]; _photoOperation=nil;
+                    if ([texts count]) {
+                        _didFinish=YES; _photoReading=NO; _cancelButton.enabled=NO;
+                        [_photoIndicator stopAnimating];
+                        if ([_delegate respondsToSelector:@selector(qrScanVC:didScanTexts:)]) [_delegate qrScanVC:self didScanTexts:texts];
+                    } else [self showPhotoError:failure ?: @"Unable to read the selected photo"];
+                }
+                [texts release]; [failure release];
+            });
+            [pool drain];
+        });
+    }];
+}
+
+- (void)scannerEnteredBackground:(NSNotification *)notification {
+    (void)notification;
+    [NSObject cancelPreviousPerformRequestsWithTarget:self selector:@selector(configureContinuousCameraFocus) object:nil];
+    [NSObject cancelPreviousPerformRequestsWithTarget:self selector:@selector(hideFocusIndicator) object:nil];
+    _scannerBackground=YES; _scannerVisible=NO; _photoGeneration++;
+    if (_pendingScanResult) { [_pendingScanResult release]; _pendingScanResult=nil; _didFinish=NO; }
+    [_photoOperation cancel]; [_photoOperation release]; _photoOperation=nil;
+    _photoReading=NO;
+    [_photoIndicator stopAnimating];
+    [self setTorchEnabled:NO]; [self setCaptureSessionRunning:NO];
+    [NSObject cancelPreviousPerformRequestsWithTarget:self selector:@selector(notifyDelegateOfScanResult) object:nil];
+    if (_photoPickerOpen) [self closePhotoPicker:nil];
+}
+
+- (void)scannerBecameActive:(NSNotification *)notification {
+    (void)notification;
+    BOOL wasBackground=_scannerBackground; _scannerBackground=NO;
+    if (wasBackground) [self resumeScannerAfterPhoto];
+}
+
 - (void)cancelPressed {
     if (_didFinish) return;
     _didFinish = YES;
+    _photoGeneration++;
+    [_photoOperation cancel]; [_photoOperation release]; _photoOperation=nil;
+    _photoButton.enabled=NO;
     _cancelButton.enabled = NO;
     _torchButton.enabled = NO;
     [_pendingScanResult release];
@@ -638,7 +833,7 @@ didOutputMetadataObjects:(NSArray *)metadataObjects
        fromConnection:(AVCaptureConnection *)connection {
     (void)captureOutput;
     (void)connection;
-    if (_didFinish || ![metadataObjects isKindOfClass:[NSArray class]]) return;
+    if (![self canScanWithCamera] || ![metadataObjects isKindOfClass:[NSArray class]]) return;
 
     for (id object in metadataObjects) {
         if (![object respondsToSelector:@selector(type)] ||
@@ -654,6 +849,7 @@ didOutputMetadataObjects:(NSArray *)metadataObjects
     }
 }
 
+#if __IPHONE_OS_VERSION_MIN_REQUIRED < 110000
 - (void)captureOutput:(AVCaptureOutput *)captureOutput
 didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
        fromConnection:(AVCaptureConnection *)connection {
@@ -682,6 +878,7 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
         [captured release];
     });
 }
+#endif
 
 - (BOOL)shouldAutorotateToInterfaceOrientation:(UIInterfaceOrientation)interfaceOrientation {
     if (IsPadDevice()) {
@@ -713,6 +910,14 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
 }
 
 - (void)dealloc {
+    [[NSNotificationCenter defaultCenter] removeObserver:self];
+    [_photoOperation cancel]; [_photoOperation release];
+    _photoPicker.delegate=nil; _photoPopover.delegate=nil;
+    [_photoPopover dismissPopoverAnimated:NO]; [_photoPopover release]; [_photoPicker release];
+    [_photoIndicator release];
+    [_photoIcon release];
+    _photoErrorAlert.delegate=nil; [_photoErrorAlert dismissWithClickedButtonIndex:0 animated:NO]; [_photoErrorAlert release];
+    if (_photoQueue) dispatch_release(_photoQueue);
     [NSObject cancelPreviousPerformRequestsWithTarget:self];
     [_videoOutput setSampleBufferDelegate:nil queue:NULL];
     [_metadataOutput setMetadataObjectsDelegate:nil queue:NULL];
@@ -725,10 +930,12 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
         dispatch_release(_videoQueue);
         _videoQueue = NULL;
     }
+#if __IPHONE_OS_VERSION_MIN_REQUIRED < 110000
     if (_qrScanner) {
         zbar_image_scanner_destroy(_qrScanner);
         _qrScanner = NULL;
     }
+#endif
     [_captureSession release];
     [_camera release];
     [_metadataOutput release];

@@ -7,7 +7,9 @@
 #include "happ_crypto.h"
 #include "karing_backup.h"
 #import "../integrations/incy/incy_links.h"
+#if __IPHONE_OS_VERSION_MIN_REQUIRED < 110000
 #include <zbar.h>
+#endif
 #include <openssl/crypto.h>
 #include <openssl/evp.h>
 #include <openssl/rand.h>

@@ -422,6 +422,7 @@
     [_mainSwitchView release];
     [_pendingImportRefreshIndices release];
     [_pendingInsecureImportURLs release];
+    [_photoQRQueue release];
     if (_pendingPlainHTTPConfirmation) Block_release(_pendingPlainHTTPConfirmation);
     if (_pendingPlainHTTPCancellation) Block_release(_pendingPlainHTTPCancellation);
     [_subscriptionToReexpandAfterReorder release];
