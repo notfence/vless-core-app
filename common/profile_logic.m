@@ -1611,7 +1611,7 @@ failure:
         NSString *uri=[self URIFromHappJSONConfig:[self happJSONDictionaryValue:value] metadata:&entry];
         if (![uri length]) {
             skipped++;
-            if ([issues count] < 16) [issues addObject:@"configs[]: invalid or unsupported profile settings"];
+            if ([issues count] < 16) [issues addObject:@"Invalid or unsupported profile settings"];
         } else if (![seen containsObject:uri]) { [seen addObject:uri]; [uris addObject:uri]; [metadata setObject:entry forKey:uri]; }
         else [task recordDuplicate];
         [task processed:++processed total:[configs count]];

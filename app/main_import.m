@@ -880,10 +880,15 @@
     for (NSDictionary *report in reports) {
         skipped+=[[report objectForKey:@"import_skipped"] ?: [report objectForKey:@"skipped"] unsignedIntegerValue];
         NSArray *reasons=[report objectForKey:@"import_issues"] ?: [report objectForKey:@"issues"];
-        for (NSString *reason in reasons) if ([issues count] < 5 && ![issues containsObject:reason]) [issues addObject:reason];
+        for (NSString *reason in reasons) {
+            if ([reason hasPrefix:@"configs[]: "]) reason=[reason substringFromIndex:[@"configs[]: " length]];
+            if ([reason length] && [issues count] < 5 && ![issues containsObject:reason]) [issues addObject:reason];
+        }
     }
     if (!skipped) return;
-    NSString *message=[NSString stringWithFormat:@"Skipped %lu configuration(s).\n%@",(unsigned long)skipped,[issues componentsJoinedByString:@"\n"]];
+    NSString *message=[NSString stringWithFormat:@"Skipped %lu configuration(s).",(unsigned long)skipped];
+    if ([issues count]==1) message=[message stringByAppendingFormat:@"\nReason: %@",[issues objectAtIndex:0]];
+    else if ([issues count]>1) message=[message stringByAppendingFormat:@"\nReasons:\n%@",[issues componentsJoinedByString:@"\n"]];
     UIAlertView *alert=[[[UIAlertView alloc] initWithTitle:@"Import warnings" message:message delegate:nil cancelButtonTitle:@"OK" otherButtonTitles:nil] autorelease];
     [alert show];
 }

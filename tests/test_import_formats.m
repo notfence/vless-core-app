@@ -86,6 +86,7 @@ static void extendedProfiles(void) {
     NSDictionary *good = profile(@"tcp", @{}, plain), *bad = profile(@"grpc", @{@"idle_timeout": @-1}, plain);
     NSData *batch = [NSJSONSerialization dataWithJSONObject:@{@"configs": @[bad, good]} options:0 error:NULL];
     CHECK("happ/invalid-entry-does-not-remove-valid-entry", [[logic extractConfigURIsFromHappJSONData:batch] count] == 1);
+    CHECK("happ/import-warning-readable-reason", [[[logic importReportFromHappJSONData:batch] objectForKey:@"issues"] isEqual:@[@"Invalid or unsupported profile settings"]]);
     NSString *longPath = [@"/" stringByPaddingToLength:4096 withString:@"a" startingAtIndex:0];
     CHECK("happ/oversized-result-rejected", [logic vlessURIFromHappJSONConfig:profile(@"ws", @{@"path": longPath}, plain)] == nil);
 }

@@ -150,13 +150,13 @@ $(HOST_BUILD_DIR)/test_app_logic: $(APP_OBJECTS)
 	$(HOST_CC) $(SANITIZE) $^ -o $@ $(HOST_LIBS)
 
 UI_SOURCE_ROOT ?= $(ROOT)
-$(HOST_BUILD_DIR)/subscription_update.inc: ../app/main_subscriptions.m extract_ui_methods.py
+$(HOST_BUILD_DIR)/subscription_update.inc: ../app/main_subscriptions.m extract_ui_methods.py Makefile
 	mkdir -p $(dir $@)
-	python3 extract_ui_methods.py $< $@ 'static BOOL SubscriptionResponseIsForbidden(' '- (NSDictionary *)updatedSubscriptionDictionaryFromSource:(NSDictionary *)sub errorText:(NSString **)errorTextOut insecureRetryAvailable:'
+	python3 extract_ui_methods.py $< $@ 'static BOOL SubscriptionResponseIsForbidden(' '- (NSDictionary *)updatedSubscriptionDictionaryFromSource:(NSDictionary *)sub errorText:(NSString **)errorTextOut insecureRetryAvailable:' '- (BOOL)subscriptionNeedsPlainHTTPApproval:' '- (BOOL)subscriptionsMatchSnapshotForLaunchAutoUpdate:' '- (void)startBackgroundSubscriptionRefreshAllowPlainHTTP:'
 
-$(HOST_BUILD_DIR)/subscription_compatibility.inc: ../app/main_import.m extract_ui_methods.py
+$(HOST_BUILD_DIR)/subscription_compatibility.inc: ../app/main_import.m extract_ui_methods.py Makefile
 	mkdir -p $(dir $@)
-	python3 extract_ui_methods.py $< $@ '- (void)showCompatibilityImportPromptForURLs:' '- (void)finishCompatibilityImportPrompt:' '- (void)performSubscriptionImportForURLs:' '- (NSDictionary *)subscriptionDictionaryForURL:' '- (NSString *)subscriptionImportCountText:'
+	python3 extract_ui_methods.py $< $@ '- (void)showCompatibilityImportPromptForURLs:' '- (void)finishCompatibilityImportPrompt:' '- (void)performSubscriptionImportForURLs:' '- (NSDictionary *)subscriptionDictionaryForURL:' '- (NSString *)subscriptionImportCountText:' '- (void)showProfileImportWarnings:'
 
 $(HOST_BUILD_DIR)/subscription_save.inc: ../app/main_subscriptions.m extract_ui_methods.py
 	mkdir -p $(dir $@)

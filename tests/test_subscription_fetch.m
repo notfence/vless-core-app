@@ -12,6 +12,7 @@ static NSUInteger workCount[2],shownAlerts;
 static NSString *alertTitle,*alertMessage,*alertCancel,*alertAction;
 static int dispatch_get_global_queue(int p,int flags) { (void)p; (void)flags; return 0; }
 static int dispatch_get_main_queue(void) { return 1; }
+static void dispatch_sync(int queue,void (^block)(void)) { (void)queue; block(); }
 static void dispatch_async(int queue,void (^block)(void)) { if (queue==1) { block(); return; } CHECK("subscription-ui/bounded-work",workCount[queue]<32); work[queue][workCount[queue]++]=Block_copy(block); }
 static void runWork(void) {
     for (NSUInteger n=0;workCount[0] || workCount[1];n++) {
@@ -30,7 +31,9 @@ static void VCRecordAppEvent(id a,id b,id c) { (void)a; (void)b; (void)c; }
 @implementation UIAlertView
 @synthesize tag=_tag;
 - (id)initWithTitle:(NSString *)title message:(NSString *)message delegate:(id)delegate cancelButtonTitle:(NSString *)cancel otherButtonTitles:(NSString *)action,... {
-    (void)delegate; self=[super init]; alertTitle=title; alertMessage=message; alertCancel=cancel; alertAction=action; return self;
+    (void)delegate; self=[super init];
+    [alertTitle release]; alertTitle=[title copy]; [alertMessage release]; alertMessage=[message copy];
+    [alertCancel release]; alertCancel=[cancel copy]; [alertAction release]; alertAction=[action copy]; return self;
 }
 - (void)show { shownAlerts++; }
 @end
@@ -38,6 +41,7 @@ static void VCRecordAppEvent(id a,id b,id c) { (void)a; (void)b; (void)c; }
 static NSString *const compatibilityKey=@"happ_user_agent";
 static NSString *const sourceURL=@"https://provider.test/sub?token=a+b%2B%2540&x=%26#name";
 static NSArray *responses;
+static NSArray *responseBodies;
 static NSMutableArray *requests;
 static BOOL invalidBody,cancelFirst;
 static NSString *responseHeaders;
@@ -64,7 +68,8 @@ static NSData *FetchURLViaVlessCoreCurl(NSString *url,BOOL insecure,BOOL plain,B
     if (error) *error=status==200 ? nil : (failureDetails ?: @"Fetch failed");
     if (exitCode) *exitCode=status==600 ? 60 : (status==700 ? 28 : (status==200 ? 0 : 22));
     if (cancelFirst && index==0) [VCCurrentSubscriptionTask() cancelWithReason:@"Cancelled"];
-    return status==200 ? [(invalidBody ? @"<html>Access denied</html>" : @"socks5://test:p%2B%2540@127.0.0.1:1080#Profile") dataUsingEncoding:NSUTF8StringEncoding] : nil;
+    NSString *body=responseBodies ? [responseBodies objectAtIndex:index] : @"socks5://test:p%2B%2540@127.0.0.1:1080#Profile";
+    return status==200 ? [(invalidBody ? @"<html>Access denied</html>" : body) dataUsingEncoding:NSUTF8StringEncoding] : nil;
 }
 
 @interface SubscriptionEditVC : NSObject {
@@ -84,6 +89,7 @@ static NSData *FetchURLViaVlessCoreCurl(NSString *url,BOOL insecure,BOOL plain,B
 @interface MainVC : VCProfileLogic <VCSubscriptionUpdateOptions> {
 @public
     NSMutableArray *_configs,*_subscriptions,*_photoQRQueue;
+    NSArray *_pendingImportRefreshIndices;
     VCSubscriptionTask *_subscriptionTask;
     NSDictionary *_pendingCompatibilityImport;
     id _configurationDraft;
@@ -98,7 +104,7 @@ static NSData *FetchURLViaVlessCoreCurl(NSString *url,BOOL insecure,BOOL plain,B
 @end
 @implementation MainVC
 - (id)init { if ((self=[super init])) { _configs=[[NSMutableArray alloc] init]; _subscriptions=[[NSMutableArray alloc] init]; } return self; }
-- (void)dealloc { [_configs release]; [_subscriptions release]; [_pendingCompatibilityImport release]; [_subscriptionTask release]; [_photoQRQueue release]; [lastStatus release]; [super dealloc]; }
+- (void)dealloc { [_configs release]; [_subscriptions release]; [_pendingCompatibilityImport release]; [_subscriptionTask release]; [_photoQRQueue release]; [_pendingImportRefreshIndices release]; [lastStatus release]; [super dealloc]; }
 - (BOOL)preserveCustomSubscriptionNames { return YES; }
 - (NSTimeInterval)subscriptionUpdateTimestamp { return 12345; }
 - (BOOL)isHappEncryptedLink:(NSString *)url { return HappURLStringIsEncrypted(url); }
@@ -122,7 +128,10 @@ static NSData *FetchURLViaVlessCoreCurl(NSString *url,BOOL insecure,BOOL plain,B
 - (void)showPlainHTTPSubscriptionWarningForCount:(NSUInteger)count confirmation:(void (^)(void))block { (void)count; (void)block; CHECK("subscription-ui/http-not-silently-approved",NO); }
 - (void)showInsecureSubscriptionImportPromptForURLs:(id)urls fromBatchImport:(BOOL)batch happSource:(BOOL)happ { (void)urls; (void)batch; (void)happ; insecurePrompts++; }
 - (void)showSubscriptionImportFailures:(id)texts { (void)texts; failures++; }
-- (void)showProfileImportWarnings:(id)profiles { (void)profiles; }
+- (void)showSubscriptionUpdateFailures:(id)texts { (void)texts; failures++; }
+- (NSString *)shortUpdateFailureTextForSubscription:(id)sub errorText:(NSString *)error { (void)sub; return error; }
+- (void)setUpdatingSubscriptionIndex:(NSInteger)index { (void)index; }
+- (void)setSubscriptionRefreshInProgress:(BOOL)inProgress { (void)inProgress; }
 - (void)saveData {}
 - (void)reloadData {}
 - (void)normalizeSelection {}
@@ -145,6 +154,7 @@ static NSData *FetchURLViaVlessCoreCurl(NSString *url,BOOL insecure,BOOL plain,B
 
 static void setup(NSArray *statuses) {
     responses=statuses; requests=[NSMutableArray array];
+    responseBodies=nil;
     invalidBody=cancelFirst=NO; responseHeaders=nil; failureDetails=nil;
     VCSetCurrentSubscriptionTask(nil);
 }
@@ -153,6 +163,58 @@ static void importWithMode(MainVC *screen,BOOL compatible) {
     [screen performSubscriptionImportForURLs:@[sourceURL] allowInsecureFetch:NO fallbackSubscriptionsByURL:nil allowPlainHTTP:NO useCompatibleUserAgent:compatible]; runWork();
 }
 static MainVC *newImport(void) { return [[[MainVC alloc] init] autorelease]; }
+static void refreshWarningTests(void) {
+    NSArray *sources=@[
+        @{@"url":@"https://a.test/sub",@"items":@[],@"import_skipped":@4,@"import_issues":@[@"Old A issue"]},
+        @{@"url":@"https://b.test/sub",@"items":@[]},
+        @{@"url":@"https://c.test/sub",@"items":@[],@"import_skipped":@7,@"import_issues":@[@"Old C issue"]}];
+    for (NSUInteger selected=0;selected<[sources count];selected++) {
+        MainVC *screen=newImport(); [screen->_subscriptions setArray:sources]; setup(@[@200]);
+        screen->_pendingImportRefreshIndices=[@[@(selected)] copy];
+        NSUInteger initial=shownAlerts;
+        [screen startBackgroundSubscriptionRefreshAllowPlainHTTP:NO]; runWork();
+        CHECK("refresh-warning/clean-update-excludes-stored-warnings",shownAlerts==initial && screen->commits==1 && [requests count]==1);
+        CHECK("refresh-warning/clean-update-clears-own-warning",![[screen->_subscriptions objectAtIndex:selected] objectForKey:@"import_skipped"]);
+        for (NSUInteger i=0;i<[sources count];i++) if (i!=selected) CHECK("refresh-warning/unrelated-subscription-preserved",[[screen->_subscriptions objectAtIndex:i] isEqual:[sources objectAtIndex:i]]);
+    }
+    NSString *clean=@"socks5://test:p@127.0.0.1:1080#Profile";
+    NSString *mixed=[clean stringByAppendingString:@"\nvless://bad@127.0.0.1:443?type=unsupported"];
+    for (NSUInteger scenario=0;scenario<6;scenario++) {
+        MainVC *screen=newImport(); [screen->_subscriptions setArray:sources];
+        BOOL batch=scenario==1 || scenario==5;
+        setup(batch ? (scenario==5 ? @[@500,@500,@500] : @[@200,@200,@500]) : @[@200]);
+        responseBodies=batch ? @[mixed,clean,clean] : @[mixed];
+        if (!batch) screen->_pendingImportRefreshIndices=[@[@0] copy];
+        screen->saveFails=scenario==2; cancelFirst=scenario==3;
+        NSUInteger initial=shownAlerts;
+        [screen startBackgroundSubscriptionRefreshAllowPlainHTTP:NO];
+        if (scenario==4) screen->_configurationRevision++;
+        runWork();
+        if (scenario<2) {
+            CHECK("refresh-warning/only-fresh-successful-results",shownAlerts==initial+1 && [alertMessage hasPrefix:@"Skipped 1 configuration(s)."] && [alertMessage rangeOfString:@"Old A issue"].location==NSNotFound && [alertMessage rangeOfString:@"Old C issue"].location==NSNotFound);
+            CHECK("refresh-warning/new-warnings-persisted",[[[screen->_subscriptions objectAtIndex:0] objectForKey:@"import_skipped"] unsignedIntegerValue]==1);
+            CHECK("refresh-warning/failed-or-unselected-data-kept",[[screen->_subscriptions objectAtIndex:2] isEqual:[sources objectAtIndex:2]]);
+        } else {
+            CHECK("refresh-warning/no-stale-warning-on-failure-or-cancel",shownAlerts==initial && [screen->_subscriptions isEqual:sources]);
+        }
+    }
+}
+static void importWarningTests(void) {
+    MainVC *screen=newImport();
+    NSUInteger initial=shownAlerts;
+    [screen showProfileImportWarnings:@[@{@"skipped":@0,@"issues":@[]}]];
+    CHECK("import-warning/no-empty-alert",shownAlerts==initial);
+    [screen showProfileImportWarnings:@[@{@"skipped":@4,@"issues":@[@"Invalid or unsupported profile settings"]}]];
+    CHECK("import-warning/reason-label",shownAlerts==initial+1 && [alertMessage isEqual:@"Skipped 4 configuration(s).\nReason: Invalid or unsupported profile settings"]);
+    [screen showProfileImportWarnings:@[@{@"import_skipped":@4,@"import_issues":@[@"configs[]: invalid or unsupported profile settings",@"configs[]: invalid or unsupported profile settings"]}]];
+    CHECK("import-warning/legacy-details-normalized",[alertMessage isEqual:@"Skipped 4 configuration(s).\nReason: invalid or unsupported profile settings"]);
+    [screen showProfileImportWarnings:@[@{@"skipped":@2,@"issues":@[@"First issue",@"Second issue",@"First issue"]}]];
+    CHECK("import-warning/distinct-reasons",[alertMessage isEqual:@"Skipped 2 configuration(s).\nReasons:\nFirst issue\nSecond issue"]);
+    [screen showProfileImportWarnings:@[@{@"skipped":@1,@"issues":@[]}]];
+    CHECK("import-warning/no-empty-reason",[alertMessage isEqual:@"Skipped 1 configuration(s)."]);
+    [screen showProfileImportWarnings:@[@{@"skipped":@6,@"issues":@[@"One",@"Two",@"Three",@"Four",@"Five",@"Six"]}]];
+    CHECK("import-warning/reasons-remain-bounded",[alertMessage isEqual:@"Skipped 6 configuration(s).\nReasons:\nOne\nTwo\nThree\nFour\nFive"]);
+}
 static void editRefreshTests(void) {
     NSDictionary *source=@{@"url":sourceURL,@"name":@"Original",@"items":@[]};
     for (NSUInteger scenario=0;scenario<8;scenario++) {
@@ -377,5 +439,8 @@ int main(void) {
     editSaveTests();
     editRefreshTests();
     crypt3FetchTests();
+    importWarningTests();
+    refreshWarningTests();
+    [alertTitle release]; [alertMessage release]; [alertCancel release]; [alertAction release];
     FINISH("subscription fetch compatibility"); [pool drain]; return 0;
 }
