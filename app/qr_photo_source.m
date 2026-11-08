@@ -15,13 +15,33 @@
 #include <stdlib.h>
 
 @interface VCQRAssetRequest : NSObject {
-@public NSCondition *condition; ALAssetRepresentation *representation; BOOL done;
+@public NSCondition *condition; ALAssetRepresentation *representation; NSError *failure; BOOL done;
 }
 @end
 @implementation VCQRAssetRequest
 - (id)init { if ((self=[super init])) condition=[[NSCondition alloc] init]; return self; }
-- (void)dealloc { [condition release]; [representation release]; [super dealloc]; }
+- (void)dealloc { [condition release]; [representation release]; [failure release]; [super dealloc]; }
 @end
+
+NSString *VCPhotoLibraryAccessError(void) {
+    if (![ALAssetsLibrary respondsToSelector:@selector(authorizationStatus)])
+        return @"Photo library access is denied. On iOS 5, photo access requires Location Services. Open Settings > Location Services, turn it on and allow vless-core. Then select the photo again.";
+    if ([ALAssetsLibrary authorizationStatus]==ALAuthorizationStatusRestricted)
+        return @"Photo library access is restricted by device settings. Check the device restrictions or contact its administrator.";
+    return @"Photo library access is denied. Open Settings > Privacy > Photos and allow vless-core, then select the photo again.";
+}
+
+static NSString *photoAssetError(NSError *failure,BOOL finished) {
+    if (!finished) return @"Photo library did not respond in time. Try selecting the photo again.";
+    if (!failure) return @"The selected photo is no longer available. Select another photo.";
+    if ([[failure domain] isEqualToString:ALAssetsLibraryErrorDomain]) {
+        if (failure.code==ALAssetsLibraryAccessUserDeniedError || failure.code==ALAssetsLibraryAccessGloballyDeniedError)
+            return VCPhotoLibraryAccessError();
+        if (failure.code==ALAssetsLibraryDataUnavailableError)
+            return @"The selected photo is currently unavailable. Try selecting it again.";
+    }
+    return @"Photo library could not provide the selected photo. Try selecting it again.";
+}
 
 typedef struct { int fd; ALAssetRepresentation *asset; ALAssetsLibrary *library; off_t length; NSOperation *operation; } VCQRPhotoSource;
 static size_t photoRead(void *info,void *buffer,off_t offset,size_t count) {
@@ -129,7 +149,7 @@ NSArray *VCReadPhotoQR(NSURL *url,NSOperation *operation,NSString **error) {
             request->representation=[[asset defaultRepresentation] retain]; request->done=YES;
             [request->condition signal]; [request->condition unlock];
         } failureBlock:^(NSError *failure) {
-            (void)failure; [request->condition lock]; request->done=YES;
+            [request->condition lock]; request->failure=[failure retain]; request->done=YES;
             [request->condition signal]; [request->condition unlock];
         }];
         NSDate *deadline=[NSDate dateWithTimeIntervalSinceNow:10];
@@ -137,9 +157,15 @@ NSArray *VCReadPhotoQR(NSURL *url,NSOperation *operation,NSString **error) {
         while (!request->done && ![operation isCancelled] && [deadline timeIntervalSinceNow]>0)
             [request->condition waitUntilDate:[NSDate dateWithTimeIntervalSinceNow:.05]];
         input->asset=[request->representation retain];
+        BOOL finished=request->done;
+        NSError *assetFailure=[request->failure retain];
         [request->condition unlock];
+        BOOL failed=!finished || assetFailure || !input->asset;
+        NSString *failure=failed ? photoAssetError(assetFailure,finished) : nil;
+        [assetFailure release];
         input->length=[input->asset size];
         [request release];
+        if (failed) { if (error) *error=failure; photoRelease(input); return nil; }
     }
     if (input->length>32LL*1024*1024) {
         if (error) *error=@"The selected photo exceeds 32 MiB. Choose a smaller image.";
@@ -152,7 +178,7 @@ NSArray *VCReadPhotoQR(NSURL *url,NSOperation *operation,NSString **error) {
     NSDictionary *options=@{(id)kCGImageSourceShouldCache:@(NO)};
     CGImageSourceRef source=CGImageSourceCreateWithDataProvider(provider,(CFDictionaryRef)options);
     CGDataProviderRelease(provider);
-    if (!source) { if (error) *error=@"Unable to open photo image data"; return nil; }
+    if (!source) { if (error) *error=@"The selected photo is damaged or uses an unsupported image format."; return nil; }
     NSDictionary *properties=(NSDictionary *)CGImageSourceCopyPropertiesAtIndex(source,0,NULL);
     double width=[[properties objectForKey:(id)kCGImagePropertyPixelWidth] doubleValue];
     double height=[[properties objectForKey:(id)kCGImagePropertyPixelHeight] doubleValue];
@@ -164,10 +190,9 @@ NSArray *VCReadPhotoQR(NSURL *url,NSOperation *operation,NSString **error) {
     NSDictionary *thumbnailOptions=@{(id)kCGImageSourceCreateThumbnailFromImageAlways:@(YES),(id)kCGImageSourceCreateThumbnailWithTransform:@(YES),
         (id)kCGImageSourceThumbnailMaxPixelSize:@2048,(id)kCGImageSourceShouldCache:@(NO)};
     CGImageRef image=CGImageSourceCreateThumbnailAtIndex(source,0,(CFDictionaryRef)thumbnailOptions);
-    if (error) *error=@"Unable to decode the selected photo";
+    if (error) *error=@"The selected photo is damaged or uses an unsupported image format.";
     CGImageSourceStatus sourceStatus=CGImageSourceGetStatus(source),frameStatus=CGImageSourceGetStatusAtIndex(source,0);
     if (image && (sourceStatus!=kCGImageStatusComplete || frameStatus<=kCGImageStatusUnknownType)) {
-        if (error) *error=[NSString stringWithFormat:@"Unable to decode photo data (source %d, image %d)",(int)sourceStatus,(int)frameStatus];
         CGImageRelease(image); image=NULL;
     }
     CFRelease(source);

@@ -10,6 +10,9 @@ static char matrix[128][130];
 static double metadataWidth=4000,metadataHeight=3000;
 static NSOperation *cancelDuringRead;
 static NSUInteger liveLibraries;
+static BOOL modernPhotoAuthorization;
+static ALAuthorizationStatus photoAuthorization=ALAuthorizationStatusAuthorized;
+NSString *const ALAssetsLibraryErrorDomain=@"ALAssetsLibraryErrorDomain";
 @interface Provider : NSObject { @public void *context; CGDataProviderDirectCallbacks callbacks; }
 @end
 @implementation Provider
@@ -23,11 +26,24 @@ static NSUInteger liveLibraries;
 - (ALAssetRepresentation *)defaultRepresentation { return [[[ALAssetRepresentation alloc] init] autorelease]; }
 @end
 @implementation ALAssetsLibrary
++ (BOOL)respondsToSelector:(SEL)selector {
+    if (sel_isEqual(selector,@selector(authorizationStatus))) return modernPhotoAuthorization;
+    return [super respondsToSelector:selector];
+}
++ (ALAuthorizationStatus)authorizationStatus { return photoAuthorization; }
 - (id)init { if ((self=[super init])) liveLibraries++; return self; }
 - (void)dealloc { liveLibraries--; [super dealloc]; }
 - (void)assetForURL:(NSURL *)url resultBlock:(void (^)(ALAsset *))result failureBlock:(void (^)(NSError *))failure {
     (void)url;
-    if (fault==5) failure([NSError errorWithDomain:@"denied" code:1 userInfo:nil]);
+    if (fault==8) return;
+    if (fault==5 || fault==9 || fault==11 || fault==12 || fault==13) {
+        NSInteger code=fault==9 ? ALAssetsLibraryDataUnavailableError : fault==12 ? -1 :
+            fault==13 ? ALAssetsLibraryAccessUserDeniedError : ALAssetsLibraryAccessGloballyDeniedError;
+        NSAutoreleasePool *pool=[[NSAutoreleasePool alloc] init];
+        failure([NSError errorWithDomain:fault==11 ? @"unrelated" : ALAssetsLibraryErrorDomain code:code
+            userInfo:@{NSLocalizedDescriptionKey:@"private photo reference must not appear"}]);
+        [pool drain];
+    } else if (fault==10) result(nil);
     else { [cancelDuringRead cancel]; result([[[ALAsset alloc] init] autorelease]); }
 }
 @end
@@ -87,6 +103,8 @@ int main(void) {
     NSArray *texts=VCReadPhotoQR(url,operation,&error);
     CHECK("photo-source/file-roundtrip",[texts count]==1 && !error && [[texts objectAtIndex:0] isEqual:@"socks5://127.0.0.1:1080#vless-core"]);
     for (fault=1;fault<=4;fault++) CHECK("photo-source/image-failure",!VCReadPhotoQR(url,operation,&error) && [error length]);
+    fault=2;
+    CHECK("photo-source/damaged-image-message",!VCReadPhotoQR(url,operation,&error) && [error rangeOfString:@"damaged"].location!=NSNotFound);
     fault=6; CHECK("photo-source/incomplete-source-rejected",!VCReadPhotoQR(url,operation,&error));
     fault=7; CHECK("photo-source/invalid-frame-rejected",!VCReadPhotoQR(url,operation,&error));
     fault=0; metadataWidth=1e20; int previous=thumbnailCalls;
@@ -105,8 +123,38 @@ int main(void) {
         CHECK("photo-source/library-released-after-image-failure",liveLibraries==0);
     }
     fault=0;
-    fault=5; CHECK("photo-source/denied",!VCReadPhotoQR(asset,operation,&error)); fault=0;
+    for (fault=5;fault<=13;fault+=8) {
+        CHECK("photo-source/ios5-denied",!VCReadPhotoQR(asset,operation,&error) &&
+            [error rangeOfString:@"Settings > Location Services"].location!=NSNotFound &&
+            [error rangeOfString:@"allow vless-core"].location!=NSNotFound);
+    }
+    modernPhotoAuthorization=YES;
+    fault=5; photoAuthorization=ALAuthorizationStatusDenied;
+    CHECK("photo-source/modern-denied",!VCReadPhotoQR(asset,operation,&error) &&
+        [error rangeOfString:@"Settings > Privacy > Photos"].location!=NSNotFound &&
+        [error rangeOfString:@"Location Services"].location==NSNotFound);
+    photoAuthorization=ALAuthorizationStatusRestricted;
+    CHECK("photo-source/restricted",!VCReadPhotoQR(asset,operation,&error) && [error rangeOfString:@"restricted"].location!=NSNotFound);
+    photoAuthorization=ALAuthorizationStatusAuthorized; modernPhotoAuthorization=NO;
+    fault=9;
+    CHECK("photo-source/asset-unavailable",!VCReadPhotoQR(asset,operation,&error) && [error rangeOfString:@"currently unavailable"].location!=NSNotFound);
+    fault=10;
+    CHECK("photo-source/missing-asset",!VCReadPhotoQR(asset,operation,&error) && [error rangeOfString:@"no longer available"].location!=NSNotFound);
+    for (fault=11;fault<=12;fault++) {
+        CHECK("photo-source/unrelated-error-safe",!VCReadPhotoQR(asset,operation,&error) &&
+            [error rangeOfString:@"Location Services"].location==NSNotFound &&
+            [error rangeOfString:@"private photo reference"].location==NSNotFound);
+    }
+    fault=8;
+    NSDate *started=[NSDate date];
+    CHECK("photo-source/asset-timeout",!VCReadPhotoQR(asset,operation,&error) && [error rangeOfString:@"did not respond in time"].location!=NSNotFound);
+    CHECK("photo-source/asset-timeout-bounded",-[started timeIntervalSinceNow]<12);
+    fault=0;
     CHECK("photo-source/library-released-after-denial",liveLibraries==0);
+    char original[sizeof(matrix)]; memcpy(original,matrix,sizeof(matrix)); memset(matrix,'0',sizeof(matrix));
+    CHECK("photo-source/no-QR-distinct",!VCReadPhotoQR(asset,operation,&error) && [error isEqualToString:@"No QR codes found in this photo"]);
+    memcpy(matrix,original,sizeof(matrix));
+    fault=5; CHECK("photo-source/denied-without-error-output",!VCReadPhotoQR(asset,operation,NULL)); fault=0;
     cancelDuringRead=operation; CHECK("photo-source/cancel-asset-callback",!VCReadPhotoQR(asset,operation,&error)); cancelDuringRead=nil;
     CHECK("photo-source/library-released-after-cancel",liveLibraries==0);
     CHECK("photo-source/cancel-before-read",!VCReadPhotoQR(url,operation,&error));

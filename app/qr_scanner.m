@@ -722,7 +722,7 @@ static UIImage *VCQRPhotoIcon(void) {
     if ([ALAssetsLibrary respondsToSelector:@selector(authorizationStatus)]) {
         ALAuthorizationStatus status=[ALAssetsLibrary authorizationStatus];
         if (status==ALAuthorizationStatusDenied || status==ALAuthorizationStatusRestricted) {
-            [self showPhotoError:@"Photo library access is denied. Allow access in the device settings."]; return;
+            [self showPhotoError:VCPhotoLibraryAccessError()]; return;
         }
     }
     _photoPickerOpen=YES; _scannerVisible=NO;

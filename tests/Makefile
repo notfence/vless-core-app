@@ -481,10 +481,10 @@ $(HOST_BUILD_DIR)/qr_batch.inc: ../app/main_import.m extract_ui_methods.py | req
 $(HOST_BUILD_DIR)/test_qr_lifecycle: test_qr_lifecycle.m $(HOST_BUILD_DIR)/qr_lifecycle.inc $(HOST_BUILD_DIR)/qr_batch.inc | requirements
 	$(HOST_CC) $(HOST_CPPFLAGS) $(HOST_OBJCFLAGS) $(HOST_CFLAGS) -fblocks -D__IPHONE_OS_VERSION_MAX_ALLOWED=110000 -I$(HOST_BUILD_DIR) $< -o $@ -L$(ROOT)/../toolchains/ios6/lib -Wl,-rpath,$(ROOT)/../toolchains/ios6/lib -lBlocksRuntime $(HOST_LIBS)
 
-$(HOST_BUILD_DIR)/test_qr_photo_source: test_qr_photo_source.m ../app/qr_photo_source.m ../common/qr_photo.c ../common/qr_photo.h $(HOST_ZBAR_OBJECTS) | requirements
+$(HOST_BUILD_DIR)/test_qr_photo_source: test_qr_photo_source.m ../app/qr_photo_source.m ../app/qr_photo_source.h support/AssetsLibrary/AssetsLibrary.h ../common/qr_photo.c ../common/qr_photo.h $(HOST_ZBAR_OBJECTS) | requirements
 	$(HOST_CC) $(HOST_CPPFLAGS) $(HOST_OBJCFLAGS) $(HOST_CFLAGS) -fblocks -I$(ROOT)/$(ZBAR_DIR) $< ../common/qr_photo.c $(HOST_ZBAR_OBJECTS) -o $@ -L$(ROOT)/../toolchains/ios6/lib -Wl,-rpath,$(ROOT)/../toolchains/ios6/lib -lBlocksRuntime $(HOST_LIBS)
 
-$(HOST_BUILD_DIR)/test_qr_photo_native: test_qr_photo_native.m test_qr_photo_source.m support/Vision/Vision.h support/CoreGraphics/CoreGraphics.h ../app/qr_photo_source.m | requirements
+$(HOST_BUILD_DIR)/test_qr_photo_native: test_qr_photo_native.m test_qr_photo_source.m support/Vision/Vision.h support/CoreGraphics/CoreGraphics.h support/AssetsLibrary/AssetsLibrary.h ../app/qr_photo_source.m ../app/qr_photo_source.h | requirements
 	$(HOST_CC) $(HOST_CPPFLAGS) $(HOST_OBJCFLAGS) $(HOST_CFLAGS) -fblocks -D__IPHONE_OS_VERSION_MIN_REQUIRED=110000 $< -o $@ -L$(ROOT)/../toolchains/ios6/lib -Wl,-rpath,$(ROOT)/../toolchains/ios6/lib -lBlocksRuntime $(HOST_LIBS)
 
 $(HOST_BUILD_DIR)/test_httpupgrade_import: $(HOST_BUILD_DIR)/test_httpupgrade_import.o $(filter-out $(HOST_BUILD_DIR)/test_app_logic.o,$(APP_OBJECTS)) $(CORE_PARSE_OBJ)
