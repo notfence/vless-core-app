@@ -293,6 +293,55 @@ void VCAppearanceApplyHeaderView(UIView *view) {
     }
 }
 
+CGFloat VCAppearanceTableFooterHeight(UITableView *tableView, NSString *text, CGFloat fontSize, CGFloat minimumHeight) {
+    if (![text length]) return minimumHeight;
+    CGFloat width = MAX(1.0f, tableView.bounds.size.width - 36.0f);
+    if ([tableView respondsToSelector:@selector(readableContentGuide)] && tableView.cellLayoutMarginsFollowReadableWidth) {
+        CGFloat readableWidth = tableView.readableContentGuide.layoutFrame.size.width;
+        if (readableWidth > 0) width = MAX(1.0f, MIN(width, readableWidth));
+    }
+    CGSize size = [text sizeWithFont:[UIFont systemFontOfSize:fontSize]
+                 constrainedToSize:CGSizeMake(width, 1000.0f) lineBreakMode:NSLineBreakByWordWrapping];
+    return MAX(minimumHeight, ceilf(size.height) + 14.0f);
+}
+
+void VCAppearanceApplyFooterView(UIView *view, CGFloat fontSize) {
+    if ([view isKindOfClass:NSClassFromString(@"UITableViewHeaderFooterView")]) {
+        UILabel *label = ((UITableViewHeaderFooterView *)view).textLabel;
+        label.font = [UIFont systemFontOfSize:fontSize];
+        label.numberOfLines = 0;
+        label.lineBreakMode = NSLineBreakByWordWrapping;
+    }
+    VCAppearanceApplyHeaderView(view);
+}
+
+UIView *VCAppearanceTableFooterView(UITableView *tableView, NSString *text, CGFloat fontSize, CGFloat height) {
+    if (![text length]) return nil;
+    Class nativeClass = [tableView respondsToSelector:@selector(readableContentGuide)] ? NSClassFromString(@"UITableViewHeaderFooterView") : Nil;
+    if (nativeClass) {
+        UITableViewHeaderFooterView *footer = [[[nativeClass alloc] initWithReuseIdentifier:nil] autorelease];
+        footer.frame = CGRectMake(0, 0, tableView.bounds.size.width, height);
+        footer.backgroundView = [[[UIView alloc] initWithFrame:footer.bounds] autorelease];
+        footer.backgroundView.backgroundColor = [UIColor clearColor];
+        footer.contentView.backgroundColor = [UIColor clearColor];
+        footer.textLabel.text = text;
+        VCAppearanceApplyFooterView(footer, fontSize);
+        return footer;
+    }
+    UIView *footer = [[[UIView alloc] initWithFrame:CGRectMake(0, 0, tableView.bounds.size.width, height)] autorelease];
+    footer.backgroundColor = [UIColor clearColor];
+    UILabel *label = [[[UILabel alloc] initWithFrame:CGRectMake(18, 4, MAX(1.0f, tableView.bounds.size.width - 36.0f), height - 8)] autorelease];
+    label.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
+    label.backgroundColor = [UIColor clearColor];
+    label.font = [UIFont systemFontOfSize:fontSize];
+    label.numberOfLines = 0;
+    label.lineBreakMode = NSLineBreakByWordWrapping;
+    label.text = text;
+    [footer addSubview:label];
+    VCAppearanceApplyFooterView(footer, fontSize);
+    return footer;
+}
+
 void VCAppearanceRefreshVisibleTableHeaders(UITableView *tableView) {
     if (!tableView || ![tableView respondsToSelector:@selector(headerViewForSection:)]) return;
 

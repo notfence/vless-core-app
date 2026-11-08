@@ -228,39 +228,12 @@ static CGRect VCSubscriptionInputFrame(CGRect bounds, CGFloat textLeft) {
 }
 - (CGFloat)tableView:(UITableView *)tableView heightForFooterInSection:(NSInteger)section {
     NSString *text=[self tableView:tableView titleForFooterInSection:section];
-    if (![text length]) return 0.01f;
-    CGFloat width=MAX(1.0f,tableView.bounds.size.width-36.0f);
-    if ([tableView respondsToSelector:@selector(readableContentGuide)] && tableView.cellLayoutMarginsFollowReadableWidth) {
-        CGFloat readableWidth=tableView.readableContentGuide.layoutFrame.size.width;
-        if (readableWidth>0) width=MAX(1.0f,MIN(width,readableWidth));
-    }
-    CGSize size=[text sizeWithFont:[UIFont systemFontOfSize:14] constrainedToSize:CGSizeMake(width,1000) lineBreakMode:NSLineBreakByWordWrapping];
-    return ceilf(size.height)+14.0f;
+    return VCAppearanceTableFooterHeight(tableView,text,14,0.01f);
 }
 - (UIView *)tableView:(UITableView *)tableView viewForFooterInSection:(NSInteger)section {
     NSString *text=[self tableView:tableView titleForFooterInSection:section];
-    if (![text length]) return nil;
     CGFloat height=[self tableView:tableView heightForFooterInSection:section];
-    Class nativeClass=[tableView respondsToSelector:@selector(readableContentGuide)] ? NSClassFromString(@"UITableViewHeaderFooterView") : Nil;
-    if (nativeClass) {
-        UITableViewHeaderFooterView *footer=[[[nativeClass alloc] initWithReuseIdentifier:nil] autorelease];
-        footer.frame=CGRectMake(0,0,tableView.bounds.size.width,height);
-        footer.backgroundView=[[[UIView alloc] initWithFrame:footer.bounds] autorelease];
-        footer.backgroundView.backgroundColor=[UIColor clearColor];
-        footer.contentView.backgroundColor=[UIColor clearColor];
-        footer.textLabel.font=[UIFont systemFontOfSize:14]; footer.textLabel.numberOfLines=0;
-        footer.textLabel.lineBreakMode=NSLineBreakByWordWrapping; footer.textLabel.text=text;
-        VCAppearanceApplyHeaderView(footer);
-        return footer;
-    }
-    UIView *footer=[[[UIView alloc] initWithFrame:CGRectMake(0,0,tableView.bounds.size.width,height)] autorelease];
-    footer.backgroundColor=[UIColor clearColor];
-    UILabel *label=[[[UILabel alloc] initWithFrame:CGRectMake(18,4,MAX(1.0f,tableView.bounds.size.width-36.0f),height-8)] autorelease];
-    label.autoresizingMask=UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
-    label.backgroundColor=[UIColor clearColor]; label.font=[UIFont systemFontOfSize:14];
-    label.numberOfLines=0; label.lineBreakMode=NSLineBreakByWordWrapping; label.text=text;
-    [footer addSubview:label]; VCAppearanceApplyHeaderView(footer);
-    return footer;
+    return VCAppearanceTableFooterView(tableView,text,14,height);
 }
 - (CGFloat)tableView:(UITableView *)tableView heightForRowAtIndexPath:(NSIndexPath *)path { (void)tableView; (void)path; return 44; }
 - (UITableViewCell *)tableView:(UITableView *)tableView cellForRowAtIndexPath:(NSIndexPath *)path {
@@ -292,10 +265,7 @@ static CGRect VCSubscriptionInputFrame(CGRect bounds, CGFloat textLeft) {
 - (void)tableView:(UITableView *)tableView willDisplayHeaderView:(UIView *)view forSection:(NSInteger)section { (void)section; VCAppearanceApplyHeaderView(view); VCAppearanceScheduleVisibleTableHeadersRefresh(tableView); }
 - (void)tableView:(UITableView *)tableView willDisplayFooterView:(UIView *)view forSection:(NSInteger)section {
     (void)section;
-    if ([view isKindOfClass:NSClassFromString(@"UITableViewHeaderFooterView")]) {
-        ((UITableViewHeaderFooterView *)view).textLabel.font=[UIFont systemFontOfSize:14];
-    }
-    VCAppearanceApplyHeaderView(view); VCAppearanceScheduleVisibleTableHeadersRefresh(tableView);
+    VCAppearanceApplyFooterView(view,14); VCAppearanceScheduleVisibleTableHeadersRefresh(tableView);
 }
 - (void)tableView:(UITableView *)tableView didSelectRowAtIndexPath:(NSIndexPath *)path {
     [tableView deselectRowAtIndexPath:path animated:YES];

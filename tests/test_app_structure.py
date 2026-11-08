@@ -71,6 +71,18 @@ def main():
         raise AssertionError('app/ping-type-and-url-must-have-a-dedicated-ping-menu')
     ping_settings = settings_source.split('@implementation VCPingSettingsVC', 1)[1].split('@end', 1)[0]
     parent_settings = settings_source.split('@implementation SettingsVC', 1)[1].split('@end', 1)[0]
+    for path, owners in (
+        ('app/settings.m', ('VCPingSettingsVC', 'XrayVersionSpoofVC')),
+        ('app/routing.m', ('RoutingVC',)),
+        ('app/diagnostics.m', ('DebugVC',)),
+        ('app/subscription_info.m', ('SubscriptionEditVC',)),
+    ):
+        source = (ROOT / path).read_text()
+        for owner in owners:
+            controller = source.split('@implementation ' + owner, 1)[1].split('@end', 1)[0]
+            for helper in ('VCAppearanceTableFooterHeight(', 'VCAppearanceTableFooterView(', 'VCAppearanceApplyFooterView('):
+                if helper not in controller:
+                    raise AssertionError(f'app/{owner}-footers-must-share-native-insets-measurement-and-styling')
     if 'return @"Ping";' not in parent_settings or 'if (section == 1) return 4;' not in parent_settings or 'VCPingSettingsVC alloc' not in parent_settings:
         raise AssertionError('app/network-must-open-ping-menu-instead-of-exposing-its-fields')
     if 'kVCSettingsProxyPingURLAlertTag' in parent_settings or 'otherButtonTitles:@"Proxy GET"' in parent_settings:

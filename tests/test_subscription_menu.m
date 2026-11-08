@@ -162,6 +162,9 @@ static Class SubscriptionUIClass(NSString *name) {
     if ([name isEqual:@"UITableViewHeaderFooterView"] && !nativeFooterAvailable) return Nil;
     return NSClassFromString(name);
 }
+#define NSClassFromString SubscriptionUIClass
+#include "settings_footer.inc"
+#undef NSClassFromString
 
 @interface UIActionSheet : NSObject { NSMutableArray *_buttons; NSInteger _destructiveButtonIndex,_cancelButtonIndex; }
 @property NSInteger destructiveButtonIndex,cancelButtonIndex;
@@ -198,9 +201,7 @@ static Class SubscriptionUIClass(NSString *name) {
 }
 @end
 @implementation SubscriptionEditVC
-#define NSClassFromString SubscriptionUIClass
 #include "subscription_menu_editor.inc"
-#undef NSClassFromString
 - (void)dealloc { [_agentField release]; [super dealloc]; }
 @end
 int main(void) {
@@ -267,6 +268,39 @@ int main(void) {
     UIView *legacyFooter=[editor tableView:table viewForFooterInSection:2];
     CHECK("subscription-menu/ios5-footer-fallback",legacyFooter && ![legacyFooter isKindOfClass:[UITableViewHeaderFooterView class]] && [[(UILabel *)[legacyFooter.subviews objectAtIndex:0] text] isEqual:@"Default: vless-core-app own user-agent."]);
     nativeFooterAvailable=YES; readableGuideAvailable=YES;
+    NSString *footerTexts[] = {
+        @"When disabled, all supported traffic uses the selected proxy.",
+        @"Target for Proxy GET and tunnel checks. Not used by TCP or ICMP. Only HTTP is supported. Redirects are not followed. Empty restores the default URL.",
+        @"When disabled, vless-core-cli reports Xray version 26.6.27. Changes apply on the next connection.",
+        @"Up to 250 recent events are kept only on this device. URLs, IP addresses, UUIDs, names and secrets are omitted. Nothing is sent automatically."
+    };
+    for (NSUInteger i=0;i<5;i++) {
+        CGFloat width=editorWidths[i],inset=textInsets[i]; nativeFooterInset=inset;
+        table.bounds=CGRectMake(0,0,width,480);
+        table.readableContentGuide.layoutFrame=CGRectMake(inset,0,width-2*inset,480);
+        for (NSUInteger screen=0;screen<4;screen++) {
+            CGFloat fontSize=screen==3 ? 13 : 14,minimum=screen==3 ? 82 : 0.01f;
+            NSString *text=footerTexts[screen];
+            CGFloat height=VCAppearanceTableFooterHeight(table,text,fontSize,minimum);
+            UITableViewHeaderFooterView *footer=(id)VCAppearanceTableFooterView(table,text,fontSize,height);
+            CHECK("settings-footer/native-column-on-phone-ipad-and-rotation",[footer isKindOfClass:[UITableViewHeaderFooterView class]] && footer.textLabel.frame.origin.x==inset && footer.textLabel.frame.size.width==width-2*inset);
+            CHECK("settings-footer/preserves-description-and-font",[footer.textLabel.text isEqual:text] && footer.textLabel.font.pointSize==fontSize);
+            CHECK("settings-footer/wrapped-text-fits-height",height>=minimum && footer.textLabel.numberOfLines==0 && footer.textLabel.lineBreakMode==NSLineBreakByWordWrapping && height>=ceilf([text sizeWithFont:footer.textLabel.font constrainedToSize:CGSizeMake(width-2*inset,1000) lineBreakMode:NSLineBreakByWordWrapping].height)+8);
+            footer.textLabel.font=[UIFont systemFontOfSize:17]; footer.textLabel.numberOfLines=1;
+            VCAppearanceApplyFooterView(footer,fontSize);
+            CHECK("settings-footer/reapplies-font-wrap-and-theme-before-display",footer.textLabel.font.pointSize==fontSize && footer.textLabel.numberOfLines==0 && [footer.textLabel.textColor isEqual:VCSecondaryTextColor()]);
+        }
+    }
+    CHECK("settings-footer/empty-sections-keep-spacing",VCAppearanceTableFooterHeight(table,nil,14,0.01f)==0.01f && VCAppearanceTableFooterHeight(table,@"",13,18)==18 && !VCAppearanceTableFooterView(table,nil,14,18));
+    readableGuideAvailable=NO;
+    for (NSUInteger screen=0;screen<4;screen++) {
+        CGFloat fontSize=screen==3 ? 13 : 14;
+        CGFloat height=VCAppearanceTableFooterHeight(table,footerTexts[screen],fontSize,0.01f);
+        UIView *footer=VCAppearanceTableFooterView(table,footerTexts[screen],fontSize,height);
+        UILabel *label=[footer.subviews objectAtIndex:0];
+        CHECK("settings-footer/ios5-to8-stays-left-aligned",![footer isKindOfClass:[UITableViewHeaderFooterView class]] && label.frame.origin.x==18 && label.font.pointSize==fontSize && [label.text isEqual:footerTexts[screen]]);
+    }
+    readableGuideAvailable=YES;
     VCSubscriptionActionSheet *sheet=[[[VCSubscriptionActionSheet alloc] initWithSubscription:@{} delegate:nil] autorelease];
     CHECK("subscription-menu/delete-confirmation",[sheet.buttons isEqual:@[@"Delete",@"Cancel"]] && sheet.destructiveButtonIndex==0 && sheet.cancelButtonIndex==1);
     CGRect bounds=CGRectMake(0,0,320,460);

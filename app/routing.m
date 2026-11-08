@@ -156,36 +156,13 @@ static NSInteger const kRoutingRuleActionSheetTagBase = 6200;
 
 - (CGFloat)tableView:(UITableView *)tableView heightForFooterInSection:(NSInteger)section {
     NSString *text = [self tableView:tableView titleForFooterInSection:section];
-    if (!text) return 0.01f;
-
-    CGFloat width = MAX(1.0f, tableView.bounds.size.width - 36.0f);
-    CGSize size = [text sizeWithFont:[UIFont systemFontOfSize:14.0f]
-                   constrainedToSize:CGSizeMake(width, 1000.0f)
-                       lineBreakMode:NSLineBreakByWordWrapping];
-    return ceilf(size.height) + 14.0f;
+    return VCAppearanceTableFooterHeight(tableView, text, 14, 0.01f);
 }
 
 - (UIView *)tableView:(UITableView *)tableView viewForFooterInSection:(NSInteger)section {
     NSString *text = [self tableView:tableView titleForFooterInSection:section];
-    if (!text) return nil;
-
     CGFloat height = [self tableView:tableView heightForFooterInSection:section];
-    UIView *footer = [[[UIView alloc] initWithFrame:
-                       CGRectMake(0.0f, 0.0f, tableView.bounds.size.width, height)] autorelease];
-    footer.backgroundColor = [UIColor clearColor];
-
-    UILabel *label = [[[UILabel alloc] initWithFrame:
-                       CGRectMake(18.0f, 4.0f, tableView.bounds.size.width - 36.0f, height - 8.0f)] autorelease];
-    label.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
-    label.backgroundColor = [UIColor clearColor];
-    label.font = [UIFont systemFontOfSize:14.0f];
-    label.numberOfLines = 0;
-    label.lineBreakMode = NSLineBreakByWordWrapping;
-    label.textColor = VCSecondaryTextColor();
-    label.text = text;
-    [footer addSubview:label];
-    VCAppearanceApplyHeaderView(footer);
-    return footer;
+    return VCAppearanceTableFooterView(tableView, text, 14, height);
 }
 
 - (UITableViewCell *)tableView:(UITableView *)tableView cellForRowAtIndexPath:(NSIndexPath *)indexPath {
@@ -258,7 +235,7 @@ static NSInteger const kRoutingRuleActionSheetTagBase = 6200;
 - (void)tableView:(UITableView *)tableView willDisplayFooterView:(UIView *)view forSection:(NSInteger)section {
     (void)tableView;
     (void)section;
-    VCAppearanceApplyHeaderView(view);
+    VCAppearanceApplyFooterView(view, 14);
     VCAppearanceScheduleVisibleTableHeadersRefresh(tableView);
 }
 

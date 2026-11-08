@@ -188,7 +188,11 @@ $(HOST_BUILD_DIR)/subscription_menu_editor.inc: ../app/subscription_info.m extra
 	mkdir -p $(dir $@)
 	python3 extract_ui_methods.py $< $@ '- (UITextField *)newFieldWithText:' '- (NSInteger)tableView:(UITableView *)tableView numberOfRowsInSection:' '- (NSString *)tableView:(UITableView *)tableView titleForFooterInSection:' '- (CGFloat)tableView:(UITableView *)tableView heightForFooterInSection:' '- (UIView *)tableView:(UITableView *)tableView viewForFooterInSection:' '- (void)tableView:(UITableView *)tableView didSelectRowAtIndexPath:'
 
-$(HOST_BUILD_DIR)/test_subscription_menu.o: $(HOST_BUILD_DIR)/subscription_menu_sheet.inc $(HOST_BUILD_DIR)/subscription_menu_editor.inc $(HOST_BUILD_DIR)/subscription_menu_layout.inc $(HOST_BUILD_DIR)/subscription_menu_dismiss.inc
+$(HOST_BUILD_DIR)/settings_footer.inc: ../app/appearance.m extract_ui_methods.py
+	mkdir -p $(dir $@)
+	python3 extract_ui_methods.py $< $@ 'CGFloat VCAppearanceTableFooterHeight(' 'void VCAppearanceApplyFooterView(' 'UIView *VCAppearanceTableFooterView('
+
+$(HOST_BUILD_DIR)/test_subscription_menu.o: $(HOST_BUILD_DIR)/subscription_menu_sheet.inc $(HOST_BUILD_DIR)/subscription_menu_editor.inc $(HOST_BUILD_DIR)/subscription_menu_layout.inc $(HOST_BUILD_DIR)/subscription_menu_dismiss.inc $(HOST_BUILD_DIR)/settings_footer.inc
 $(HOST_BUILD_DIR)/test_subscription_menu.o: HOST_CPPFLAGS += -I$(HOST_BUILD_DIR)
 $(HOST_BUILD_DIR)/test_subscription_menu: $(HOST_BUILD_DIR)/test_subscription_menu.o
 	$(HOST_CC) $(SANITIZE) $^ -o $@ $(HOST_LIBS)

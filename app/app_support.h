@@ -263,6 +263,12 @@ void VCAppearanceApplyCell(UITableViewCell *cell);
 
 void VCAppearanceApplyHeaderView(UIView *view);
 
+CGFloat VCAppearanceTableFooterHeight(UITableView *tableView, NSString *text, CGFloat fontSize, CGFloat minimumHeight);
+
+UIView *VCAppearanceTableFooterView(UITableView *tableView, NSString *text, CGFloat fontSize, CGFloat height);
+
+void VCAppearanceApplyFooterView(UIView *view, CGFloat fontSize);
+
 void VCAppearanceRefreshVisibleTableHeaders(UITableView *tableView);
 
 void VCAppearanceScheduleVisibleTableHeadersRefresh(UITableView *tableView);
