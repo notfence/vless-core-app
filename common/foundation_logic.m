@@ -338,8 +338,38 @@ BOOL SubscriptionDictionaryAllowsPlainHTTP(NSDictionary *sub) {
 }
 
 BOOL HappURLStringIsEncrypted(NSString *urlString) {
-    NSString *lower = [urlString isKindOfClass:[NSString class]] ? [urlString lowercaseString] : nil;
-    return [lower hasPrefix:@"happ://crypt4/"] || [lower hasPrefix:@"happ://crypt5/"];
+    const char *utf8=[urlString isKindOfClass:[NSString class]] ? [urlString UTF8String] : NULL;
+    return utf8 && VCHappIsEncryptedLink(utf8);
+}
+
+NSString *VCHappDecryptedLink(NSString *link, NSString **error) {
+    if (error) *error=nil;
+    if (![link isKindOfClass:[NSString class]] || [link length]>kVCMaximumSubscriptionURLBytes) {
+        if (error) *error=@"Invalid HAPP link";
+        return nil;
+    }
+    NSUInteger length=[link lengthOfBytesUsingEncoding:NSUTF8StringEncoding];
+    const char *utf8=[link UTF8String];
+    if (length>kVCMaximumSubscriptionURLBytes || !utf8 || memchr(utf8,0,length)) {
+        if (error) *error=@"Invalid HAPP link";
+        return nil;
+    }
+    unsigned char *plain=NULL; size_t size=0; char detail[256];
+    int result=VCHappDecryptLink(utf8,&plain,&size,NULL,0,detail,sizeof(detail));
+    NSString *decoded=nil;
+    if (result==1 && plain && size && !memchr(plain,0,size))
+        decoded=[[[NSString alloc] initWithBytes:plain length:size encoding:NSUTF8StringEncoding] autorelease];
+    if (plain) { OPENSSL_cleanse(plain,size+1); VCHappFreePlaintext(plain); }
+    if (result!=1) {
+        if (error) *error=detail[0] ? [NSString stringWithFormat:@"Invalid HAPP link: %s",detail] : @"Invalid HAPP link";
+        return nil;
+    }
+    decoded=TrimSimpleString(decoded);
+    if (![decoded length] || [decoded rangeOfCharacterFromSet:[NSCharacterSet controlCharacterSet]].location!=NSNotFound) {
+        if (error) *error=@"HAPP payload is not valid UTF-8";
+        return nil;
+    }
+    return decoded;
 }
 
 BOOL SubscriptionDictionaryUsesHappHeaders(NSDictionary *sub) {

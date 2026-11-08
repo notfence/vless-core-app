@@ -13,8 +13,10 @@
 #include <string.h>
 #include <strings.h>
 
+static const char kHappCrypt3Prefix[] = "happ://crypt3/";
 static const char kHappCrypt4Prefix[] = "happ://crypt4/";
 static const char kHappCrypt5Prefix[] = "happ://crypt5/";
+static const size_t kHappMaximumLinkBytes = 8192;
 
 typedef struct {
     const char *marker;
@@ -23,6 +25,7 @@ typedef struct {
 
 #include "happ_crypt5_keys.inc"
 #include "happ_crypt4_key.inc"
+#include "happ_crypt3_key.inc"
 
 static void SetError(char *errorOut, size_t errorCapacity, const char *format, ...) {
     if (!errorOut || errorCapacity == 0) return;
@@ -66,7 +69,11 @@ static int DecodeBase64(const char *input,
         return 0;
     }
 
-    inputLength = strlen(input);
+    inputLength = strnlen(input, kHappMaximumLinkBytes + 1);
+    if (inputLength > kHappMaximumLinkBytes) {
+        SetError(errorOut, errorCapacity, "HAPP data exceeds size limit");
+        return 0;
+    }
     normalized = (char *)malloc(inputLength + 4);
     if (!normalized) {
         SetError(errorOut, errorCapacity, "out of memory");
@@ -76,10 +83,18 @@ static int DecodeBase64(const char *input,
     for (i = 0; i < inputLength; i++) {
         unsigned char c = (unsigned char)input[i];
         if (isspace(c)) continue;
-        if (c == '=') continue;
+        if (c == '=') {
+            if (++padding > 2) {
+                free(normalized);
+                SetError(errorOut, errorCapacity, "invalid base64 padding");
+                return 0;
+            }
+            continue;
+        }
         if (c == '-') c = '+';
         if (c == '_') c = '/';
-        if (!isalnum(c) && c != '+' && c != '/') {
+        if (padding || !((c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') ||
+                         (c >= '0' && c <= '9') || c == '+' || c == '/')) {
             free(normalized);
             SetError(errorOut, errorCapacity, "invalid base64 character");
             return 0;
@@ -87,10 +102,22 @@ static int DecodeBase64(const char *input,
         normalized[normalizedLength++] = (char)c;
     }
 
-    if (normalizedLength == 0 || normalizedLength % 4 == 1) {
+    if (normalizedLength == 0 || normalizedLength % 4 == 1 ||
+        (padding && (normalizedLength + padding) % 4 != 0)) {
         free(normalized);
         SetError(errorOut, errorCapacity, "invalid base64 length");
         return 0;
+    }
+
+    if (normalizedLength % 4) {
+        static const char alphabet[] = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+        const char *last = strchr(alphabet, normalized[normalizedLength - 1]);
+        unsigned mask = normalizedLength % 4 == 2 ? 15 : 3;
+        if (!last || ((unsigned)(last - alphabet) & mask)) {
+            free(normalized);
+            SetError(errorOut, errorCapacity, "invalid base64 padding bits");
+            return 0;
+        }
     }
 
     padding = (4 - (normalizedLength % 4)) % 4;
@@ -133,25 +160,22 @@ static int DecodeBase64(const char *input,
     return 1;
 }
 
-static int VCHappIsCrypt4Link(const char *link) {
-    size_t prefixLength = sizeof(kHappCrypt4Prefix) - 1;
-    return link && strncasecmp(link, kHappCrypt4Prefix, prefixLength) == 0;
-}
-
 int VCHappIsEncryptedLink(const char *link) {
+    size_t crypt3PrefixLength = sizeof(kHappCrypt3Prefix) - 1;
     size_t crypt4PrefixLength = sizeof(kHappCrypt4Prefix) - 1;
     size_t crypt5PrefixLength = sizeof(kHappCrypt5Prefix) - 1;
     if (!link) return 0;
-    return strncasecmp(link, kHappCrypt4Prefix, crypt4PrefixLength) == 0 ||
+    return strncasecmp(link, kHappCrypt3Prefix, crypt3PrefixLength) == 0 ||
+           strncasecmp(link, kHappCrypt4Prefix, crypt4PrefixLength) == 0 ||
            strncasecmp(link, kHappCrypt5Prefix, crypt5PrefixLength) == 0;
 }
 
-int VCHappDecryptCrypt4Link(const char *link,
-                            unsigned char **plaintextOut,
-                            size_t *plaintextLengthOut,
-                            char *errorOut,
-                            size_t errorCapacity) {
-    size_t prefixLength = sizeof(kHappCrypt4Prefix) - 1;
+static int DecryptRSALink(const char *payload,
+                          const char *privateKeyBase64,
+                          unsigned char **plaintextOut,
+                          size_t *plaintextLengthOut,
+                          char *errorOut,
+                          size_t errorCapacity) {
     unsigned char *keyDER = NULL;
     size_t keyDERLength = 0;
     unsigned char *ciphertext = NULL;
@@ -160,6 +184,7 @@ int VCHappDecryptCrypt4Link(const char *link,
     size_t plaintextLength = 0;
     const unsigned char *keyCursor;
     EVP_PKEY *key = NULL;
+    EVP_PKEY_CTX *ctx = NULL;
     size_t blockSize;
     size_t offset;
     int result = -1;
@@ -168,13 +193,12 @@ int VCHappDecryptCrypt4Link(const char *link,
     if (plaintextLengthOut) *plaintextLengthOut = 0;
     if (errorOut && errorCapacity > 0) errorOut[0] = '\0';
 
-    if (!VCHappIsCrypt4Link(link)) return 0;
     if (!plaintextOut || !plaintextLengthOut) {
         SetError(errorOut, errorCapacity, "invalid output buffer");
         return -1;
     }
 
-    if (!DecodeBase64(kHappCrypt4PrivateKeyBase64,
+    if (!DecodeBase64(privateKeyBase64,
                       &keyDER,
                       &keyDERLength,
                       errorOut,
@@ -182,14 +206,15 @@ int VCHappDecryptCrypt4Link(const char *link,
         goto cleanup;
     }
 
+    ERR_clear_error();
     keyCursor = keyDER;
     key = d2i_PrivateKey(EVP_PKEY_RSA, NULL, &keyCursor, (long)keyDERLength);
     if (!key || keyCursor != keyDER + keyDERLength) {
-        SetOpenSSLError(errorOut, errorCapacity, "cannot load happ crypt4 key");
+        SetOpenSSLError(errorOut, errorCapacity, "cannot load HAPP RSA key");
         goto cleanup;
     }
 
-    if (!DecodeBase64(link + prefixLength,
+    if (!DecodeBase64(payload,
                       &ciphertext,
                       &ciphertextLength,
                       errorOut,
@@ -213,22 +238,23 @@ int VCHappDecryptCrypt4Link(const char *link,
         goto cleanup;
     }
 
+    ctx = EVP_PKEY_CTX_new(key, NULL);
+    if (!ctx || EVP_PKEY_decrypt_init(ctx) <= 0 ||
+        EVP_PKEY_CTX_set_rsa_padding(ctx, RSA_PKCS1_PADDING) <= 0) {
+        SetOpenSSLError(errorOut, errorCapacity, "HAPP RSA initialization failed");
+        goto cleanup;
+    }
+
     for (offset = 0; offset < ciphertextLength; offset += blockSize) {
-        EVP_PKEY_CTX *ctx = EVP_PKEY_CTX_new(key, NULL);
         size_t chunkLength = blockSize;
-        if (!ctx ||
-            EVP_PKEY_decrypt_init(ctx) <= 0 ||
-            EVP_PKEY_CTX_set_rsa_padding(ctx, RSA_PKCS1_PADDING) <= 0 ||
-            EVP_PKEY_decrypt(ctx,
+        if (EVP_PKEY_decrypt(ctx,
                              plaintext + plaintextLength,
                              &chunkLength,
                              ciphertext + offset,
                              blockSize) <= 0) {
-            if (ctx) EVP_PKEY_CTX_free(ctx);
-            SetOpenSSLError(errorOut, errorCapacity, "happ crypt4 decryption failed");
+            SetOpenSSLError(errorOut, errorCapacity, "HAPP RSA decryption failed");
             goto cleanup;
         }
-        EVP_PKEY_CTX_free(ctx);
         plaintextLength += chunkLength;
     }
 
@@ -239,10 +265,11 @@ int VCHappDecryptCrypt4Link(const char *link,
     result = 1;
 
 cleanup:
-    if (plaintext) free(plaintext);
+    if (plaintext) { OPENSSL_cleanse(plaintext, ciphertextLength + 1); free(plaintext); }
     if (ciphertext) free(ciphertext);
+    if (ctx) EVP_PKEY_CTX_free(ctx);
     if (key) EVP_PKEY_free(key);
-    if (keyDER) free(keyDER);
+    if (keyDER) { OPENSSL_cleanse(keyDER, keyDERLength); free(keyDER); }
     return result;
 }
 
@@ -647,12 +674,15 @@ int VCHappDecryptLink(const char *link,
                       size_t modeCapacity,
                       char *errorOut,
                       size_t errorCapacity) {
-    int result;
     if (plaintextOut) *plaintextOut = NULL;
     if (plaintextLengthOut) *plaintextLengthOut = 0;
     if (modeOut && modeCapacity > 0) modeOut[0] = '\0';
     if (errorOut && errorCapacity > 0) errorOut[0] = '\0';
     if (!VCHappIsEncryptedLink(link)) return 0;
+    if (strnlen(link, kHappMaximumLinkBytes + 1) > kHappMaximumLinkBytes) {
+        SetError(errorOut, errorCapacity, "HAPP link exceeds size limit");
+        return -1;
+    }
 
     if (strncasecmp(link, kHappCrypt5Prefix, sizeof(kHappCrypt5Prefix) - 1) == 0) {
         if (modeOut && modeCapacity > 0) {
@@ -666,16 +696,17 @@ int VCHappDecryptLink(const char *link,
                                  errorCapacity);
     }
 
+    int crypt3 = strncasecmp(link, kHappCrypt3Prefix, sizeof(kHappCrypt3Prefix) - 1) == 0;
     if (modeOut && modeCapacity > 0) {
-        snprintf(modeOut, modeCapacity, "%s", "crypt4");
+        snprintf(modeOut, modeCapacity, "%s", crypt3 ? "crypt3" : "crypt4");
         modeOut[modeCapacity - 1] = '\0';
     }
-    result = VCHappDecryptCrypt4Link(link,
-                                     plaintextOut,
-                                     plaintextLengthOut,
-                                     errorOut,
-                                     errorCapacity);
-    return result;
+    return DecryptRSALink(link + (crypt3 ? sizeof(kHappCrypt3Prefix) - 1 : sizeof(kHappCrypt4Prefix) - 1),
+                          crypt3 ? kHappCrypt3PrivateKeyBase64 : kHappCrypt4PrivateKeyBase64,
+                          plaintextOut,
+                          plaintextLengthOut,
+                          errorOut,
+                          errorCapacity);
 }
 
 void VCHappFreePlaintext(void *plaintext) {

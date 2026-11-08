@@ -1,3 +1,4 @@
+import base64
 import contextlib
 import http.server
 import json
@@ -15,9 +16,10 @@ PROFILE = "trojan://test%2Bpass@example.test:443?security=tls#Loopback"
 
 
 def tool(mode, value):
-    result = subprocess.run([str(TOOL), mode], input=value, text=True, capture_output=True, timeout=10)
+    executable = BUILD / "test_import_formats" if mode.startswith("--happ-") else TOOL
+    result = subprocess.run([str(executable), mode], input=value, text=True, capture_output=True, timeout=10)
     if result.returncode:
-        raise AssertionError("INCY test helper rejected fixture")
+        raise AssertionError("Subscription test helper rejected fixture")
     return result.stdout
 
 
@@ -56,14 +58,16 @@ def server(certificate=None, key=None):
 
 
 def fetch(link, allow_http=False, certificate=None):
-    descriptor = json.loads(tool("--prepare", link))
+    descriptor = json.loads(tool("--happ-prepare" if link.startswith("happ://") else "--prepare", link))
     url = descriptor["value"]
-    if url.startswith("http://") and not allow_http:
+    if url.startswith("http://") and not allow_http and not descriptor.get("happ"):
         return None, "confirmation"
     command = ["curl", "--silent", "--show-error", "--fail", "--noproxy", "*",
                "--connect-timeout", "2", "--max-time", "3", "--config", "-"]
     if certificate:
         command += ["--cacert", str(certificate)]
+    if descriptor.get("happ"):
+        command += ["--user-agent", descriptor["agent"], "--header", "X-HWID: synthetic-loopback-hwid"]
     response = subprocess.run(command, input="url = " + json.dumps(url) + "\n",
                               capture_output=True, text=True, timeout=5)
     return response.stdout, response.returncode
@@ -103,3 +107,28 @@ with tempfile.TemporaryDirectory(prefix="incy-loopback-", dir=ROOT / "build") as
             if Handler.paths[-2:] != ["/sub?token=a+b%2B%2540&x=%26"] * 2:
                 raise AssertionError("INCY loopback changed URL encoding")
             print("PASS INCY loopback:", "HTTPS trust and update" if secure else "HTTP confirmation and update")
+            encrypted = subprocess.run(["openssl", "pkeyutl", "-encrypt", "-pubin", "-inkey", str(ROOT / "tests/happ_crypt3_public.pem"),
+                                        "-pkeyopt", "rsa_padding_mode:pkcs1"], input=url.encode(), capture_output=True, check=True, timeout=5)
+            link = "happ://crypt3/" + base64.b64encode(encrypted.stdout).decode()
+            descriptor = json.loads(tool("--happ-prepare", link))
+            if descriptor["value"] != url or not descriptor["happ"]:
+                raise AssertionError("HAPP crypt3 changed the subscription URL or source type")
+            before = len(Handler.paths)
+            body, status = fetch(link)
+            if secure:
+                if status != 60 or len(Handler.paths) != before:
+                    raise AssertionError("HAPP crypt3 bypassed certificate verification")
+            elif status or body != PROFILE:
+                raise AssertionError("HAPP crypt3 changed existing HAPP HTTP behavior")
+            source = {"url": link, "name": "HAPP subscription", "custom_name": "Mine", "items": []}
+            for _ in range(2):
+                body, status = fetch(source["url"], certificate=certificate if secure else None)
+                if status or body != PROFILE:
+                    raise AssertionError("HAPP crypt3 loopback fetch damaged subscription")
+                updated = json.loads(tool("--happ-update", json.dumps({"source": source, "body": body, "title": "Changed provider"})))
+                if updated["url"] != link or updated["name"] != "Mine" or updated["items"] != [PROFILE] or url in json.dumps(updated):
+                    raise AssertionError("HAPP crypt3 update damaged its wrapper or rename")
+                source = json.loads(json.dumps(updated))
+            if Handler.paths[-2:] != ["/sub?token=a+b%2B%2540&x=%26"] * 2:
+                raise AssertionError("HAPP crypt3 loopback changed URL encoding")
+            print("PASS HAPP crypt3 loopback:", "HTTPS trust and update" if secure else "HTTP and update")

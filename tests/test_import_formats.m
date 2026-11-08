@@ -1,5 +1,6 @@
 #import "../common/foundation_logic.h"
 #import "../common/profile_logic.h"
+#import "../common/subscription_task.h"
 #import "../integrations/karing/karing_backup.h"
 #include "../integrations/happ/happ_crypto.h"
 #include "check.h"
@@ -237,7 +238,103 @@ static void shadowsocksProfiles(void) {
     for (NSString *value in @[@"ss://@example.test:443",@"ss://?",@"ss://",@"ss://aes-128-gcm:p@[::1]:0",@"ss://aes-128-gcm:p@example.test:65536"])
         CHECK("ss/empty-and-endpoint-bounds",![p isSupportedConfigTupleForURI:value]);
 }
+static void crypt3Fixtures(void) {
+    NSData *data=[NSData dataWithContentsOfFile:@"happ_crypt3_fixtures.json"];
+    NSDictionary *fixtures=data ? [NSJSONSerialization JSONObjectWithData:data options:0 error:NULL] : nil;
+    CHECK("happ/crypt3-fixtures-present",[fixtures count]==9);
+    for (NSString *name in fixtures) {
+        NSDictionary *fixture=[fixtures objectForKey:name];
+        NSString *link=[fixture objectForKey:@"link"];
+        CHECK("happ/crypt3-c-recognized",VCHappIsEncryptedLink([link UTF8String]));
+        CHECK("happ/crypt3-foundation-recognized",HappURLStringIsEncrypted(link));
+        CHECK("happ/crypt3-protected-subscription",SubscriptionDictionaryIsHappEncrypted(@{@"url":link}));
+        CHECK("happ/crypt3-provider-headers",SubscriptionDictionaryUsesHappHeaders(@{@"url":link}));
+        NSData *expected=DecodeBase64String([fixture objectForKey:@"plaintext_base64"]) ?: [NSData data];
+        unsigned char *plain=NULL; size_t size=0; char mode[16],error[256];
+        CHECK("happ/crypt3-independent-vector",VCHappDecryptLink([link UTF8String],&plain,&size,mode,sizeof(mode),error,sizeof(error))==1);
+        CHECK("happ/crypt3-mode",!strcmp(mode,"crypt3"));
+        CHECK("happ/crypt3-exact-plaintext",plain && size==[expected length] && (!size || !memcmp(plain,[expected bytes],size)));
+        VCHappFreePlaintext(plain);
+        NSString *errorText=nil,*decoded=VCHappDecryptedLink(link,&errorText);
+        BOOL invalid=[@[@"invalid_utf8",@"nul",@"empty"] containsObject:name];
+        if (invalid) CHECK("happ/crypt3-invalid-text-rejected",!decoded && [errorText length]);
+        else CHECK("happ/crypt3-utf8-preserved",[decoded isEqual:[[[NSString alloc] initWithData:expected encoding:NSUTF8StringEncoding] autorelease]] && !errorText);
+    }
+    NSString *link=[[fixtures objectForKey:@"short"] objectForKey:@"link"];
+    CHECK("happ/crypt3-text-import",[[VCProfiles() extractImportLinksFromText:link] isEqual:@[link]]);
+    CHECK("happ/crypt3-photo-import",[[[VCProfiles() textImportReportFromTexts:@[link]] objectForKey:@"uris"] isEqual:@[link]]);
+    NSString *uppercase=[@"HAPP://CRYPT3/" stringByAppendingString:[link substringFromIndex:14]];
+    CHECK("happ/crypt3-case-insensitive",[VCHappDecryptedLink(uppercase,NULL) isEqual:VCHappDecryptedLink(link,NULL)]);
+    NSString *unpadded=[link stringByTrimmingCharactersInSet:[NSCharacterSet characterSetWithCharactersInString:@"="]];
+    NSString *urlSafe=[@"happ://crypt3/" stringByAppendingString:[[[unpadded substringFromIndex:14] stringByReplacingOccurrencesOfString:@"+" withString:@"-"] stringByReplacingOccurrencesOfString:@"/" withString:@"_"]];
+    for (NSString *variant in @[unpadded,urlSafe]) CHECK("happ/crypt3-base64-variants",[VCHappDecryptedLink(variant,NULL) isEqual:VCHappDecryptedLink(link,NULL)]);
+    NSString *config=@"socks5://127.0.0.1:1080#Unchanged";
+    NSString *mixed=[NSString stringWithFormat:@"%@\n%@\n%@",link,config,link];
+    CHECK("happ/crypt3-mixed-dedup",[[[VCProfiles() textImportReportFromText:mixed] objectForKey:@"uris"] isEqual:@[link,config]]);
+    NSString *encoded=[[mixed dataUsingEncoding:NSUTF8StringEncoding] base64EncodedStringWithOptions:0];
+    CHECK("happ/crypt3-base64-list",[[[VCProfiles() textImportReportFromText:encoded] objectForKey:@"uris"] isEqual:@[link,config]]);
+    CHECK("happ/crypt3-multiple-photo-values",[[[VCProfiles() textImportReportFromTexts:@[link,config,link]] objectForKey:@"uris"] isEqual:@[link,config]]);
+    NSString *error=nil;
+    NSDictionary *source=@{@"url":link,@"name":@"HAPP subscription",@"items":@[config]};
+    NSDictionary *edited=[VCProfiles() subscriptionByEditingSource:source name:@"Provider" link:link userAgent:nil error:&error];
+    CHECK("happ/crypt3-edit-preserves-wrapper",[[edited objectForKey:@"url"] isEqual:link] && SubscriptionDictionaryIsHappEncrypted(edited) && !error);
+    for (NSString *name in @[@"invalid_utf8",@"nul",@"empty",@"unsupported",@"nested"]) {
+        NSString *bad=[[fixtures objectForKey:name] objectForKey:@"link"];
+        CHECK("happ/crypt3-invalid-edit-rejected",![VCProfiles() subscriptionByEditingSource:source name:@"Provider" link:bad userAgent:nil error:&error] && [error length]);
+    }
+    for (NSString *payload in @[@"",@"!",@"A",@"AA=A",@"AAAA=",@"AA===",@"AA",@"AB",@"AAB",@"AAAA"]) {
+        NSString *bad=[@"happ://crypt3/" stringByAppendingString:payload];
+        unsigned char *plain=NULL; size_t size=123; char reason[256];
+        CHECK("happ/crypt3-malformed-rejected",VCHappDecryptLink([bad UTF8String],&plain,&size,NULL,0,reason,sizeof(reason))==-1 && !plain && !size && reason[0]);
+    }
+    NSMutableData *wire=[NSMutableData dataWithData:DecodeBase64String([link substringFromIndex:14])];
+    memset([wire mutableBytes],0,[wire length]);
+    NSString *badPadding=[@"happ://crypt3/" stringByAppendingString:[wire base64EncodedStringWithOptions:0]];
+    CHECK("happ/crypt3-rsa-padding",!VCHappDecryptedLink(badPadding,&error) && [error rangeOfString:@"example.test"].location==NSNotFound);
+    NSString *oversized=[@"happ://crypt3/" stringByPaddingToLength:8193 withString:@"A" startingAtIndex:0];
+    CHECK("happ/crypt3-size-limit",!VCHappDecryptedLink(oversized,&error) && [error length]);
+    unsigned char *plain=NULL; size_t size=0;
+    CHECK("happ/crypt3-c-size-limit",VCHappDecryptLink([oversized UTF8String],&plain,&size,NULL,0,NULL,0)==-1 && !plain && !size);
+    NSString *goldens=[NSString stringWithContentsOfFile:@"happ_fixtures.txt" encoding:NSUTF8StringEncoding error:NULL];
+    NSString *crypt4=[[[goldens componentsSeparatedByString:@"\n"] objectAtIndex:0] substringFromIndex:7];
+    CHECK("happ/crypt3-no-key-fallback",!VCHappDecryptedLink([crypt4 stringByReplacingOccurrencesOfString:@"crypt4/" withString:@"crypt3/"],&error));
+    CHECK("happ/crypt4-no-key-fallback",!VCHappDecryptedLink([link stringByReplacingOccurrencesOfString:@"crypt3/" withString:@"crypt4/"],&error));
+    for (NSString *bad in @[@"happ://crypt3/ https://must-not-fetch.test",@"happ://crypt3/! https://must-not-fetch.test",@"happ://crypt2/https://must-not-fetch.test"]) {
+        NSArray *links=[VCProfiles() extractImportLinksFromText:bad];
+        CHECK("happ/crypt3-no-inner-url-fallback",![links containsObject:@"https://must-not-fetch.test"]);
+    }
+    VCSubscriptionTask *task=[[[VCSubscriptionTask alloc] initWithPreserveNames:YES observer:nil selector:NULL] autorelease];
+    VCSubscriptionTask *previous=VCSetCurrentSubscriptionTask(task);
+    NSDictionary *updated=[VCProfiles() updatedSubscriptionFromSource:source data:[config dataUsingEncoding:NSUTF8StringEncoding] nameFromMetadata:@"Provider" userInfoFromMetadata:nil metadataFromResponse:nil nameFromURL:@"HAPP subscription" hostName:@"HAPP subscription" options:task errorText:&error];
+    CHECK("happ/crypt3-update-keeps-source",[[updated objectForKey:@"url"] isEqual:link] && SubscriptionDictionaryIsHappEncrypted(updated));
+    unsigned char key[32]={1};
+    NSData *serialized=[NSPropertyListSerialization dataFromPropertyList:updated format:NSPropertyListBinaryFormat_v1_0 errorDescription:NULL];
+    NSData *encrypted=VCEncryptSecureStorePayload(serialized,key),*decrypted=VCDecryptSecureStorePayload(encrypted,key);
+    NSDictionary *loaded=[NSPropertyListSerialization propertyListFromData:decrypted mutabilityOption:NSPropertyListImmutable format:NULL errorDescription:NULL];
+    CHECK("happ/crypt3-store-roundtrip",[loaded isEqual:updated] && [[loaded objectForKey:@"url"] isEqual:link]);
+    [task cancelWithReason:nil];
+    CHECK("happ/crypt3-cancelled-import",![[[VCProfiles() textImportReportFromText:mixed] objectForKey:@"uris"] count]);
+    VCSetCurrentSubscriptionTask(previous);
+}
+
 int main(int argc, char **argv) {
+    if (argc==2 && (!strcmp(argv[1],"--happ-prepare") || !strcmp(argv[1],"--happ-update"))) {
+        NSAutoreleasePool *pool=[[NSAutoreleasePool alloc] init];
+        NSData *data=[[NSFileHandle fileHandleWithStandardInput] readDataToEndOfFile];
+        NSDictionary *output=nil;
+        if (!strcmp(argv[1],"--happ-prepare")) {
+            NSString *link=[[[NSString alloc] initWithData:data encoding:NSUTF8StringEncoding] autorelease];
+            NSString *target=VCHappDecryptedLink(link,NULL);
+            if (VCValidatedProviderURLString(target)) output=@{@"value":target,@"happ":@(HappURLStringIsEncrypted(link)),@"agent":VCSubscriptionUserAgent(@{@"url":link},@"vless-core-app/test")};
+        } else {
+            NSDictionary *input=[NSJSONSerialization JSONObjectWithData:data options:0 error:NULL];
+            VCSubscriptionTask *task=[[[VCSubscriptionTask alloc] initWithPreserveNames:YES observer:nil selector:NULL] autorelease];
+            output=[VCProfiles() updatedSubscriptionFromSource:[input objectForKey:@"source"] data:[[input objectForKey:@"body"] dataUsingEncoding:NSUTF8StringEncoding] nameFromMetadata:[input objectForKey:@"title"] userInfoFromMetadata:nil metadataFromResponse:nil nameFromURL:@"HAPP subscription" hostName:@"HAPP subscription" options:task errorText:NULL];
+        }
+        if (output) [[NSFileHandle fileHandleWithStandardOutput] writeData:[NSJSONSerialization dataWithJSONObject:output options:0 error:NULL]];
+        int status=output ? 0 : 1;
+        [pool drain]; return status;
+    }
     if (argc == 2 && (!strcmp(argv[1], "--convert") || !strcmp(argv[1],"--convert-karing") || !strcmp(argv[1],"--convert-backup"))) {
         NSAutoreleasePool *pool = [[NSAutoreleasePool alloc] init];
         NSData *data = [[NSFileHandle fileHandleWithStandardInput] readDataToEndOfFile];
@@ -255,6 +352,7 @@ int main(int argc, char **argv) {
         [pool drain]; return result;
     }
     NSAutoreleasePool *pool = [[NSAutoreleasePool alloc] init];
+    crypt3Fixtures();
     NSString *incyAdd = @"incy://add/https://example.test/subscription?token=a%2Bb+%2540";
     CHECK("incy/import-keeps-whole-wrapper", [[VCProfiles() extractImportLinksFromText:incyAdd] isEqual:@[incyAdd]]);
     NSString *incyUnsupported = @"incy://routing/onadd/https://example.test/rules";

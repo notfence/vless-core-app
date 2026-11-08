@@ -817,48 +817,7 @@
 }
 
 - (NSString *)decryptedHappLink:(NSString *)link errorText:(NSString **)errorTextOut {
-    if (errorTextOut) *errorTextOut = nil;
-
-    const char *utf8 = [link UTF8String];
-    if (!utf8) {
-        if (errorTextOut) *errorTextOut = @"HAPP link is not valid UTF-8";
-        return nil;
-    }
-
-    unsigned char *plaintext = NULL;
-    size_t plaintextLength = 0;
-    char error[256];
-    char mode[16];
-    memset(error, 0, sizeof(error));
-    memset(mode, 0, sizeof(mode));
-    int result = VCHappDecryptLink(utf8,
-                                   &plaintext,
-                                   &plaintextLength,
-                                   mode,
-                                   sizeof(mode),
-                                   error,
-                                   sizeof(error));
-    if (result != 1 || !plaintext || plaintextLength == 0) {
-        if (plaintext) VCHappFreePlaintext(plaintext);
-        if (errorTextOut) {
-            NSString *detail = (error[0] != '\0') ? [NSString stringWithUTF8String:error] : nil;
-            *errorTextOut = ([detail length] > 0)
-                                ? [NSString stringWithFormat:@"Invalid HAPP link: %@", detail]
-                                : @"Invalid HAPP link";
-        }
-        return nil;
-    }
-
-    NSString *decoded = [[[NSString alloc] initWithBytes:plaintext
-                                                   length:plaintextLength
-                                                 encoding:NSUTF8StringEncoding] autorelease];
-    VCHappFreePlaintext(plaintext);
-    decoded = [self safeTrim:decoded];
-    if (![decoded isKindOfClass:[NSString class]] || [decoded length] == 0) {
-        if (errorTextOut) *errorTextOut = @"HAPP payload is not valid UTF-8";
-        return nil;
-    }
-    return decoded;
+    return VCHappDecryptedLink(link,errorTextOut);
 }
 
 - (void)importHappEncryptedLink:(NSString *)link {

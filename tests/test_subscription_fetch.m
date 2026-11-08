@@ -41,6 +41,7 @@ static NSArray *responses;
 static NSMutableArray *requests;
 static BOOL invalidBody,cancelFirst;
 static NSString *responseHeaders;
+static NSString *failureDetails;
 
 @interface UIDevice : NSObject
 + (id)currentDevice;
@@ -60,7 +61,7 @@ static NSData *FetchURLViaVlessCoreCurl(NSString *url,BOOL insecure,BOOL plain,B
     [requests addObject:@{@"url":url,@"agent":agent,@"insecure":@(insecure),@"plain":@(plain),@"happ":@(happ),@"hwid":@(hwid)}];
     NSInteger status=[[responses objectAtIndex:index] integerValue];
     if (headers) *headers=responseHeaders ?: [NSString stringWithFormat:@"HTTP/2 %ld\r\nprofile-title: Provider\r\n\r\n",(long)status];
-    if (error) *error=status==200 ? nil : @"Fetch failed";
+    if (error) *error=status==200 ? nil : (failureDetails ?: @"Fetch failed");
     if (exitCode) *exitCode=status==600 ? 60 : (status==700 ? 28 : (status==200 ? 0 : 22));
     if (cancelFirst && index==0) [VCCurrentSubscriptionTask() cancelWithReason:@"Cancelled"];
     return status==200 ? [(invalidBody ? @"<html>Access denied</html>" : @"socks5://test:p%2B%2540@127.0.0.1:1080#Profile") dataUsingEncoding:NSUTF8StringEncoding] : nil;
@@ -101,7 +102,7 @@ static NSData *FetchURLViaVlessCoreCurl(NSString *url,BOOL insecure,BOOL plain,B
 - (BOOL)preserveCustomSubscriptionNames { return YES; }
 - (NSTimeInterval)subscriptionUpdateTimestamp { return 12345; }
 - (BOOL)isHappEncryptedLink:(NSString *)url { return HappURLStringIsEncrypted(url); }
-- (NSString *)decryptedHappLink:(NSString *)url errorText:(NSString **)error { (void)url; (void)error; return sourceURL; }
+- (NSString *)decryptedHappLink:(NSString *)url errorText:(NSString **)error { return VCHappDecryptedLink(url,error); }
 - (NSString *)subscriptionNameFromURLString:(NSString *)url { (void)url; return @"Subscription"; }
 - (NSString *)hostFromURLString:(NSString *)url { return [[NSURL URLWithString:url] host]; }
 - (NSString *)safeTrim:(NSString *)text { return TrimSimpleString(text); }
@@ -144,7 +145,7 @@ static NSData *FetchURLViaVlessCoreCurl(NSString *url,BOOL insecure,BOOL plain,B
 
 static void setup(NSArray *statuses) {
     responses=statuses; requests=[NSMutableArray array];
-    invalidBody=cancelFirst=NO; responseHeaders=nil;
+    invalidBody=cancelFirst=NO; responseHeaders=nil; failureDetails=nil;
     VCSetCurrentSubscriptionTask(nil);
 }
 
@@ -258,6 +259,49 @@ static void promptTests(void) {
     CHECK("subscription-ui/prompt-owns-immutable-snapshot",[[screen->_pendingCompatibilityImport objectForKey:@"urls"] isEqual:@[sourceURL]]);
     [screen finishCompatibilityImportPrompt:NO];
 }
+static void crypt3FetchTests(void) {
+    NSData *data=[NSData dataWithContentsOfFile:@"happ_crypt3_fixtures.json"];
+    NSDictionary *fixtures=[NSJSONSerialization JSONObjectWithData:data options:0 error:NULL];
+    NSString *link=[[fixtures objectForKey:@"short"] objectForKey:@"link"];
+    NSString *target=VCHappDecryptedLink(link,NULL);
+    CHECK("happ/crypt3-fetch-fixture",[target isEqual:@"https://example.test/subscription?token=vless-core"]);
+    NSDictionary *source=@{@"url":link,@"name":@"Provider",@"items":@[@"socks5://old.test:1080"]};
+    MainVC *screen=newImport();
+    for (NSUInteger attempt=0;attempt<2;attempt++) {
+        setup(@[@200]); NSString *error=nil;
+        NSDictionary *updated=[screen updatedSubscriptionDictionaryFromSource:source errorText:&error];
+        CHECK("happ/crypt3-fetch-success",updated && !error && [requests count]==1);
+        NSDictionary *request=[requests objectAtIndex:0];
+        CHECK("happ/crypt3-fetch-target",[[request objectForKey:@"url"] isEqual:target]);
+        CHECK("happ/crypt3-fetch-headers",[[request objectForKey:@"happ"] boolValue] && [[request objectForKey:@"hwid"] boolValue] && [[request objectForKey:@"agent"] isEqual:kHappSubscriptionUserAgent]);
+        CHECK("happ/crypt3-fetch-source-preserved",[[updated objectForKey:@"url"] isEqual:link] && SubscriptionDictionaryIsHappEncrypted(updated));
+        source=[NSJSONSerialization JSONObjectWithData:[NSJSONSerialization dataWithJSONObject:updated options:0 error:NULL] options:0 error:NULL];
+    }
+    for (NSNumber *status in @[@403,@600,@700]) {
+        setup(@[status]); failureDetails=[NSString stringWithFormat:@"curl: failed to fetch %@",target];
+        NSString *error=nil; BOOL retry=NO;
+        CHECK("happ/crypt3-fetch-failure",![screen updatedSubscriptionDictionaryFromSource:source errorText:&error insecureRetryAvailable:&retry]);
+        CHECK("happ/crypt3-fetch-no-retry",[requests count]==1);
+        CHECK("happ/crypt3-fetch-safe-error",[error length] && [error rangeOfString:@"example.test"].location==NSNotFound && [error rangeOfString:@"token="].location==NSNotFound);
+        CHECK("happ/crypt3-fetch-retains-tls-confirmation",retry==([status intValue]==600));
+    }
+    setup(@[]); NSString *error=nil;
+    CHECK("happ/crypt3-bad-wrapper-no-fetch",![screen updatedSubscriptionDictionaryFromSource:@{@"url":@"happ://crypt3/!"} errorText:&error] && ![requests count]);
+    for (NSUInteger failure=0;failure<2;failure++) {
+        BOOL fail=failure!=0;
+        screen=newImport(); screen->saveFails=fail; setup(@[@200]);
+        [screen performSubscriptionImportForURLs:@[link] allowInsecureFetch:NO fallbackSubscriptionsByURL:nil allowPlainHTTP:NO useCompatibleUserAgent:NO]; runWork();
+        CHECK("happ/crypt3-import-single-commit",screen->commits==1);
+        CHECK("happ/crypt3-import-atomic",[screen->_subscriptions count]==(fail ? 0 : 1));
+        if (!fail) CHECK("happ/crypt3-import-wrapper",[[[screen->_subscriptions objectAtIndex:0] objectForKey:@"url"] isEqual:link]);
+    }
+    setup(@[@200]); cancelFirst=YES;
+    VCSubscriptionTask *task=[[[VCSubscriptionTask alloc] initWithPreserveNames:YES observer:nil selector:NULL] autorelease];
+    VCSetCurrentSubscriptionTask(task);
+    CHECK("happ/crypt3-cancelled-fetch-not-applied",![screen updatedSubscriptionDictionaryFromSource:source errorText:&error] && [requests count]==1);
+    VCSetCurrentSubscriptionTask(nil);
+}
+
 int main(void) {
     NSAutoreleasePool *pool=[[NSAutoreleasePool alloc] init];
     MainVC *screen=[[[MainVC alloc] init] autorelease];
@@ -332,5 +376,6 @@ int main(void) {
     promptTests();
     editSaveTests();
     editRefreshTests();
+    crypt3FetchTests();
     FINISH("subscription fetch compatibility"); [pool drain]; return 0;
 }

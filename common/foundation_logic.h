@@ -34,6 +34,7 @@ NSString *VCSubscriptionProviderURL(NSDictionary *subscription, NSString *metada
 NSString *VCSubscriptionLastUpdatedText(NSDictionary *subscription);
 BOOL SubscriptionDictionaryAllowsPlainHTTP(NSDictionary *sub);
 BOOL HappURLStringIsEncrypted(NSString *urlString);
+NSString *VCHappDecryptedLink(NSString *link, NSString **error);
 BOOL SubscriptionDictionaryUsesHappHeaders(NSDictionary *sub);
 BOOL SubscriptionDictionaryIsHappEncrypted(NSDictionary *sub);
 BOOL VCSubscriptionUserAgentIsValid(NSString *value);

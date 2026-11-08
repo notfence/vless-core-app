@@ -206,6 +206,7 @@ static BOOL SubscriptionResponseIsForbidden(NSString *headers) {
 
     if (!data) {
         if (incy) fetchErr=VCIncySafeFetchError(fetchErr);
+        if (SubscriptionDictionaryIsHappEncrypted(sub)) fetchErr=@"Could not download the encrypted HAPP subscription.";
         if (curlExitCode==22 && SubscriptionResponseIsForbidden(curlHeaders)) {
             fetchErr=@"HTTP 403. The server rejected the subscription download.";
         }

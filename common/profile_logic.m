@@ -3,7 +3,6 @@
 #import "app_constants.h"
 #import "subscription_task.h"
 #import "../integrations/incy/incy_links.h"
-#include "../integrations/happ/happ_crypto.h"
 #include "../../vless-core-cli/include/json.h"
 #include <arpa/inet.h>
 #include <errno.h>
@@ -1130,10 +1129,7 @@ failure:
     else if (happ && (VCIncyIsLink(storedLink) || HappURLStringIsEncrypted(storedLink))) target=nil;
     else if (VCIncyIsLink(storedLink)) target=[VCIncySubscriptionDescriptor(storedLink,NULL) objectForKey:@"value"];
     else if (HappURLStringIsEncrypted(storedLink)) {
-        unsigned char *plain=NULL; size_t size=0;
-        int result=VCHappDecryptLink([storedLink UTF8String],&plain,&size,NULL,0,NULL,0);
-        target=result==1 ? [[[NSString alloc] initWithBytes:plain length:size encoding:NSUTF8StringEncoding] autorelease] : nil;
-        VCHappFreePlaintext(plain);
+        target=VCHappDecryptedLink(storedLink,NULL);
         happ=YES;
     }
     if (!VCValidatedProviderURLString(target) || [target lengthOfBytesUsingEncoding:NSUTF8StringEncoding]>kVCMaximumSubscriptionURLBytes) {
@@ -1428,7 +1424,7 @@ failure:
     }
 
     NSError *reErr = nil;
-    NSRegularExpression *re = [NSRegularExpression regularExpressionWithPattern:@"(?:incy://|vless://|socks5://|trojan://|vmess://|ss://|happ://(?:add|crypt4|crypt5)/|https?://)[^\\s\"'<>]+"
+    NSRegularExpression *re = [NSRegularExpression regularExpressionWithPattern:@"(?:happ://[^\\s\"'<>]*|(?:incy://|vless://|socks5://|trojan://|vmess://|ss://|https?://)[^\\s\"'<>]+)"
                                                                          options:NSRegularExpressionCaseInsensitive
                                                                            error:&reErr];
     if (!re || reErr) {
@@ -1451,6 +1447,8 @@ failure:
             [text getLineStart:NULL end:&end contentsEnd:&contentsEnd forRange:NSMakeRange(m.range.location,0)];
             link=[text substringWithRange:NSMakeRange(m.range.location,contentsEnd-m.range.location)];
             cursor=end;
+        } else if ([link rangeOfString:@"happ://" options:NSCaseInsensitiveSearch|NSAnchoredSearch].location==0) {
+            [text getLineStart:NULL end:&cursor contentsEnd:NULL forRange:NSMakeRange(m.range.location,0)];
         }
         link = [self safeTrim:link];
         while ([link length] > 0 && !VCIncyIsLink(link)) {
@@ -1464,8 +1462,7 @@ failure:
         if (![self isConfigurationURI:link] &&
             !VCIncyIsLink(link) &&
             ![lower hasPrefix:kHappAddPrefix] &&
-            ![lower hasPrefix:@"happ://crypt4/"] &&
-            ![lower hasPrefix:@"happ://crypt5/"] &&
+            !HappURLStringIsEncrypted(link) &&
             ![lower hasPrefix:@"http://"] &&
             ![lower hasPrefix:@"https://"]) {
             [pool drain]; continue;
@@ -1566,7 +1563,7 @@ failure:
         if (task.isCancelled) return VCSubscriptionCancelledReport(task);
         NSAutoreleasePool *pool=[[NSAutoreleasePool alloc] init];
         NSString *lower=[[self safeTrim:text] lowercaseString];
-        BOOL unsupportedHapp=[lower hasPrefix:@"happ://"] && ![lower hasPrefix:@"happ://add/"] && ![lower hasPrefix:@"happ://crypt4/"] && ![lower hasPrefix:@"happ://crypt5/"];
+        BOOL unsupportedHapp=[lower hasPrefix:@"happ://"] && ![lower hasPrefix:@"happ://add/"] && !HappURLStringIsEncrypted([self safeTrim:text]);
         if (unsupportedHapp || [text rangeOfCharacterFromSet:[NSCharacterSet characterSetWithRange:NSMakeRange(0,1)]].location!=NSNotFound) {
             skipped++; [task addAccepted:0 skipped:1];
             if ([issues count]<16) [issues addObject:@"Invalid or unsupported QR import data"];
