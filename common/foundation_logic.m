@@ -362,6 +362,24 @@ BOOL SubscriptionDictionaryIsHappEncrypted(NSDictionary *sub) {
     return HappURLStringIsEncrypted([sub objectForKey:@"url"]);
 }
 
+BOOL VCSubscriptionUserAgentIsValid(NSString *value) {
+    if (![value isKindOfClass:[NSString class]] || ![value length] || [value length]>256 || ![TrimSimpleString(value) length]) return NO;
+    for (NSUInteger i=0;i<[value length];i++) {
+        unichar c=[value characterAtIndex:i];
+        if (c<0x20 || c>0x7e) return NO;
+    }
+    return YES;
+}
+
+NSString *VCSubscriptionUserAgent(NSDictionary *sub, NSString *defaultAgent) {
+    id custom=[sub objectForKey:kSubscriptionUserAgentKey];
+    if (custom) return VCSubscriptionUserAgentIsValid(custom) ? custom : nil;
+    id happ=[sub objectForKey:kSubscriptionHappUserAgentKey];
+    if ([happ isEqual:@(NO)]) return defaultAgent;
+    if ([happ isEqual:@(YES)] || SubscriptionDictionaryUsesHappHeaders(sub)) return kHappSubscriptionUserAgent;
+    return defaultAgent;
+}
+
 BOOL CurlExitCodeCanRetryInsecurely(int exitCode) {
     return exitCode == 60; /* CURLE_PEER_FAILED_VERIFICATION */
 }

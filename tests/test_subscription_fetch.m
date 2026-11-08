@@ -66,13 +66,28 @@ static NSData *FetchURLViaVlessCoreCurl(NSString *url,BOOL insecure,BOOL plain,B
     return status==200 ? [(invalidBody ? @"<html>Access denied</html>" : @"socks5://test:p%2B%2540@127.0.0.1:1080#Profile") dataUsingEncoding:NSUTF8StringEncoding] : nil;
 }
 
+@interface SubscriptionEditVC : NSObject {
+@public
+    NSDictionary *source,*saved;
+    NSString *errorText;
+}
+@property(readonly) NSDictionary *subscription;
+- (void)finishSavingWithSubscription:(NSDictionary *)subscription errorText:(NSString *)error;
+@end
+@implementation SubscriptionEditVC
+- (NSDictionary *)subscription { return source; }
+- (void)finishSavingWithSubscription:(NSDictionary *)subscription errorText:(NSString *)error { [saved release]; saved=[subscription copy]; [errorText release]; errorText=[error copy]; }
+- (void)dealloc { [source release]; [saved release]; [errorText release]; [super dealloc]; }
+@end
+
 @interface MainVC : VCProfileLogic <VCSubscriptionUpdateOptions> {
 @public
     NSMutableArray *_configs,*_subscriptions,*_photoQRQueue;
     VCSubscriptionTask *_subscriptionTask;
     NSDictionary *_pendingCompatibilityImport;
     id _configurationDraft;
-    NSUInteger _configurationRevision,_photoQRFailures,commits,failures,insecurePrompts;
+    NSUInteger _configurationRevision,_photoQRFailures,commits,failures,insecurePrompts,refreshes;
+    NSInteger refreshedIndex;
     BOOL _launchAutoUpdateInProgress,_pendingInsecureImportUsesCompatibleUserAgent,_pendingInsecureImportAllowsPlainHTTP,saveFails,mutationBlocked,connectionBusy;
     NSString *lastStatus;
 }
@@ -110,6 +125,9 @@ static NSData *FetchURLViaVlessCoreCurl(NSString *url,BOOL insecure,BOOL plain,B
 - (void)saveData {}
 - (void)reloadData {}
 - (void)normalizeSelection {}
+- (void)reloadMainTableDataAfterExternalChange {}
+- (void)refreshPresentedSubscriptionInfoIfNeeded {}
+- (BOOL)refreshSubscriptionAtIndex:(NSInteger)index showStatus:(BOOL)status { (void)status; refreshedIndex=index; refreshes++; return NO; }
 - (void)selectSubscriptionAtIndex:(NSInteger)index { (void)index; }
 - (NSString *)shortImportFailureTextForURL:(id)url errorText:(NSString *)error { (void)url; return error; }
 - (void)commitConfigurations:(id)configs subscriptions:(NSArray *)subscriptions completion:(void (^)(BOOL))completion {
@@ -120,6 +138,7 @@ static NSData *FetchURLViaVlessCoreCurl(NSString *url,BOOL insecure,BOOL plain,B
 #define _tableView self
 #include "subscription_update.inc"
 #include "subscription_compatibility.inc"
+#include "subscription_save.inc"
 #undef _tableView
 @end
 
@@ -133,6 +152,67 @@ static void importWithMode(MainVC *screen,BOOL compatible) {
     [screen performSubscriptionImportForURLs:@[sourceURL] allowInsecureFetch:NO fallbackSubscriptionsByURL:nil allowPlainHTTP:NO useCompatibleUserAgent:compatible]; runWork();
 }
 static MainVC *newImport(void) { return [[[MainVC alloc] init] autorelease]; }
+static void editRefreshTests(void) {
+    NSDictionary *source=@{@"url":sourceURL,@"name":@"Original",@"items":@[]};
+    for (NSUInteger scenario=0;scenario<8;scenario++) {
+        MainVC *screen=newImport(); setup(@[]);
+        SubscriptionEditVC *editor=[[[SubscriptionEditVC alloc] init] autorelease]; editor->source=[source copy];
+        NSString *agent=scenario==2 || scenario==4 ? kHappSubscriptionUserAgent : nil;
+        NSString *link=scenario==1 || scenario==3 ? @"https://new.test/sub?x=+%25" : sourceURL;
+        NSDictionary *updated=[VCProfiles() subscriptionByEditingSource:source name:@"Renamed" link:link userAgent:agent error:NULL];
+        [screen->_subscriptions addObject:updated];
+        if (scenario==3) [screen->_subscriptions removeAllObjects];
+        if (scenario==4) {
+            [screen->_subscriptions insertObject:@{@"url":@"https://other.test/sub"} atIndex:0];
+        }
+        if (scenario==5) {
+            NSMutableDictionary *stale=[NSMutableDictionary dictionaryWithDictionary:updated]; [stale setObject:@"Newer" forKey:@"name"];
+            [screen->_subscriptions setArray:@[stale]];
+        }
+        if (scenario==6 || scenario==7) {
+            [editor->source release]; editor->source=[@{@"url":sourceURL,@"name":@"Original",kSubscriptionHappSourceKey:@(YES)} copy];
+            updated=[VCProfiles() subscriptionByEditingSource:editor->source name:@"Renamed" link:sourceURL userAgent:scenario==6 ? kHappSubscriptionUserAgent : nil error:NULL];
+            [screen->_subscriptions setArray:@[updated]];
+        }
+        [screen subscriptionEditVC:editor didSaveSubscription:updated];
+        BOOL refresh=scenario==1 || scenario==2 || scenario==4 || scenario==7;
+        CHECK("subscription-edit/refresh-only-for-current-link-or-agent-change",screen->refreshes==(refresh ? 1 : 0));
+        if (refresh) CHECK("subscription-edit/refresh-correct-subscription",screen->refreshedIndex==(scenario==4 ? 1 : 0));
+        CHECK("subscription-edit/name-only-and-unchanged-agent-no-fetch",![requests count]);
+    }
+}
+static void editSaveTests(void) {
+    NSDictionary *original=@{@"url":sourceURL,@"name":@"Original",@"items":@[@"socks5://old.test"]};
+    NSDictionary *other=@{@"url":@"https://other.test/sub",@"name":@"Other",@"items":@[]};
+    NSDictionary *updated=[VCProfiles() subscriptionByEditingSource:original name:@"Renamed" link:sourceURL userAgent:kHappSubscriptionUserAgent error:NULL];
+    for (NSUInteger scenario=0;scenario<7;scenario++) {
+        setup(@[]); MainVC *screen=newImport(); [screen->_subscriptions addObjectsFromArray:@[original,other]];
+        SubscriptionEditVC *editor=[[[SubscriptionEditVC alloc] init] autorelease]; editor->source=[original copy];
+        NSDictionary *replacement=updated;
+        if (scenario==1) screen->saveFails=YES;
+        else if (scenario==2) { NSMutableDictionary *stale=[NSMutableDictionary dictionaryWithDictionary:original]; [stale setObject:@"Changed" forKey:@"name"]; [screen->_subscriptions replaceObjectAtIndex:0 withObject:stale]; }
+        else if (scenario==3) replacement=[VCProfiles() subscriptionByEditingSource:original name:@"Name" link:[other objectForKey:@"url"] userAgent:nil error:NULL];
+        else if (scenario==4) screen->connectionBusy=YES;
+        else if (scenario==5) screen->_configurationDraft=@{};
+        else if (scenario==6) [screen->_subscriptions exchangeObjectAtIndex:0 withObjectAtIndex:1];
+        [screen subscriptionEditVC:editor requestedSave:replacement];
+        CHECK("subscription-edit/save-never-fetches",![requests count]);
+        CHECK("subscription-edit/other-subscription-unchanged",[screen->_subscriptions containsObject:other]);
+        if (scenario==0 || scenario==6) {
+            CHECK("subscription-edit/atomic-success",editor->saved && !editor->errorText && screen->commits==1 && [screen->_subscriptions containsObject:updated]);
+        } else {
+            CHECK("subscription-edit/failed-save-not-applied",!editor->saved && editor->errorText && ![screen->_subscriptions containsObject:updated]);
+            CHECK("subscription-edit/failed-save-retains-records",[screen->_subscriptions count]==2);
+        }
+    }
+    for (NSDictionary *source in @[@{@"url":sourceURL},@{@"url":sourceURL,kSubscriptionHappSourceKey:@(YES)}]) {
+        setup(@[@200]); NSMutableDictionary *custom=[NSMutableDictionary dictionaryWithDictionary:source]; [custom setObject:@"Custom client/1.0 (+ % @)" forKey:kSubscriptionUserAgentKey];
+        MainVC *screen=newImport(); NSString *error=nil;
+        CHECK("subscription-edit/custom-agent-used-by-fetch",[screen updatedSubscriptionDictionaryFromSource:custom errorText:&error insecureRetryAvailable:NULL] && [[[requests objectAtIndex:0] objectForKey:@"agent"] isEqual:[custom objectForKey:kSubscriptionUserAgentKey]]);
+    }
+    setup(@[]); MainVC *screen=newImport();
+    CHECK("subscription-edit/invalid-stored-agent-no-request",![screen updatedSubscriptionDictionaryFromSource:@{@"url":sourceURL,kSubscriptionUserAgentKey:@"bad\r\ninjection"} errorText:NULL insecureRetryAvailable:NULL] && ![requests count]);
+}
 static void promptTests(void) {
     MainVC *screen=newImport(); setup(@[@403]); shownAlerts=0;
     importWithMode(screen,NO);
@@ -250,5 +330,7 @@ int main(void) {
     CHECK("subscription-fetch/incy-keeps-original-wrapper",updated && [[updated objectForKey:@"url"] isEqual:incy] && !SubscriptionDictionaryUsesHappHeaders(updated));
     VCSetCurrentSubscriptionTask(nil);
     promptTests();
+    editSaveTests();
+    editRefreshTests();
     FINISH("subscription fetch compatibility"); [pool drain]; return 0;
 }

@@ -1,7 +1,5 @@
 #import "app_support.h"
 
-NSInteger const kVCSubscriptionDeleteAlertTag = 3101;
-NSInteger const kVCSubscriptionRenameAlertTag = 3102;
 NSInteger const kVCSettingsUpdateAlertTag = 3103;
 NSInteger const kVCSettingsPingTypeActionSheetTag = 3104;
 NSInteger const kVCSettingsTitleMarqueeTag = 7400;

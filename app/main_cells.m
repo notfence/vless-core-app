@@ -593,8 +593,8 @@ void VCApplyTouchFeedbackToButton(UIButton *button, id target) {
     _pingButton.accessibilityLabel = pingLoading ? @"Stop subscription ping" : @"Ping all subscription configurations";
     _pingButton.accessibilityHint = pingLoading ? @"Stops the remaining latency tests"
         : [NSString stringWithFormat:@"Runs %@ latency tests", VCPingTypeName(VCSelectedPingType())];
-    _infoButton.accessibilityLabel = @"Subscription information";
-    _infoButton.accessibilityHint = @"Opens subscription details and actions";
+    _infoButton.accessibilityLabel = @"Subscription menu";
+    _infoButton.accessibilityHint = @"Edit, view information, update or delete this subscription";
     _pingLoading = pingLoading;
     [self refreshHeaderImages];
 

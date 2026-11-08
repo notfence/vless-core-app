@@ -56,6 +56,8 @@ HOST_TESTS += $(HOST_BUILD_DIR)/test_status_coordinator
 HOST_TESTS += $(HOST_BUILD_DIR)/test_main_lifecycle
 HOST_TESTS += $(HOST_BUILD_DIR)/test_main_status
 HOST_TESTS += $(HOST_BUILD_DIR)/test_subscription_fetch
+HOST_TESTS += $(HOST_BUILD_DIR)/test_subscription_edit
+HOST_TESTS += $(HOST_BUILD_DIR)/test_subscription_menu
 CORE_PARSE_SRC := uri utils xhttp_config xhttp_download xhttp_payload buffer_budget websocket grpc http_headers core_log
 CORE_PARSE_SRC += vmess_uri shadowsocks_uri shadowsocks_crypto blake3 trojan core_random deadline socket_util relay_memory connection_trace resolver
 CORE_PARSE_OBJ := $(addprefix $(HOST_BUILD_DIR)/core-parser/,$(addsuffix .o,$(CORE_PARSE_SRC)))
@@ -110,6 +112,8 @@ test: requirements $(HOST_TESTS)
 	$(HOST_BUILD_DIR)/test_main_lifecycle
 	$(HOST_BUILD_DIR)/test_main_status
 	$(HOST_BUILD_DIR)/test_subscription_fetch
+	$(HOST_BUILD_DIR)/test_subscription_edit
+	$(HOST_BUILD_DIR)/test_subscription_menu
 	$(HOST_BUILD_DIR)/test_proxy_probe
 	$(HOST_BUILD_DIR)/test_core_config
 	VC_HOST_BUILD_DIR="$(HOST_BUILD_DIR)" VC_TEST_SANITIZE="$(SANITIZE)" python3 $(ROOT)/tests/test_core_bridge.py
@@ -154,12 +158,40 @@ $(HOST_BUILD_DIR)/subscription_compatibility.inc: ../app/main_import.m extract_u
 	mkdir -p $(dir $@)
 	python3 extract_ui_methods.py $< $@ '- (void)showCompatibilityImportPromptForURLs:' '- (void)finishCompatibilityImportPrompt:' '- (void)performSubscriptionImportForURLs:' '- (NSDictionary *)subscriptionDictionaryForURL:' '- (NSString *)subscriptionImportCountText:'
 
-$(HOST_BUILD_DIR)/test_subscription_fetch.o: $(HOST_BUILD_DIR)/subscription_update.inc $(HOST_BUILD_DIR)/subscription_compatibility.inc
+$(HOST_BUILD_DIR)/subscription_save.inc: ../app/main_subscriptions.m extract_ui_methods.py
+	mkdir -p $(dir $@)
+	python3 extract_ui_methods.py $< $@ '- (NSInteger)indexForSubscriptionSnapshot:' '- (void)subscriptionEditVC:(SubscriptionEditVC *)vc requestedSave:' '- (void)subscriptionEditVC:(SubscriptionEditVC *)vc didSaveSubscription:'
+
+$(HOST_BUILD_DIR)/test_subscription_fetch.o: $(HOST_BUILD_DIR)/subscription_update.inc $(HOST_BUILD_DIR)/subscription_compatibility.inc $(HOST_BUILD_DIR)/subscription_save.inc
 $(HOST_BUILD_DIR)/test_subscription_fetch.o: HOST_CPPFLAGS += -I$(HOST_BUILD_DIR)
 $(HOST_BUILD_DIR)/test_subscription_fetch.o: HOST_CFLAGS += -fblocks
 
 $(HOST_BUILD_DIR)/test_subscription_fetch: $(HOST_BUILD_DIR)/test_subscription_fetch.o $(filter-out $(HOST_BUILD_DIR)/test_app_logic.o,$(APP_OBJECTS))
 	$(HOST_CC) $(SANITIZE) $^ -o $@ -L$(ROOT)/../toolchains/ios6/lib -Wl,-rpath,$(ROOT)/../toolchains/ios6/lib -lBlocksRuntime $(HOST_LIBS)
+
+$(HOST_BUILD_DIR)/test_subscription_edit: $(HOST_BUILD_DIR)/test_subscription_edit.o $(filter-out $(HOST_BUILD_DIR)/test_app_logic.o,$(APP_OBJECTS))
+	$(HOST_CC) $(SANITIZE) $^ -o $@ $(HOST_LIBS)
+
+$(HOST_BUILD_DIR)/subscription_menu_sheet.inc: ../app/subscription_info.m extract_ui_methods.py
+	mkdir -p $(dir $@)
+	python3 extract_ui_methods.py $< $@ '- (id)initWithSubscription:(NSDictionary *)subscription delegate:'
+
+$(HOST_BUILD_DIR)/subscription_menu_layout.inc: ../app/subscription_info.m extract_ui_methods.py
+	mkdir -p $(dir $@)
+	python3 extract_ui_methods.py $< $@ 'static CGRect VCSubscriptionMenuFrame(' 'static CGRect VCSubscriptionInputFrame('
+
+$(HOST_BUILD_DIR)/subscription_menu_dismiss.inc: ../app/subscription_info.m extract_ui_methods.py
+	mkdir -p $(dir $@)
+	python3 extract_ui_methods.py $< $@ '- (void)finishDismissalWithAction:(NSInteger)action {' '- (void)dismissForEnvironmentChange:'
+
+$(HOST_BUILD_DIR)/subscription_menu_editor.inc: ../app/subscription_info.m extract_ui_methods.py
+	mkdir -p $(dir $@)
+	python3 extract_ui_methods.py $< $@ '- (UITextField *)newFieldWithText:' '- (NSInteger)tableView:(UITableView *)tableView numberOfRowsInSection:' '- (NSString *)tableView:(UITableView *)tableView titleForFooterInSection:' '- (CGFloat)tableView:(UITableView *)tableView heightForFooterInSection:' '- (UIView *)tableView:(UITableView *)tableView viewForFooterInSection:' '- (void)tableView:(UITableView *)tableView didSelectRowAtIndexPath:'
+
+$(HOST_BUILD_DIR)/test_subscription_menu.o: $(HOST_BUILD_DIR)/subscription_menu_sheet.inc $(HOST_BUILD_DIR)/subscription_menu_editor.inc $(HOST_BUILD_DIR)/subscription_menu_layout.inc $(HOST_BUILD_DIR)/subscription_menu_dismiss.inc
+$(HOST_BUILD_DIR)/test_subscription_menu.o: HOST_CPPFLAGS += -I$(HOST_BUILD_DIR)
+$(HOST_BUILD_DIR)/test_subscription_menu: $(HOST_BUILD_DIR)/test_subscription_menu.o
+	$(HOST_CC) $(SANITIZE) $^ -o $@ $(HOST_LIBS)
 
 $(HOST_BUILD_DIR)/main_state_save.inc: $(UI_SOURCE_ROOT)/app/main_state.m extract_ui_methods.py
 	mkdir -p $(dir $@)

@@ -36,6 +36,8 @@ BOOL SubscriptionDictionaryAllowsPlainHTTP(NSDictionary *sub);
 BOOL HappURLStringIsEncrypted(NSString *urlString);
 BOOL SubscriptionDictionaryUsesHappHeaders(NSDictionary *sub);
 BOOL SubscriptionDictionaryIsHappEncrypted(NSDictionary *sub);
+BOOL VCSubscriptionUserAgentIsValid(NSString *value);
+NSString *VCSubscriptionUserAgent(NSDictionary *sub, NSString *defaultAgent);
 BOOL CurlExitCodeCanRetryInsecurely(int exitCode);
 BOOL NSURLErrorCanRetryInsecurely(NSError *err);
 BOOL SubscriptionDataLooksLikeHTML(NSData *data);

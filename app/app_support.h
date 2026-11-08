@@ -90,8 +90,6 @@ typedef NS_ENUM(NSInteger, VCIconType) {
     VCIconTypeCalendar = 16,
 };
 
-extern NSInteger const kVCSubscriptionDeleteAlertTag;
-extern NSInteger const kVCSubscriptionRenameAlertTag;
 extern NSInteger const kVCSettingsUpdateAlertTag;
 extern NSInteger const kVCSettingsPingTypeActionSheetTag;
 extern NSInteger const kVCSettingsTitleMarqueeTag;

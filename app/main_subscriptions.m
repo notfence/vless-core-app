@@ -142,8 +142,11 @@ static BOOL SubscriptionResponseIsForbidden(NSString *headers) {
 
     NSString *fetchErr = nil;
     NSString *curlHeaders = nil;
-    BOOL useHappUserAgent = useHappHeaders || [[sub objectForKey:kSubscriptionHappUserAgentKey] isEqual:@(YES)];
-    NSString *userAgent = useHappUserAgent ? kHappSubscriptionUserAgent : AppUserAgent();
+    NSString *userAgent=VCSubscriptionUserAgent(sub,AppUserAgent());
+    if (!VCSubscriptionUserAgentIsValid(userAgent)) {
+        if (errorTextOut) *errorTextOut=@"Invalid subscription User-Agent. Open the subscription menu and choose Edit to change it.";
+        return nil;
+    }
     int curlExitCode = -1;
     NSData *data = FetchURLViaVlessCoreCurl(fetchURLString,
                                             allowInsecureFetch,
@@ -175,7 +178,7 @@ static BOOL SubscriptionResponseIsForbidden(NSString *headers) {
             [req setValue:hwid forHTTPHeaderField:@"X-HWID"];
         }
         if (useHappHeaders) {
-            [req setValue:kHappSubscriptionUserAgent forHTTPHeaderField:@"User-Agent"];
+            [req setValue:userAgent forHTTPHeaderField:@"User-Agent"];
             UIDevice *device = [UIDevice currentDevice];
             NSString *locale = [[NSLocale currentLocale] objectForKey:NSLocaleLanguageCode];
             NSString *systemVersion = TrimSimpleString([device systemVersion]);
@@ -519,16 +522,74 @@ static BOOL SubscriptionResponseIsForbidden(NSString *headers) {
 - (void)subscriptionInfoButtonPressed:(UIButton *)sender {
     NSInteger index = sender.tag - kVCSubscriptionInfoButtonTagBase;
     if (index < 0 || index >= (NSInteger)[_subscriptions count]) return;
-    VCRecordAppEvent(@"ui", @"Subscription details opened", nil);
+    if (self.presentedViewController) return;
+    CGRect anchor=[sender convertRect:sender.bounds toView:self.view];
+    VCSubscriptionMenu *menu=[[[VCSubscriptionMenu alloc] initWithSubscription:[_subscriptions objectAtIndex:index] anchor:anchor delegate:self] autorelease];
+    [menu showInView:self.view];
+}
 
-    NSDictionary *subscription = [_subscriptions objectAtIndex:index];
+- (NSInteger)indexForSubscriptionSnapshot:(NSDictionary *)subscription {
+    NSInteger index=[self existingSubscriptionIndexForURL:[subscription objectForKey:@"url"]];
+    return index>=0 && [[_subscriptions objectAtIndex:index] isEqual:subscription] ? index : -1;
+}
+
+- (void)subscriptionActionSheet:(VCSubscriptionActionSheet *)sheet didDismissWithButtonIndex:(NSInteger)buttonIndex {
+    if (buttonIndex!=sheet.destructiveButtonIndex) return;
+    NSInteger index=[self indexForSubscriptionSnapshot:sheet.subscription];
+    if (index<0) { [self showStatus:@"Subscription changed; open its menu again" ok:NO]; return; }
+    if (_subscriptionTask || _configurationDraft || [self isConnectionActionInProgress]) { [self showStatus:@"Wait for the current operation to finish" ok:NO]; return; }
+    if ([self deleteSubscriptionAtIndex:index]) {
+        [self reloadMainTableDataAfterExternalChange]; [self showStatus:@"Subscription deleted" ok:YES];
+    }
+}
+
+- (void)subscriptionMenu:(VCSubscriptionMenu *)menu selectedAction:(VCSubscriptionMenuAction)action {
+    NSInteger index=[self indexForSubscriptionSnapshot:menu.subscription];
+    if (index<0) { [self showStatus:@"Subscription changed; open its menu again" ok:NO]; return; }
+    NSDictionary *subscription=[_subscriptions objectAtIndex:index];
+    if (action==VCSubscriptionMenuEdit) { [self presentSubscriptionEditorForSource:subscription]; return; }
+    if (action==VCSubscriptionMenuUpdate) { [self refreshSubscriptionAtIndex:index showStatus:YES]; return; }
+    if (action==VCSubscriptionMenuDelete) {
+        VCSubscriptionActionSheet *confirmation=[[[VCSubscriptionActionSheet alloc] initWithSubscription:subscription delegate:self] autorelease];
+        if (IsPadDevice()) [confirmation showFromRect:menu.anchor inView:self.view animated:YES];
+        else [confirmation showInView:self.view];
+        return;
+    }
+    if (action!=VCSubscriptionMenuInformation) return;
     SubscriptionInfoVC *info = [[[SubscriptionInfoVC alloc] initWithSubscription:subscription
                                                                            index:index
-                                                                     stealthMode:_stealthModeEnabled
-                                                                        delegate:self] autorelease];
+                                                                     stealthMode:_stealthModeEnabled] autorelease];
     SettingsNavController *nav = [[[SettingsNavController alloc] initWithRootViewController:info] autorelease];
     nav.modalPresentationStyle = UIModalPresentationFullScreen;
     [self presentViewController:nav animated:YES completion:nil];
+}
+
+- (void)presentSubscriptionEditorForSource:(NSDictionary *)subscription {
+    SubscriptionEditVC *editor=[[[SubscriptionEditVC alloc] initWithSubscription:subscription stealthMode:_stealthModeEnabled delegate:self] autorelease];
+    SettingsNavController *nav=[[[SettingsNavController alloc] initWithRootViewController:editor] autorelease];
+    nav.modalPresentationStyle=UIModalPresentationFullScreen;
+    [self presentViewController:nav animated:YES completion:nil];
+}
+
+- (void)subscriptionEditVC:(SubscriptionEditVC *)vc requestedSave:(NSDictionary *)subscription {
+    if ([self configurationMutationBlocked] || _configurationDraft || _subscriptionTask || [self isConnectionActionInProgress]) {
+        [vc finishSavingWithSubscription:nil errorText:@"Wait for the current operation to finish."]; return;
+    }
+    NSInteger index=[self indexForSubscriptionSnapshot:vc.subscription];
+    if (index<0) { [vc finishSavingWithSubscription:nil errorText:@"The subscription changed. Close the editor and open it again."]; return; }
+    NSInteger duplicate=[self existingSubscriptionIndexForURL:[subscription objectForKey:@"url"]];
+    if (duplicate>=0 && duplicate!=index) { [vc finishSavingWithSubscription:nil errorText:@"A subscription with this link already exists."]; return; }
+    NSMutableArray *draft=[NSMutableArray arrayWithArray:_subscriptions];
+    [draft replaceObjectAtIndex:index withObject:subscription];
+    [self commitConfigurations:_configs subscriptions:draft completion:^(BOOL saved) {
+        if (saved) {
+            [self normalizeSelection]; [self saveData]; [self reloadMainTableDataAfterExternalChange];
+            [self refreshPresentedSubscriptionInfoIfNeeded];
+            [self showStatus:@"Subscription settings saved" ok:YES];
+            VCRecordAppEvent(@"subscription",@"Subscription settings saved",nil);
+        }
+        [vc finishSavingWithSubscription:saved ? subscription : nil errorText:saved ? nil : @"The subscription was not saved. Previous settings are unchanged."];
+    }];
 }
 
 - (void)refreshPresentedSubscriptionInfoIfNeeded {
@@ -543,124 +604,14 @@ static BOOL SubscriptionResponseIsForbidden(NSString *headers) {
     [info reloadWithSubscription:[_subscriptions objectAtIndex:index]];
 }
 
-- (void)subscriptionInfoVCRequestedRefresh:(SubscriptionInfoVC *)vc atIndex:(NSInteger)index {
-    [self subscriptionInfoVCRequestedRefresh:vc atIndex:index allowPlainHTTP:NO];
-}
-
-- (void)subscriptionInfoVCRequestedRefresh:(SubscriptionInfoVC *)vc atIndex:(NSInteger)index allowPlainHTTP:(BOOL)allowPlainHTTP {
-    if (_launchAutoUpdateInProgress) {
-        [vc finishRefreshWithSubscription:nil errorText:@"Another subscription update is already running"];
-        return;
-    }
-    if (index < 0 || index >= (NSInteger)[_subscriptions count]) {
-        [vc finishRefreshWithSubscription:nil errorText:@"Subscription no longer exists"];
-        return;
-    }
-    if ([self isConnectionActionInProgress]) {
-        VCRecordAppEvent(@"subscription", @"Subscription update blocked", @"connection action in progress");
-        [self showStatus:@"Busy" ok:NO];
-        [vc finishRefreshWithSubscription:nil errorText:@"Connection action is in progress"];
-        return;
-    }
-    if (!allowPlainHTTP && [self subscriptionNeedsPlainHTTPApproval:[_subscriptions objectAtIndex:index]]) {
-        NSUInteger revision=_configurationRevision;
-        [self showPlainHTTPSubscriptionWarningForCount:1
-                                          confirmation:^{
-                                              if (revision != _configurationRevision) { [vc cancelRefresh]; return; }
-                                              [self subscriptionInfoVCRequestedRefresh:vc atIndex:index allowPlainHTTP:YES];
-                                          }
-                                            cancellation:^{
-                                                [vc cancelRefresh];
-                                            }];
-        return;
-    }
-
-    VCSubscriptionTask *task=[self beginSubscriptionTaskWithKind:VCSubscriptionTaskUpdate];
-    if (!task) { [vc cancelRefresh]; return; }
-    NSMutableDictionary *approved=[NSMutableDictionary dictionaryWithDictionary:[_subscriptions objectAtIndex:index]];
-    if (allowPlainHTTP) [approved setObject:@(YES) forKey:kSubscriptionAllowPlainHTTPKey];
-    NSDictionary *snapshot = [approved copy];
-    NSUInteger sourceRevision=_configurationRevision;
-    NSString *expectedURL = [[snapshot objectForKey:@"url"] copy];
-    SubscriptionInfoVC *infoVC = [vc retain];
-    _launchAutoUpdateInProgress = YES;
-    [self setSubscriptionRefreshInProgress:YES];
-    [self setUpdatingSubscriptionIndex:index];
-
-    dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_DEFAULT, 0), ^{
-        NSAutoreleasePool *pool = [[NSAutoreleasePool alloc] init];
-        VCSubscriptionTask *previous=[VCSetCurrentSubscriptionTask(task) retain];
-        @try {
-        NSString *errorText = nil;
-        NSDictionary *updated = [[self updatedSubscriptionDictionaryFromSource:snapshot errorText:&errorText] retain];
-        NSString *copiedError = [errorText copy];
-
-        dispatch_async(dispatch_get_main_queue(), ^{
-            BOOL stillExists = (index >= 0 && index < (NSInteger)[_subscriptions count]);
-            NSString *currentURL = stillExists ? [[_subscriptions objectAtIndex:index] objectForKey:@"url"] : nil;
-            BOOL unchanged = task == _subscriptionTask && !task.isCancelled && sourceRevision == _configurationRevision && stillExists && [expectedURL isKindOfClass:[NSString class]] &&
-                             [currentURL isKindOfClass:[NSString class]] && [currentURL isEqualToString:expectedURL];
-
-            void (^finishRefresh)(BOOL)=^(BOOL saved) {
-            [self setUpdatingSubscriptionIndex:-1];
-            _launchAutoUpdateInProgress=NO;
-            [self setSubscriptionRefreshInProgress:NO];
-            if (updated && unchanged && saved) {
-                [self showProfileImportWarnings:@[updated]];
-                [self normalizeSelection];
-                [self saveData];
-                [self reloadMainTableDataAfterExternalChange];
-                NSArray *items = [updated objectForKey:@"items"];
-                [self showStatus:[NSString stringWithFormat:@"Subscription updated (%lu configs)",
-                                  (unsigned long)([items isKindOfClass:[NSArray class]] ? [items count] : 0)]
-                              ok:YES];
-                [infoVC finishRefreshWithSubscription:updated errorText:nil];
-            } else {
-                NSString *message = copiedError;
-                if (!unchanged) message = @"Subscription changed while it was updating";
-                else if (updated && !saved) message=@"Subscription was not saved; previous configurations are unchanged";
-                if (![message isKindOfClass:[NSString class]] || [message length] == 0) {
-                    message = @"Subscription update failed";
-                }
-                if (task.isCancelled) message=task.cancellationReason;
-                [self showStatus:message ok:NO];
-                [infoVC finishRefreshWithSubscription:nil errorText:message];
-            }
-
-            [self finishSubscriptionTask:task success:(updated && unchanged && saved)];
-            [updated release];
-            [copiedError release];
-            [expectedURL release];
-            [snapshot release];
-            [infoVC release];
-            };
-            if (updated && unchanged) {
-                NSMutableArray *draft=[NSMutableArray arrayWithArray:_subscriptions];
-                [draft replaceObjectAtIndex:index withObject:updated];
-                [self commitConfigurations:_configs subscriptions:draft completion:finishRefresh];
-            } else finishRefresh(NO);
-        });
-        } @finally { VCSetCurrentSubscriptionTask(previous); [previous release]; [pool drain]; }
-    });
-}
-
-- (void)subscriptionInfoVC:(SubscriptionInfoVC *)vc requestedRenameTo:(NSString *)name atIndex:(NSInteger)index {
-    if ([self configurationMutationBlocked]) return;
-    if (index < 0 || index >= (NSInteger)[_subscriptions count]) return;
-
-    NSString *trimmed = [name stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
-    if ([trimmed length] == 0) return;
-
-    NSMutableDictionary *updated = [NSMutableDictionary dictionaryWithDictionary:[_subscriptions objectAtIndex:index]];
-    [updated setObject:trimmed forKey:@"name"];
-    [updated setObject:trimmed forKey:kSubscriptionCustomNameKey];
-    [_subscriptions replaceObjectAtIndex:index withObject:updated];
-    VCRecordAppEvent(@"subscription", @"Subscription renamed", nil);
-
-    [self saveData];
-    [self reloadMainTableDataAfterExternalChange];
-    [vc reloadWithSubscription:updated];
-    [self showStatus:@"Subscription renamed" ok:YES];
+- (void)subscriptionEditVC:(SubscriptionEditVC *)vc didSaveSubscription:(NSDictionary *)subscription {
+    NSDictionary *source=vc.subscription;
+    NSString *defaultAgent=AppUserAgent();
+    BOOL changed=![[source objectForKey:@"url"] isEqual:[subscription objectForKey:@"url"]] ||
+        ![VCSubscriptionUserAgent(source,defaultAgent) isEqual:VCSubscriptionUserAgent(subscription,defaultAgent)];
+    if (!changed) return;
+    NSInteger index=[self indexForSubscriptionSnapshot:subscription];
+    if (index>=0) [self refreshSubscriptionAtIndex:index showStatus:YES];
 }
 
 - (BOOL)deleteSubscriptionAtIndex:(NSInteger)subIdx {
@@ -684,13 +635,6 @@ static BOOL SubscriptionResponseIsForbidden(NSString *headers) {
     [self normalizeSelection];
     [self saveData];
     return YES;
-}
-
-- (void)subscriptionInfoVCRequestedDelete:(SubscriptionInfoVC *)vc atIndex:(NSInteger)index {
-    if (![self deleteSubscriptionAtIndex:index]) return;
-    [self reloadMainTableDataAfterExternalChange];
-    [self showStatus:@"Subscription deleted" ok:YES];
-    [vc dismissViewControllerAnimated:YES completion:nil];
 }
 
 @end

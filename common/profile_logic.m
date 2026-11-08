@@ -3,6 +3,7 @@
 #import "app_constants.h"
 #import "subscription_task.h"
 #import "../integrations/incy/incy_links.h"
+#include "../integrations/happ/happ_crypto.h"
 #include "../../vless-core-cli/include/json.h"
 #include <arpa/inet.h>
 #include <errno.h>
@@ -1107,6 +1108,54 @@ failure:
     [formatter setDateFormat:@"dd.MM.yyyy"];
     NSString *formatted = [formatter stringFromDate:date];
     return [formatted length] > 0 ? formatted : nil;
+}
+
+- (NSDictionary *)subscriptionByEditingSource:(NSDictionary *)source name:(NSString *)name link:(NSString *)link userAgent:(NSString *)agent error:(NSString **)error {
+    if (error) *error=nil;
+    if (![source isKindOfClass:[NSDictionary class]] || ![name isKindOfClass:[NSString class]] || ![link isKindOfClass:[NSString class]]) return nil;
+    name=TrimSimpleString(name); link=TrimSimpleString(link);
+    if (![name length] || ![name dataUsingEncoding:NSUTF8StringEncoding] || [name lengthOfBytesUsingEncoding:NSUTF8StringEncoding]>1024 ||
+        [name rangeOfCharacterFromSet:[NSCharacterSet controlCharacterSet]].location!=NSNotFound) {
+        if (error) *error=@"Enter a subscription name of up to 1024 UTF-8 bytes without control characters.";
+        return nil;
+    }
+    if (agent && !VCSubscriptionUserAgentIsValid(agent)) {
+        if (error) *error=@"User-Agent must contain 1 to 256 printable ASCII characters.";
+        return nil;
+    }
+    BOOL happ=[[link lowercaseString] hasPrefix:kHappAddPrefix];
+    NSString *storedLink=happ ? [link substringFromIndex:[kHappAddPrefix length]] : link;
+    NSString *target=storedLink;
+    if (![link length] || [link lengthOfBytesUsingEncoding:NSUTF8StringEncoding]>kVCMaximumSubscriptionURLBytes) target=nil;
+    else if (happ && (VCIncyIsLink(storedLink) || HappURLStringIsEncrypted(storedLink))) target=nil;
+    else if (VCIncyIsLink(storedLink)) target=[VCIncySubscriptionDescriptor(storedLink,NULL) objectForKey:@"value"];
+    else if (HappURLStringIsEncrypted(storedLink)) {
+        unsigned char *plain=NULL; size_t size=0;
+        int result=VCHappDecryptLink([storedLink UTF8String],&plain,&size,NULL,0,NULL,0);
+        target=result==1 ? [[[NSString alloc] initWithBytes:plain length:size encoding:NSUTF8StringEncoding] autorelease] : nil;
+        VCHappFreePlaintext(plain);
+        happ=YES;
+    }
+    if (!VCValidatedProviderURLString(target) || [target lengthOfBytesUsingEncoding:NSUTF8StringEncoding]>kVCMaximumSubscriptionURLBytes) {
+        if (error) *error=@"Enter a valid HTTP, HTTPS, HAPP or INCY subscription link.";
+        return nil;
+    }
+    NSMutableDictionary *updated=[NSMutableDictionary dictionaryWithDictionary:source];
+    if (![[source objectForKey:@"url"] isEqual:storedLink]) {
+        [updated setObject:@[] forKey:@"items"];
+        for (NSString *key in @[kSubscriptionMetadataKey,kSubscriptionUserInfoKey,kSubscriptionAllowInsecureFetchKey,kSubscriptionAllowPlainHTTPKey,kSubscriptionHappSourceKey,@"import_skipped",@"import_issues"])
+            [updated removeObjectForKey:key];
+    }
+    [updated setObject:storedLink forKey:@"url"];
+    [updated setObject:name forKey:@"name"];
+    if (![[source objectForKey:@"name"] isEqual:name]) [updated setObject:name forKey:kSubscriptionCustomNameKey];
+    if (happ) [updated setObject:@(YES) forKey:kSubscriptionHappSourceKey];
+    [updated removeObjectForKey:kSubscriptionUserAgentKey];
+    [updated removeObjectForKey:kSubscriptionHappUserAgentKey];
+    if ([agent isEqual:kHappSubscriptionUserAgent]) [updated setObject:@(YES) forKey:kSubscriptionHappUserAgentKey];
+    else if (agent) [updated setObject:agent forKey:kSubscriptionUserAgentKey];
+    else if (SubscriptionDictionaryUsesHappHeaders(updated)) [updated setObject:@(NO) forKey:kSubscriptionHappUserAgentKey];
+    return updated;
 }
 
 - (NSDictionary *)updatedSubscriptionFromSource:(NSDictionary *)sub

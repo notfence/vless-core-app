@@ -296,6 +296,7 @@
 
 - (NSString *)shortUpdateFailureTextForSubscription:(NSDictionary *)sub errorText:(NSString *)errorText {
     NSString *urlString = [sub objectForKey:@"url"];
+    if ([errorText hasPrefix:@"Subscription fetch failed: HTTP 403."]) errorText=@"HTTP 403. Open the subscription menu and choose Edit to change its User-Agent.";
     return [self shortSubscriptionFailureTextForURL:urlString errorText:errorText defaultReason:@"update failed"];
 }
 
@@ -1277,6 +1278,10 @@
 }
 
 - (void)actionSheet:(UIActionSheet *)actionSheet didDismissWithButtonIndex:(NSInteger)buttonIndex {
+    if ([actionSheet isKindOfClass:[VCSubscriptionActionSheet class]]) {
+        [self subscriptionActionSheet:(VCSubscriptionActionSheet *)actionSheet didDismissWithButtonIndex:buttonIndex];
+        return;
+    }
     if (actionSheet.tag == VCActionSheetTagImport) {
         if (buttonIndex == 0) {
             VCRecordAppEvent(@"import", @"Clipboard import selected", nil);

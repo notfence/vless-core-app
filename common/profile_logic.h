@@ -47,6 +47,7 @@
                                        hostName:(NSString *)hostName
                                         options:(id<VCSubscriptionUpdateOptions>)options
                                       errorText:(NSString **)errorTextOut;
+- (NSDictionary *)subscriptionByEditingSource:(NSDictionary *)source name:(NSString *)name link:(NSString *)link userAgent:(NSString *)agent error:(NSString **)error;
 - (NSString *)decodeImportTextData:(NSData *)data;
 - (BOOL)parseSOCKS5Host:(NSString **)hostOut port:(uint16_t *)portOut fromURI:(NSString *)uri;
 - (NSString *)strictDecodedConfigQueryComponent:(NSString *)component;

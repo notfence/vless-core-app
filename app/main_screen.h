@@ -290,7 +290,7 @@
 - (void)stopAllPings;
 @end
 
-@interface MainVC (VCMainSubscriptions) <SubscriptionInfoVCDelegate, VCSubscriptionUpdateOptions>
+@interface MainVC (VCMainSubscriptions) <SubscriptionEditVCDelegate, VCSubscriptionMenuDelegate, VCSubscriptionUpdateOptions>
 - (NSString *)decodedSubscriptionTitleValue:(NSString *)rawValue;
 - (NSString *)subscriptionTitleFromMetadataText:(NSString *)text;
 - (NSString *)subscriptionTitleFromData:(NSData *)data;
@@ -322,12 +322,13 @@
 - (void)subscriptionWebPageButtonPressed:(UIButton *)sender;
 - (void)subscriptionSupportButtonPressed:(UIButton *)sender;
 - (void)subscriptionInfoButtonPressed:(UIButton *)sender;
+- (NSInteger)indexForSubscriptionSnapshot:(NSDictionary *)subscription;
+- (void)subscriptionActionSheet:(VCSubscriptionActionSheet *)sheet didDismissWithButtonIndex:(NSInteger)buttonIndex;
+- (void)subscriptionMenu:(VCSubscriptionMenu *)menu selectedAction:(VCSubscriptionMenuAction)action;
+- (void)presentSubscriptionEditorForSource:(NSDictionary *)subscription;
+- (void)subscriptionEditVC:(SubscriptionEditVC *)vc requestedSave:(NSDictionary *)subscription;
 - (void)refreshPresentedSubscriptionInfoIfNeeded;
-- (void)subscriptionInfoVCRequestedRefresh:(SubscriptionInfoVC *)vc atIndex:(NSInteger)index;
-- (void)subscriptionInfoVCRequestedRefresh:(SubscriptionInfoVC *)vc atIndex:(NSInteger)index allowPlainHTTP:(BOOL)allowPlainHTTP;
-- (void)subscriptionInfoVC:(SubscriptionInfoVC *)vc requestedRenameTo:(NSString *)name atIndex:(NSInteger)index;
 - (BOOL)deleteSubscriptionAtIndex:(NSInteger)subIdx;
-- (void)subscriptionInfoVCRequestedDelete:(SubscriptionInfoVC *)vc atIndex:(NSInteger)index;
 @end
 
 @interface MainVC (VCMainImport) <UIActionSheetDelegate, UIAlertViewDelegate, QRScanVCDelegate, VCImportBrowserDelegate>

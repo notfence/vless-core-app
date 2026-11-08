@@ -235,7 +235,7 @@ NSData *FetchURLViaVlessCoreCurl(NSString *urlString,
 
         if (useHappHeaders) {
             argv[argc++] = (char *)"--user-agent";
-            argv[argc++] = (char *)[kHappSubscriptionUserAgent UTF8String];
+            argv[argc++] = (char *)(user_agent_c && *user_agent_c ? user_agent_c : [kHappSubscriptionUserAgent UTF8String]);
             if (happ_locale_header[0] != '\0') {
                 argv[argc++] = (char *)"-H";
                 argv[argc++] = happ_locale_header;
