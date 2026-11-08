@@ -190,6 +190,8 @@
     [_pendingInsecureImportURLs release];
     _pendingInsecureImportURLs = [cleanURLs copy];
     _pendingInsecureImportUsesHappHeaders = happSource;
+    _pendingInsecureImportUsesCompatibleUserAgent=NO;
+    _pendingInsecureImportAllowsPlainHTTP=NO;
 
     NSUInteger count = [cleanURLs count];
     NSString *detail = nil;
@@ -329,6 +331,33 @@
     [self showSubscriptionFailureAlertWithTitle:title failureTexts:failureTexts];
 }
 
+- (void)showCompatibilityImportPromptForURLs:(NSArray *)urls allowInsecureFetch:(BOOL)insecure allowPlainHTTP:(BOOL)plain {
+    if (![urls count] || _pendingCompatibilityImport) return;
+    _pendingCompatibilityImport=[@{@"urls":[NSArray arrayWithArray:urls],@"revision":@(_configurationRevision),
+                                  @"insecure":@(insecure),@"plain":@(plain)} copy];
+    NSString *message=[urls count]==1
+        ? @"The server returned HTTP 403. Retry using the HAPP User-Agent? Your HWID and certificate verification stay unchanged."
+        : [NSString stringWithFormat:@"%lu subscriptions returned HTTP 403. Retry these downloads using the HAPP User-Agent? Your HWID and certificate verification stay unchanged.",(unsigned long)[urls count]];
+    UIAlertView *alert=[[[UIAlertView alloc] initWithTitle:@"Compatibility mode" message:message delegate:self cancelButtonTitle:@"OK" otherButtonTitles:@"Retry",nil] autorelease];
+    alert.tag=VCAlertTagImportCompatibility;
+    [alert show];
+}
+
+- (void)finishCompatibilityImportPrompt:(BOOL)retry {
+    NSDictionary *pending=[_pendingCompatibilityImport autorelease]; _pendingCompatibilityImport=nil;
+    if (!pending) return;
+    NSArray *urls=[pending objectForKey:@"urls"];
+    BOOL current=[[pending objectForKey:@"revision"] unsignedIntegerValue]==_configurationRevision && !_subscriptionTask && !_configurationDraft && ![self configurationMutationBlocked] && ![self isConnectionActionInProgress];
+    for (NSString *url in urls) if ([self existingSubscriptionIndexForURL:url]>=0) current=NO;
+    if (!retry || !current) {
+        if (_photoQRQueue) _photoQRFailures+=[urls count];
+        [self showStatus:retry ? @"Import changed; add the subscription again" : @"Subscription import failed (HTTP 403)" ok:NO];
+        return;
+    }
+    [self performSubscriptionImportForURLs:urls allowInsecureFetch:[[pending objectForKey:@"insecure"] boolValue]
+                       fallbackSubscriptionsByURL:nil allowPlainHTTP:[[pending objectForKey:@"plain"] boolValue] useCompatibleUserAgent:YES];
+}
+
 - (void)startBackgroundSubscriptionImportForURLs:(NSArray *)urlStrings
                               allowInsecureFetch:(BOOL)allowInsecureFetch {
     [self startBackgroundSubscriptionImportForURLs:urlStrings
@@ -349,6 +378,15 @@
                               allowInsecureFetch:(BOOL)allowInsecureFetch
                      fallbackSubscriptionsByURL:(NSDictionary *)fallbackSubscriptionsByURL
                                   allowPlainHTTP:(BOOL)allowPlainHTTP {
+    [self performSubscriptionImportForURLs:urlStrings allowInsecureFetch:allowInsecureFetch
+                       fallbackSubscriptionsByURL:fallbackSubscriptionsByURL allowPlainHTTP:allowPlainHTTP useCompatibleUserAgent:NO];
+}
+
+- (void)performSubscriptionImportForURLs:(NSArray *)urlStrings
+                    allowInsecureFetch:(BOOL)allowInsecureFetch
+            fallbackSubscriptionsByURL:(NSDictionary *)fallbackSubscriptionsByURL
+                        allowPlainHTTP:(BOOL)allowPlainHTTP
+                useCompatibleUserAgent:(BOOL)useCompatibleUserAgent {
     NSMutableArray *cleanURLs = [NSMutableArray array];
     for (id obj in urlStrings) {
         if (![obj isKindOfClass:[NSString class]]) continue;
@@ -374,10 +412,10 @@
         }
         if (plainHTTPCount > 0) {
             [self showPlainHTTPSubscriptionWarningForCount:plainHTTPCount confirmation:^{
-                [self startBackgroundSubscriptionImportForURLs:cleanURLs
+                [self performSubscriptionImportForURLs:cleanURLs
                                            allowInsecureFetch:allowInsecureFetch
                                   fallbackSubscriptionsByURL:fallbackSubscriptionsByURL
-                                               allowPlainHTTP:YES];
+                                               allowPlainHTTP:YES useCompatibleUserAgent:useCompatibleUserAgent];
             }];
             return;
         }
@@ -411,6 +449,7 @@
         NSMutableArray *insecureURLs = [[NSMutableArray alloc] init];
         NSMutableArray *plainHTTPURLs = [NSMutableArray array];
         NSMutableArray *failureTexts = [[NSMutableArray alloc] init];
+        NSMutableArray *compatibleURLs = [[NSMutableArray alloc] init];
         NSMutableDictionary *failureCategories = [[NSMutableDictionary alloc] init];
         NSUInteger failedCount = 0;
         NSUInteger fallbackCount = 0;
@@ -465,6 +504,11 @@
                 if (allowPlainHTTP && URLStringUsesPlainHTTP([incy objectForKey:@"value"])) [source setObject:@(YES) forKey:kSubscriptionAllowPlainHTTPKey];
                 sub=source;
             }
+            if (useCompatibleUserAgent && ![sources objectForKey:subscriptionURL]) {
+                NSMutableDictionary *source=[NSMutableDictionary dictionaryWithDictionary:sub];
+                [source setObject:@(YES) forKey:kSubscriptionHappUserAgentKey];
+                sub=source;
+            }
             NSString *errorText = nil;
             BOOL insecureRetryAvailable = NO;
             NSDictionary *updated = [self updatedSubscriptionDictionaryFromSource:sub
@@ -487,6 +531,8 @@
                 fallbackCount++;
             } else {
                 failedCount++;
+                if (!useCompatibleUserAgent && !happSource && ![sources objectForKey:subscriptionURL] &&
+                    [errorText hasPrefix:@"Subscription fetch failed: HTTP 403."]) [compatibleURLs addObject:urlString];
                 VCIncrementDiagnosticCategory(failureCategories, errorText);
                 [failureTexts addObject:[self shortImportFailureTextForURL:urlString errorText:errorText]];
             }
@@ -498,6 +544,7 @@
                 if (!task.isCancelled && task == _subscriptionTask) [self showStatus:@"Import skipped: configurations changed" ok:NO];
                 [self finishSubscriptionTask:task success:NO];
                 [importedSubs release]; [insecureURLs release]; [failureTexts release]; [failureCategories release];
+                [compatibleURLs release];
                 [urlsToImport release]; [fallbackSubscriptions release]; return;
             }
             NSMutableArray *draft=[NSMutableArray arrayWithArray:_subscriptions];
@@ -540,11 +587,13 @@
 
             void (^finishImport)(BOOL)=^(BOOL saved) {
             _launchAutoUpdateInProgress=NO;
-            if (_photoQRQueue && !task.isCancelled) _photoQRFailures+=saved ? failedCount : 1;
+            BOOL offerCompatibility=[compatibleURLs count]>0 && [compatibleURLs count]==[failureTexts count] && ![insecureURLs count] && ![plainHTTPURLs count];
+            if (_photoQRQueue && !task.isCancelled) _photoQRFailures+=saved ? failedCount-(offerCompatibility ? [compatibleURLs count] : 0) : 1;
             if (!saved) {
                 [self finishSubscriptionTask:task success:NO];
                 [importedSubs release]; [insecureURLs release]; [failureTexts release];
                 [failureCategories release]; [urlsToImport release]; [fallbackSubscriptions release];
+                [compatibleURLs release];
                 return;
             }
             if (addedCount > 0 || replacedCount > 0 || savedPlainHTTPApproval) {
@@ -598,8 +647,10 @@
                 [self showInsecureSubscriptionImportPromptForURLs:insecureURLs
                                                    fromBatchImport:([urlsToImport count] > 1)
                                                         happSource:allHappSources];
+                _pendingInsecureImportUsesCompatibleUserAgent=useCompatibleUserAgent;
+                _pendingInsecureImportAllowsPlainHTTP=allowPlainHTTP;
             }
-            if ([failureTexts count] > 0) {
+            if ([failureTexts count] > 0 && !offerCompatibility) {
                 [self showSubscriptionImportFailures:failureTexts];
             }
             VCRecordAppEvent(@"import", @"Batch subscription import finished",
@@ -613,15 +664,17 @@
                               ([NSDate timeIntervalSinceReferenceDate] - diagnosticStarted) * 1000.0]);
 
             [self finishSubscriptionTask:task success:YES];
+            if (offerCompatibility) [self showCompatibilityImportPromptForURLs:compatibleURLs allowInsecureFetch:allowInsecureFetch allowPlainHTTP:allowPlainHTTP];
             if ([plainHTTPURLs count]) {
                 NSArray *retry=[plainHTTPURLs arrayByAddingObjectsFromArray:insecureURLs];
                 [self showPlainHTTPSubscriptionWarningForCount:[plainHTTPURLs count] confirmation:^{
-                    [self startBackgroundSubscriptionImportForURLs:retry allowInsecureFetch:allowInsecureFetch fallbackSubscriptionsByURL:nil allowPlainHTTP:YES];
+                    [self performSubscriptionImportForURLs:retry allowInsecureFetch:allowInsecureFetch fallbackSubscriptionsByURL:nil allowPlainHTTP:YES useCompatibleUserAgent:useCompatibleUserAgent];
                 }];
             }
             [importedSubs release];
             [insecureURLs release];
             [failureTexts release];
+            [compatibleURLs release];
             [failureCategories release];
             [urlsToImport release];
             [fallbackSubscriptions release];
@@ -1293,7 +1346,7 @@
 
 - (void)advancePhotoQRImport {
     [NSObject cancelPreviousPerformRequestsWithTarget:self selector:@selector(advancePhotoQRImport) object:nil];
-    if (!_photoQRQueue || _subscriptionTask || _configurationDraft || _configurationCommitInProgress || _pendingPlainHTTPConfirmation || _pendingInsecureImportURLs) return;
+    if (!_photoQRQueue || _subscriptionTask || _configurationDraft || _configurationCommitInProgress || _pendingPlainHTTPConfirmation || _pendingInsecureImportURLs || _pendingCompatibilityImport) return;
     if (!_photoQRCancelled && [_photoQRQueue count]) {
         id next=[[[_photoQRQueue objectAtIndex:0] retain] autorelease];
         [_photoQRQueue removeObjectAtIndex:0];
@@ -1362,6 +1415,10 @@
 
 - (void)alertView:(UIAlertView *)alertView clickedButtonAtIndex:(NSInteger)buttonIndex {
     if (_photoQRQueue) [self performSelector:@selector(advancePhotoQRImport) withObject:nil afterDelay:0];
+    if (alertView.tag == VCAlertTagImportCompatibility) {
+        [self finishCompatibilityImportPrompt:buttonIndex!=alertView.cancelButtonIndex];
+        return;
+    }
     if (alertView.tag == VCAlertTagUpdateAvailable) {
         if (buttonIndex != alertView.cancelButtonIndex) {
             VCOpenGitHubLatestRelease(_availableReleaseURL);
@@ -1414,6 +1471,10 @@
     if (alertView.tag == VCAlertTagImportInsecureSubscription) {
         NSArray *urlStrings = [_pendingInsecureImportURLs retain];
         BOOL useHappHeaders = _pendingInsecureImportUsesHappHeaders;
+        BOOL useCompatibleUserAgent=_pendingInsecureImportUsesCompatibleUserAgent;
+        BOOL allowPlainHTTP=_pendingInsecureImportAllowsPlainHTTP;
+        _pendingInsecureImportUsesCompatibleUserAgent=NO;
+        _pendingInsecureImportAllowsPlainHTTP=NO;
         [_pendingInsecureImportURLs release];
         _pendingInsecureImportURLs = nil;
         _pendingInsecureImportUsesHappHeaders = NO;
@@ -1421,7 +1482,9 @@
         if (buttonIndex == 1) {
             VCRecordAppEvent(@"import", @"Insecure subscription fetch approved",
                              [NSString stringWithFormat:@"count=%lu", (unsigned long)[urlStrings count]]);
-            if ([urlStrings count] == 1) {
+            if (useCompatibleUserAgent) {
+                [self performSubscriptionImportForURLs:urlStrings allowInsecureFetch:YES fallbackSubscriptionsByURL:nil allowPlainHTTP:allowPlainHTTP useCompatibleUserAgent:YES];
+            } else if ([urlStrings count] == 1) {
                 NSString *urlString = [urlStrings objectAtIndex:0];
                 if (useHappHeaders && [self isHappAddLink:urlString]) {
                     urlString = [self targetFromHappAddLink:urlString];

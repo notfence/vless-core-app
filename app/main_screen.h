@@ -39,6 +39,8 @@
     NSString *_statusBaseText;
     NSArray *_pendingImportRefreshIndices;
     NSArray *_pendingInsecureImportURLs;
+    NSDictionary *_pendingCompatibilityImport;
+    BOOL _pendingInsecureImportUsesCompatibleUserAgent, _pendingInsecureImportAllowsPlainHTTP;
     void (^_pendingPlainHTTPConfirmation)(void);
     void (^_pendingPlainHTTPCancellation)(void);
     NSDictionary *_subscriptionToReexpandAfterReorder;
@@ -373,6 +375,8 @@
 - (void)showSubscriptionFailureAlertWithTitle:(NSString *)title failureTexts:(NSArray *)failureTexts;
 - (void)showSubscriptionImportFailures:(NSArray *)failureTexts;
 - (void)showSubscriptionUpdateFailures:(NSArray *)failureTexts;
+- (void)showCompatibilityImportPromptForURLs:(NSArray *)urls allowInsecureFetch:(BOOL)insecure allowPlainHTTP:(BOOL)plain;
+- (void)finishCompatibilityImportPrompt:(BOOL)retry;
 - (void)startBackgroundSubscriptionImportForURLs:(NSArray *)urlStrings
                               allowInsecureFetch:(BOOL)allowInsecureFetch;
 - (void)startBackgroundSubscriptionImportForURLs:(NSArray *)urlStrings
@@ -382,6 +386,11 @@
                               allowInsecureFetch:(BOOL)allowInsecureFetch
                      fallbackSubscriptionsByURL:(NSDictionary *)fallbackSubscriptionsByURL
                                   allowPlainHTTP:(BOOL)allowPlainHTTP;
+- (void)performSubscriptionImportForURLs:(NSArray *)urlStrings
+                    allowInsecureFetch:(BOOL)allowInsecureFetch
+            fallbackSubscriptionsByURL:(NSDictionary *)fallbackSubscriptionsByURL
+                        allowPlainHTTP:(BOOL)allowPlainHTTP
+                useCompatibleUserAgent:(BOOL)useCompatibleUserAgent;
 - (void)importDirectURI:(NSString *)uri;
 - (void)importSubscriptionURL:(NSString *)urlString
            allowInsecureFetch:(BOOL)allowInsecureFetch

@@ -2,6 +2,19 @@
 #import "settings.h"
 #import "subscription_info.h"
 
+static BOOL SubscriptionResponseIsForbidden(NSString *headers) {
+    BOOL forbidden=NO;
+    for (NSString *line in [headers componentsSeparatedByCharactersInSet:[NSCharacterSet newlineCharacterSet]]) {
+        if (![line hasPrefix:@"HTTP/"]) continue;
+        NSRange space=[line rangeOfString:@" "];
+        NSUInteger start=NSMaxRange(space);
+        forbidden=space.location!=NSNotFound && start<=[line length] && [line length]-start>=3 &&
+            [[line substringWithRange:NSMakeRange(start,3)] isEqual:@"403"] &&
+            ([line length]-start==3 || [line characterAtIndex:start+3]==' ' || [line characterAtIndex:start+3]=='\t');
+    }
+    return forbidden;
+}
+
 @implementation MainVC (VCMainSubscriptions)
 
 - (BOOL)preserveCustomSubscriptionNames {
@@ -129,7 +142,8 @@
 
     NSString *fetchErr = nil;
     NSString *curlHeaders = nil;
-    NSString *userAgent = AppUserAgent();
+    BOOL useHappUserAgent = useHappHeaders || [[sub objectForKey:kSubscriptionHappUserAgentKey] isEqual:@(YES)];
+    NSString *userAgent = useHappUserAgent ? kHappSubscriptionUserAgent : AppUserAgent();
     int curlExitCode = -1;
     NSData *data = FetchURLViaVlessCoreCurl(fetchURLString,
                                             allowInsecureFetch,
@@ -189,6 +203,9 @@
 
     if (!data) {
         if (incy) fetchErr=VCIncySafeFetchError(fetchErr);
+        if (curlExitCode==22 && SubscriptionResponseIsForbidden(curlHeaders)) {
+            fetchErr=@"HTTP 403. The server rejected the subscription download.";
+        }
         if (![fetchErr isKindOfClass:[NSString class]] || [fetchErr length] == 0) {
             fetchErr = @"unknown error";
         }

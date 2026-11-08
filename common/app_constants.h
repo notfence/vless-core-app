@@ -37,6 +37,7 @@ static NSString *const kDefaultsPreferGitHubLegacyKey = @"vlesscore.links.prefer
 static NSString *const kSubscriptionAllowInsecureFetchKey = @"allow_insecure_fetch";
 static NSString *const kSubscriptionAllowPlainHTTPKey = @"allow_plain_http";
 static NSString *const kSubscriptionHappSourceKey = @"happ_source";
+static NSString *const kSubscriptionHappUserAgentKey = @"happ_user_agent";
 static NSString *const kHappSubscriptionUserAgent = @"Happ/3.26.3/iOS";
 static NSString *const kHappAddPrefix = @"happ://add/";
 static NSString *const kSubscriptionUserInfoKey = @"subscription_userinfo";

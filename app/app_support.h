@@ -58,6 +58,7 @@ typedef NS_ENUM(NSInteger, VCAlertTag) {
     VCAlertTagImportInsecureSubscription = 1002,
     VCAlertTagUpdateAvailable = 1003,
     VCAlertTagPlainHTTPSubscription = 1004,
+    VCAlertTagImportCompatibility = 1005,
 };
 
 typedef NS_ENUM(NSInteger, VCActionSheetTag) {

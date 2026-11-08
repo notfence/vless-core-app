@@ -120,7 +120,7 @@ static NSString *UIImagePickerControllerImageURL=@"imageURL",*UIImagePickerContr
 @end
 
 @interface MainVC : NSObject {
-@public NSMutableArray *_photoQRQueue; id _subscriptionTask,_configurationDraft,_pendingPlainHTTPConfirmation,_pendingInsecureImportURLs;
+@public NSMutableArray *_photoQRQueue; id _subscriptionTask,_configurationDraft,_pendingPlainHTTPConfirmation,_pendingInsecureImportURLs,_pendingCompatibilityImport;
     BOOL _configurationCommitInProgress,_photoQRCancelled;
     NSUInteger _photoQRAdded,_photoQRDuplicates,_photoQRRejected,_photoQRFailures,starts,specials;
     NSString *lastStatus; BOOL statusOK;
