@@ -214,6 +214,11 @@ static void importWarningTests(void) {
     CHECK("import-warning/no-empty-reason",[alertMessage isEqual:@"Skipped 1 configuration(s)."]);
     [screen showProfileImportWarnings:@[@{@"skipped":@6,@"issues":@[@"One",@"Two",@"Three",@"Four",@"Five",@"Six"]}]];
     CHECK("import-warning/reasons-remain-bounded",[alertMessage isEqual:@"Skipped 6 configuration(s).\nReasons:\nOne\nTwo\nThree\nFour\nFive"]);
+    initial=shownAlerts;
+    [screen showProfileImportWarnings:@[@{@"skipped":@0,@"warnings":@[@"Socket warning",@"Socket warning"]}]];
+    CHECK("import-warning/socket-notices-do-not-open-alert",shownAlerts==initial);
+    [screen showProfileImportWarnings:@[@{@"import_skipped":@1,@"import_issues":@[@"Unsupported protocol"],@"import_warnings":@[@"Socket warning"]}]];
+    CHECK("import-warning/rejected-reasons-without-legacy-socket-notices",[alertMessage isEqual:@"Skipped 1 configuration(s).\nReason: Unsupported protocol"]);
 }
 static void editRefreshTests(void) {
     NSDictionary *source=@{@"url":sourceURL,@"name":@"Original",@"items":@[]};

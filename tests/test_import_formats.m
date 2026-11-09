@@ -86,9 +86,66 @@ static void extendedProfiles(void) {
     NSDictionary *good = profile(@"tcp", @{}, plain), *bad = profile(@"grpc", @{@"idle_timeout": @-1}, plain);
     NSData *batch = [NSJSONSerialization dataWithJSONObject:@{@"configs": @[bad, good]} options:0 error:NULL];
     CHECK("happ/invalid-entry-does-not-remove-valid-entry", [[logic extractConfigURIsFromHappJSONData:batch] count] == 1);
-    CHECK("happ/import-warning-readable-reason", [[[logic importReportFromHappJSONData:batch] objectForKey:@"issues"] isEqual:@[@"Invalid or unsupported profile settings"]]);
+    CHECK("happ/import-warning-readable-reason", [[[logic importReportFromHappJSONData:batch] objectForKey:@"issues"] isEqual:@[@"Invalid or unsupported grpcSettings"]]);
     NSString *longPath = [@"/" stringByPaddingToLength:4096 withString:@"a" startingAtIndex:0];
     CHECK("happ/oversized-result-rejected", [logic vlessURIFromHappJSONConfig:profile(@"ws", @{@"path": longPath}, plain)] == nil);
+}
+
+static void socketProfiles(void) {
+    VCProfileLogic *logic=VCProfiles();
+    NSDictionary *original=profile(@"tcp",@{},@{@"id":@"11111111-2222-4333-8444-555555555555"});
+    NSMutableDictionary *config=[[original mutableCopy] autorelease];
+    NSMutableDictionary *outbound=[[[[original objectForKey:@"outbounds"] objectAtIndex:0] mutableCopy] autorelease];
+    NSMutableDictionary *stream=[[[outbound objectForKey:@"streamSettings"] mutableCopy] autorelease];
+    [stream setObject:@{@"tcpUserTimeout":@1234,@"tcpKeepAliveIdle":@17,@"tcpKeepAliveInterval":@9} forKey:@"sockopt"];
+    [stream setObject:@{@"header":@{@"type":@"none"}} forKey:@"tcpSettings"];
+    [outbound setObject:stream forKey:@"streamSettings"]; [config setObject:@[outbound] forKey:@"outbounds"];
+    NSString *uri=[logic URIFromHappJSONConfig:config];
+    CHECK("sockopt/json-converter-preserves-settings",[uri length] && [[logic queryValueForURLString:uri key:@"sockopt"] length]);
+    if (uri) {
+        vless_config_t parsedConfig=parsed(uri);
+        CHECK("sockopt/app-core-parity",parsedConfig.sockopt.present==7 && parsedConfig.sockopt.user_timeout==1234 && parsedConfig.sockopt.keepalive_idle==17 && parsedConfig.sockopt.keepalive_interval==9);
+        for (NSNumber *enabled in @[@(NO),@(YES)]) CHECK("sockopt/xmux-preserves-tcp-uri",[[logic runtimeURI:uri useXmux:[enabled boolValue] error:NULL] isEqual:uri]);
+    }
+    NSMutableArray *profiles=[NSMutableArray array];
+    for (NSUInteger i=0;i<8;i++) {
+        NSMutableDictionary *item=[[config mutableCopy] autorelease]; [item setObject:[NSString stringWithFormat:@"Fixture %lu",(unsigned long)i] forKey:@"remarks"]; [profiles addObject:item];
+        [profiles addObject:@{@"outbounds":@[@{@"protocol":@"hysteria"}]}];
+    }
+    NSDictionary *report=[logic subscriptionImportReportFromData:[NSJSONSerialization dataWithJSONObject:profiles options:0 error:NULL]];
+    CHECK("sockopt/sixteen-profile-subscription",[[report objectForKey:@"uris"] count]==8 && [[report objectForKey:@"skipped"] unsignedIntegerValue]==8);
+    CHECK("sockopt/unsupported-protocol-reason",[[report objectForKey:@"issues"] containsObject:@"Unsupported proxy protocol: hysteria"]);
+    CHECK("sockopt/import-report-without-socket-notices",![report objectForKey:@"warnings"]);
+    for (NSString *timeout in @[@"1234",@"2147483647"]) {
+        NSString *link=[NSString stringWithFormat:@"vless://11111111-2222-4333-8444-555555555555@127.0.0.1:443?sockopt=%%7B%%22tcpUserTimeout%%22%%3A%@%%7D",timeout];
+        NSDictionary *entry=[logic metadataForURI:link];
+        CHECK("sockopt/timeout-valid-without-warning",![entry objectForKey:@"reason"] && ![[entry objectForKey:@"warnings"] count]);
+    }
+    NSString *raw=[NSString stringWithFormat:@"{\"outbounds\":[{\"protocol\":\"vless\",\"settings\":{\"vnext\":[{\"address\":\"example.test\",\"port\":443,\"users\":[{\"id\":\"11111111-2222-4333-8444-555555555555\"}]}]},\"streamSettings\":{\"sockopt\":%@}}]}",@"{\"tcpUserTimeout\":1,\"tcpUserTimeout\":2}"];
+    for (NSString *bad in @[raw,[raw stringByReplacingOccurrencesOfString:@"1,\"tcpUserTimeout\":2" withString:@"1.0"],[raw stringByReplacingOccurrencesOfString:@"{\"tcpUserTimeout\":1,\"tcpUserTimeout\":2}" withString:@"{},\"sockopt\":{\"tcpUserTimeout\":2}"]]) {
+        report=[logic subscriptionImportReportFromData:[bad dataUsingEncoding:NSUTF8StringEncoding]];
+        CHECK("sockopt/invalid-raw-json-not-normalized",![[report objectForKey:@"uris"] count]);
+        NSString *mixed=[NSString stringWithFormat:@"[%@,%@]",bad,[[[NSString alloc] initWithData:[NSJSONSerialization dataWithJSONObject:original options:0 error:NULL] encoding:NSUTF8StringEncoding] autorelease]];
+        report=[logic subscriptionImportReportFromData:[mixed dataUsingEncoding:NSUTF8StringEncoding]];
+        CHECK("sockopt/invalid-json-keeps-neighbor",[[report objectForKey:@"uris"] count]==1 && [[report objectForKey:@"skipped"] unsignedIntegerValue]==1);
+    }
+    for (NSDictionary *bad in @[@{@"sockopt":@{@"mark":@1}},@{@"tcpSettings":@{@"header":@{@"type":@"http"}}},@{@"tcpSettings":@{},@"rawSettings":@{@"header":@{@"type":@"http"}}}]) {
+        NSMutableDictionary *variant=[[original mutableCopy] autorelease],*out=[[outbound mutableCopy] autorelease];
+        [out setObject:bad forKey:@"streamSettings"]; [variant setObject:@[out] forKey:@"outbounds"];
+        report=[logic subscriptionImportReportFromData:[NSJSONSerialization dataWithJSONObject:variant options:0 error:NULL]];
+        CHECK("sockopt/unsupported-settings-have-reason",![[report objectForKey:@"uris"] count] && [[report objectForKey:@"issues"] count]);
+    }
+    uint32_t seed=13371337;
+    NSData *originalData=[raw dataUsingEncoding:NSUTF8StringEncoding];
+    for (NSUInteger i=0;i<512;i++) {
+        NSAutoreleasePool *pool=[[NSAutoreleasePool alloc] init];
+        NSMutableData *mutated=[[originalData mutableCopy] autorelease];
+        unsigned char *bytes=[mutated mutableBytes];
+        for (unsigned j=0;j<3;j++) { seed=seed*1664525U+1013904223U; NSUInteger offset=seed%[mutated length]; seed=seed*1664525U+1013904223U; bytes[offset]=(unsigned char)(seed>>24); }
+        NSDictionary *result=[logic subscriptionImportReportFromData:mutated];
+        CHECK("sockopt/bounded-json-mutations",[[result objectForKey:@"uris"] count]<=1 && [[result objectForKey:@"issues"] count]<=16);
+        [pool drain];
+    }
 }
 
 static void converterParity(void) {
@@ -411,6 +468,7 @@ int main(int argc, char **argv) {
     }
     parserDependencies();
     extendedProfiles();
+    socketProfiles();
     converterParity();
     trojanProfiles();
     vmessProfiles();

@@ -4,11 +4,17 @@
 #import "subscription_task.h"
 #import "../integrations/incy/incy_links.h"
 #include "../../vless-core-cli/include/json.h"
+#include "../../vless-core-cli/include/sockopt.h"
 #include <arpa/inet.h>
 #include <errno.h>
 #include <ctype.h>
 #include <limits.h>
 #include <CoreFoundation/CoreFoundation.h>
+
+@interface VCProfileLogic (VCSocketImport)
+- (NSString *)URIFromHappJSONConfig:(NSDictionary *)config metadata:(NSDictionary **)metadata reason:(NSString **)reason;
+- (BOOL)appendTransportSettings:(NSDictionary *)stream query:(NSMutableArray *)query reason:(NSString **)reason;
+@end
 
 static id VCProfileAlias(NSDictionary *object, NSArray *names, BOOL *valid) {
     id result = nil;
@@ -152,6 +158,111 @@ static NSString *VCProfileForbidden(NSDictionary *source, NSArray *fields, NSStr
     return nil;
 }
 
+static NSString *VCProfileSocketSettings(id value) {
+    if (!value) return nil;
+    NSString *text=[value isKindOfClass:[NSString class]] ? value : nil;
+    if ([value isKindOfClass:[NSDictionary class]]) {
+        NSData *data=[NSJSONSerialization dataWithJSONObject:value options:0 error:NULL];
+        text=[[[NSString alloc] initWithData:data encoding:NSUTF8StringEncoding] autorelease];
+    }
+    core_sockopt_t options; char error[192]={0};
+    if (!text || core_sockopt_json([text UTF8String],&options,error,sizeof(error))) return error[0] ? [NSString stringWithUTF8String:error] : @"Invalid sockopt object";
+    return nil;
+}
+
+static NSString *VCProfileTCPSettingsReason(NSDictionary *stream) {
+    if (stream && ![stream isKindOfClass:[NSDictionary class]]) return @"Invalid streamSettings";
+    NSString *failure=nil;
+    for (NSString *key in @[@"tcpSettings",@"rawSettings"]) {
+        id settings=[stream objectForKey:key];
+        if (!settings) continue;
+        if (![settings isKindOfClass:[NSDictionary class]]) return [@"Invalid " stringByAppendingString:key];
+        for (id field in settings) if (![field isEqual:@"header"]) failure=[@"Unsupported settings in " stringByAppendingString:key];
+        id header=[settings objectForKey:@"header"];
+        if (header && (![header isKindOfClass:[NSDictionary class]] || [header count]!=1 || ![[header objectForKey:@"type"] isEqual:@"none"])) failure=[NSString stringWithFormat:@"Unsupported %@.header",key];
+    }
+    id tcp=[stream objectForKey:@"tcpSettings"],raw=[stream objectForKey:@"rawSettings"];
+    if (failure && tcp && raw && ![tcp isEqual:raw]) return @"Conflicting tcpSettings/rawSettings";
+    return failure;
+}
+
+static NSString *VCProfileSocketDocumentReason(NSData *data, NSMutableDictionary *failures) {
+    const unsigned char *bytes=[data bytes]; NSUInteger size=[data length];
+    struct { unsigned kind,seen; core_sockopt_t options; } stack[64]={0};
+    unsigned depth=0,pending=0; NSUInteger index=0;
+    for (NSUInteger i=0;i<size;i++) {
+        unsigned char c=bytes[i];
+        if (c=='{' || c=='[') {
+            if (depth==64) return @"JSON nesting exceeds the import limit";
+            stack[depth].kind=c=='{' ? pending : (!depth || pending==3 ? 3 : 0); stack[depth].seen=0; depth++; pending=0; continue;
+        }
+        if (c=='}' || c==']') { if (!depth) return @"Invalid JSON profile"; depth--; pending=0; continue; }
+        if (c==',' && depth && stack[depth-1].kind==3) index++;
+        if (c!='"') continue;
+        NSUInteger start=i; BOOL escape=NO,escaped=NO;
+        while (++i<size) {
+            if (escape) { escape=NO; continue; }
+            if (bytes[i]=='\\') { escape=YES; escaped=YES; continue; }
+            if (bytes[i]=='"') break;
+        }
+        if (i==size) return @"Invalid JSON profile";
+        NSUInteger after=i+1; while (after<size && strchr(" \t\r\n",bytes[after])) after++;
+        if (after==size || bytes[after]!=':') continue;
+        pending=0;
+        NSString *key=nil;
+        if (i-start<=130) {
+            if (escaped) {
+                NSMutableData *member=[NSMutableData dataWithBytes:"{" length:1];
+                [member appendBytes:bytes+start length:i-start+1]; [member appendBytes:":0}" length:3];
+                NSDictionary *object=[NSJSONSerialization JSONObjectWithData:member options:0 error:NULL];
+                key=[[object allKeys] lastObject];
+            } else if ((i-start==15 && !memcmp(bytes+start+1,"streamSettings",14)) ||
+                       (i-start==17 && !memcmp(bytes+start+1,"downloadSettings",16)) ||
+                       (i-start==8 && !memcmp(bytes+start+1,"sockopt",7)) ||
+                       (i-start==12 && !memcmp(bytes+start+1,"tcpSettings",11)) ||
+                       (i-start==12 && !memcmp(bytes+start+1,"rawSettings",11)) ||
+                       (i-start==8 && !memcmp(bytes+start+1,"configs",7)))
+                key=[[[NSString alloc] initWithBytes:bytes+start+1 length:i-start-1 encoding:NSUTF8StringEncoding] autorelease];
+        }
+        if ([key isEqual:@"streamSettings"]) pending=1;
+        else if ([key isEqual:@"downloadSettings"]) pending=2;
+        else if (depth==1 && [key isEqual:@"configs"]) pending=3;
+        if (!depth || (stack[depth-1].kind!=1 && stack[depth-1].kind!=2)) continue;
+        BOOL socket=[key isEqual:@"sockopt"],tcp=[key isEqual:@"tcpSettings"] || [key isEqual:@"rawSettings"];
+        if (!socket && !tcp) continue;
+        NSUInteger begin=after+1; while (begin<size && strchr(" \t\r\n",bytes[begin])) begin++;
+        if (begin==size || bytes[begin]!='{') {
+            [failures setObject:socket ? @"Invalid sockopt object" : @"Invalid TCP settings object" forKey:@(index)]; continue;
+        }
+        unsigned nested=0; BOOL quoted=NO; escape=NO;
+        NSUInteger end=begin;
+        for (;end<size && end-begin<=kVCMaximumConfigURIBytes;end++) {
+            unsigned char value=bytes[end];
+            if (quoted) { if (escape) escape=NO; else if (value=='\\') escape=YES; else if (value=='"') quoted=NO; continue; }
+            if (value=='"') { quoted=YES; continue; }
+            if (value=='{' || value=='[') nested++;
+            if ((value=='}' || value==']') && !--nested) { end++; break; }
+        }
+        if (nested || end>size || end-begin>kVCMaximumConfigURIBytes) { [failures setObject:@"Socket settings exceed the import limit" forKey:@(index)]; continue; }
+        NSString *text=[[[NSString alloc] initWithBytes:bytes+begin length:end-begin encoding:NSUTF8StringEncoding] autorelease];
+        core_json_t *root=core_json_parse([text UTF8String],NULL,0);
+        if (!root) { [failures setObject:@"Invalid or conflicting socket settings JSON" forKey:@(index)]; i=end-1; continue; }
+        NSString *reason=nil;
+        if (socket) {
+            core_sockopt_t options; char error[192]={0};
+            if (core_sockopt_parse(root,&options,error,sizeof(error))) reason=[NSString stringWithUTF8String:error];
+            else if (stack[depth-1].seen && memcmp(&stack[depth-1].options,&options,sizeof(options))) reason=@"Conflicting sockopt objects";
+            else { stack[depth-1].options=options; stack[depth-1].seen=1; }
+        } else {
+            id value=[NSJSONSerialization JSONObjectWithData:[text dataUsingEncoding:NSUTF8StringEncoding] options:0 error:NULL];
+            reason=VCProfileTCPSettingsReason(value ? @{key:value} : nil);
+        }
+        core_json_free(root); if (reason) [failures setObject:reason forKey:@(index)];
+        i=end-1; pending=0;
+    }
+    return nil;
+}
+
 static BOOL VCProfilePort(NSString *text, uint16_t *output) {
     if (![text length]) return NO;
     unsigned value=0;
@@ -271,6 +382,13 @@ static NSDictionary *VCProfileJSONObject(NSData *data) {
                     unsigned number;
                     BOOL valid=node && (node->type == CORE_JSON_NUMBER || node->type == CORE_JSON_STRING) &&
                         VCProfileUnsignedScalar([NSString stringWithUTF8String:node->text],UINT32_MAX,&number);
+                    core_json_free(root); if (!valid) return nil;
+                }
+                if ([[key lowercaseString] isEqual:@"sockopt"]) {
+                    NSString *text=[[[NSString alloc] initWithData:entry encoding:NSUTF8StringEncoding] autorelease];
+                    core_json_t *root=core_json_parse([text UTF8String],NULL,0);
+                    core_sockopt_t options;
+                    BOOL valid=root && !core_sockopt_parse(core_json_get(root,[key UTF8String]),&options,NULL,0);
                     core_json_free(root); if (!valid) return nil;
                 }
                 if (previous && ![previous isEqual:value]) return nil;
@@ -648,7 +766,7 @@ failure:
         NSString *key=[self canonicalConfigQueryKey:equals.location == NSNotFound ? pair : [pair substringToIndex:equals.location]];
         NSString *raw=equals.location == NSNotFound ? @"" : [pair substringFromIndex:equals.location+1];
         if (strict && ![key length]) error=error ?: @"invalid query parameter name";
-        if (strict && [seen containsObject:key ?: @""]) error=error ?: @"duplicate query parameter";
+        if ((strict || [key isEqual:@"sockopt"]) && [seen containsObject:key ?: @""]) error=error ?: @"duplicate query parameter";
         NSString *value=[self strictDecodedConfigQueryComponent:raw];
         if (strict && [scheme isEqual:@"trojan"] && [key isEqual:@"security"] && ![raw length]) error=error ?: @"invalid Trojan security";
         if (strict && !value) error=error ?: @"invalid query parameter encoding";
@@ -803,6 +921,27 @@ failure:
         NSString *title=[uri substringFromIndex:fragment.location+1];
         title=[self safeTrim:[title stringByReplacingPercentEscapesUsingEncoding:NSUTF8StringEncoding]];
         if ([title length]) [result setObject:title forKey:@"title"];
+    }
+    if (!reason) {
+        reason=VCProfileSocketSettings([(vmess ?: fields) objectForKey:@"sockopt"]);
+        if (!reason && [transport isEqual:@"xhttp"]) {
+            for (NSString *key in @[@"extra",@"downloadsettings"]) {
+                id value=[(vmess ?: fields) objectForKey:key];
+                if (!value) continue;
+                NSString *text=[value isKindOfClass:[NSString class]] ? value : nil;
+                if ([value isKindOfClass:[NSDictionary class]]) text=[[[NSString alloc] initWithData:[NSJSONSerialization dataWithJSONObject:value options:0 error:NULL] encoding:NSUTF8StringEncoding] autorelease];
+                core_json_t *root=text ? core_json_parse([text UTF8String],NULL,0) : NULL;
+                const core_json_t *download=[key isEqual:@"extra"] ? core_json_get(root,"downloadSettings") : root;
+                const core_json_t *socket=download ? core_json_get(download,"sockopt") : NULL;
+                if (!root) reason=@"Invalid download socket settings JSON";
+                else if (socket) {
+                    NSString *source=[[[NSString alloc] initWithBytes:socket->source length:socket->source_length encoding:NSUTF8StringEncoding] autorelease];
+                    reason=VCProfileSocketSettings(source);
+                }
+                core_json_free(root);
+                if (reason) break;
+            }
+        }
     }
     if (reason) [result setObject:reason forKey:@"reason"];
     return [[result copy] autorelease];
@@ -1139,7 +1278,7 @@ failure:
     NSMutableDictionary *updated=[NSMutableDictionary dictionaryWithDictionary:source];
     if (![[source objectForKey:@"url"] isEqual:storedLink]) {
         [updated setObject:@[] forKey:@"items"];
-        for (NSString *key in @[kSubscriptionMetadataKey,kSubscriptionUserInfoKey,kSubscriptionAllowInsecureFetchKey,kSubscriptionAllowPlainHTTPKey,kSubscriptionHappSourceKey,@"import_skipped",@"import_issues"])
+        for (NSString *key in @[kSubscriptionMetadataKey,kSubscriptionUserInfoKey,kSubscriptionAllowInsecureFetchKey,kSubscriptionAllowPlainHTTPKey,kSubscriptionHappSourceKey,@"import_skipped",@"import_issues",@"import_warnings"])
             [updated removeObjectForKey:key];
     }
     [updated setObject:storedLink forKey:@"url"];
@@ -1185,14 +1324,17 @@ failure:
             if (SubscriptionDataLooksLikeHTML(data)) {
                 *errorTextOut = @"Server returned a web page, not subscription data";
             } else {
-                *errorTextOut = @"Subscription has no valid config entries";
+                NSArray *issues=[importReport objectForKey:@"issues"];
+                NSMutableArray *unique=[NSMutableArray array];
+                for (NSString *issue in issues) if ([unique count]<3 && ![unique containsObject:issue]) [unique addObject:issue];
+                *errorTextOut = [unique count] ? [NSString stringWithFormat:@"Subscription has no valid config entries. Reasons:\n%@",[unique componentsJoinedByString:@"\n"]] : @"Subscription has no valid config entries";
             }
         }
         return nil;
     }
 
     NSMutableDictionary *updated = [NSMutableDictionary dictionaryWithDictionary:sub];
-    [updated removeObjectForKey:@"import_skipped"]; [updated removeObjectForKey:@"import_issues"];
+    [updated removeObjectForKey:@"import_skipped"]; [updated removeObjectForKey:@"import_issues"]; [updated removeObjectForKey:@"import_warnings"];
     if ([[importReport objectForKey:@"skipped"] unsignedIntegerValue]) {
         [updated setObject:[importReport objectForKey:@"skipped"] forKey:@"import_skipped"];
         [updated setObject:[importReport objectForKey:@"issues"] forKey:@"import_issues"];
@@ -1598,6 +1740,9 @@ failure:
     NSMutableSet *seen=[NSMutableSet set];
     NSUInteger skipped=0;
     id root=data ? [NSJSONSerialization JSONObjectWithData:data options:0 error:NULL] : nil;
+    NSMutableDictionary *socketFailures=[NSMutableDictionary dictionary];
+    NSString *documentReason=root ? VCProfileSocketDocumentReason(data,socketFailures) : @"Invalid JSON profile";
+    if (documentReason) return @{@"uris":@[],@"skipped":@0,@"issues":@[documentReason],@"error":documentReason};
     NSArray *configs=[self happJSONArrayValue:root];
     if (!configs && [root isKindOfClass:[NSDictionary class]]) {
         configs=[self happJSONArrayValue:[root objectForKey:@"configs"]];
@@ -1608,10 +1753,11 @@ failure:
         if (task.isCancelled) return VCSubscriptionCancelledReport(task);
         NSAutoreleasePool *pool=[[NSAutoreleasePool alloc] init];
         NSDictionary *entry=nil;
-        NSString *uri=[self URIFromHappJSONConfig:[self happJSONDictionaryValue:value] metadata:&entry];
+        NSString *reason=[socketFailures objectForKey:@(processed)];
+        NSString *uri=reason ? nil : [self URIFromHappJSONConfig:[self happJSONDictionaryValue:value] metadata:&entry reason:&reason];
         if (![uri length]) {
             skipped++;
-            if ([issues count] < 16) [issues addObject:@"Invalid or unsupported profile settings"];
+            if ([issues count] < 16 && ![issues containsObject:reason]) [issues addObject:reason ?: @"Invalid or unsupported profile settings"];
         } else if (![seen containsObject:uri]) { [seen addObject:uri]; [uris addObject:uri]; [metadata setObject:entry forKey:uri]; }
         else [task recordDuplicate];
         [task processed:++processed total:[configs count]];
@@ -1787,6 +1933,11 @@ failure:
 }
 
 - (NSString *)URIFromHappJSONConfig:(NSDictionary *)config metadata:(NSDictionary **)metadata {
+    return [self URIFromHappJSONConfig:config metadata:metadata reason:NULL];
+}
+
+- (NSString *)URIFromHappJSONConfig:(NSDictionary *)config metadata:(NSDictionary **)metadata reason:(NSString **)reason {
+    if (reason) *reason=@"Invalid or unsupported profile settings";
     if (![config isKindOfClass:[NSDictionary class]]) return nil;
     NSDictionary *proxy=nil;
     for (id value in [self happJSONArrayValue:[config objectForKey:@"outbounds"]]) {
@@ -1796,75 +1947,102 @@ failure:
         if (!proxy) proxy=candidate;
         if ([[[self happJSONStringValue:[candidate objectForKey:@"tag"]] lowercaseString] isEqual:@"proxy"]) { proxy=candidate; break; }
     }
-    if (!proxy) return nil;
+    if (!proxy) {
+        if (reason) for (NSDictionary *outbound in [self happJSONArrayValue:[config objectForKey:@"outbounds"]]) {
+            if (![outbound isKindOfClass:[NSDictionary class]]) continue;
+            if ([@[@"hysteria",@"hysteria2",@"tuic",@"wireguard"] containsObject:[outbound objectForKey:@"protocol"]]) {
+                *reason=[@"Unsupported proxy protocol: " stringByAppendingString:[outbound objectForKey:@"protocol"]]; break;
+            }
+        }
+        return nil;
+    }
+    NSString *transportReason=VCProfileTCPSettingsReason([proxy objectForKey:@"streamSettings"]);
+    if (transportReason) { if (reason) *reason=transportReason; return nil; }
     NSString *protocol=[[proxy objectForKey:@"protocol"] lowercaseString];
+    if (reason) *reason=@"Invalid or unsupported mux";
     NSDictionary *mux=[self happJSONDictionaryValue:[proxy objectForKey:@"mux"]];
     if (([proxy objectForKey:@"mux"] && !mux) || ([mux objectForKey:@"enabled"] && !VCProfileBoolean([mux objectForKey:@"enabled"]))) return nil;
-    if ([[mux objectForKey:@"enabled"] boolValue] || [proxy objectForKey:@"proxySettings"]) return nil;
+    if ([[mux objectForKey:@"enabled"] boolValue]) return nil;
+    if ([proxy objectForKey:@"proxySettings"]) { if (reason) *reason=@"Unsupported proxySettings"; return nil; }
+    if (reason) *reason=@"Invalid or unsupported settings";
     NSDictionary *settings=[self happJSONDictionaryValue:[proxy objectForKey:@"settings"]];
     NSDictionary *server=nil,*user=nil;
     if ([settings objectForKey:@"address"]) {
         server=settings; user=settings;
     } else if ([protocol isEqual:@"vless"] || [protocol isEqual:@"vmess"]) {
+        if (reason) *reason=@"Invalid or unsupported settings.vnext";
         NSArray *servers=[self happJSONArrayValue:[settings objectForKey:@"vnext"]];
         if ([servers count] != 1) return nil;
         server=[self happJSONDictionaryValue:[servers objectAtIndex:0]];
+        if (reason) *reason=@"Invalid or unsupported settings.users";
         NSArray *users=[self happJSONArrayValue:[server objectForKey:@"users"]];
         if ([users count] != 1) return nil;
         user=[self happJSONDictionaryValue:[users objectAtIndex:0]];
     } else {
+        if (reason) *reason=@"Invalid or unsupported settings.servers";
         NSArray *servers=[self happJSONArrayValue:[settings objectForKey:@"servers"]];
         if ([servers count] != 1) return nil;
         server=[self happJSONDictionaryValue:[servers objectAtIndex:0]]; user=server;
     }
     NSString *address=[server objectForKey:@"address"];
     unsigned port=0;
+    if (reason) *reason=@"Invalid settings.address or settings.port";
     if (!VCProfileText(address) || !VCProfileHost(address) || !VCProfileUnsignedScalar([server objectForKey:@"port"],65535,&port) || !port) return nil;
     NSMutableArray *query=[NSMutableArray array];
     id flow=[user objectForKey:@"flow"],encryption=[user objectForKey:@"encryption"];
+    if (reason) *reason=@"Invalid or unsupported flow or encryption";
     if ((flow && !VCProfileText(flow)) || (encryption && !VCProfileText(encryption))) return nil;
     NSString *credential=nil;
     if ([protocol isEqual:@"trojan"] || [protocol isEqual:@"shadowsocks"]) {
+        if (reason) *reason=@"Invalid settings.password, flow or encryption";
         id password=[user objectForKey:@"password"];
         if (![password isKindOfClass:[NSString class]] || ![password length] || [flow length] || ([encryption length] && ![encryption isEqual:@"none"])) return nil;
         credential=[self percentEncodedHappURIValue:password];
         if ([protocol isEqual:@"shadowsocks"]) {
+            if (reason) *reason=@"Invalid or unsupported settings.method";
             NSString *method=VCProfileSSMethod([user objectForKey:@"method"]);
             if (!method) return nil;
+            if (reason) *reason=@"Unsupported settings.plugin";
             for (NSDictionary *object in @[user,settings]) {
                 id plugin=[object objectForKey:@"plugin"];
                 if (plugin && (![plugin isKindOfClass:[NSString class]] || [plugin length])) return nil;
             }
-            if (VCProfileForbidden(user,@[@"uot",@"udp_over_tcp",@"udpOverTcp",@"packetEncoding"],@"settings.")) return nil;
+            NSString *forbidden=VCProfileForbidden(user,@[@"uot",@"udp_over_tcp",@"udpOverTcp",@"packetEncoding"],@"settings.");
+            if (forbidden) { if (reason) *reason=[@"Unsupported " stringByAppendingString:forbidden]; return nil; }
             credential=[NSString stringWithFormat:@"%@:%@",method,credential];
         }
     } else {
+        if (reason) *reason=@"Invalid settings.id";
         id identifier=[user objectForKey:@"id"];
         if (!VCProfileText(identifier) || ![identifier length]) return nil;
         credential=[self percentEncodedHappURIValue:identifier];
         if ([protocol isEqual:@"vmess"]) {
+            if (reason) *reason=@"Invalid or unsupported VMess security or flow";
             BOOL valid=YES; id cipher=VCProfileAlias(user,@[@"security",@"encryption",@"scy"],&valid);
             if (!valid || (cipher && !VCProfileVMessCipher(cipher)) || [flow length]) return nil;
             for (NSString *key in @[@"alterId",@"aid"]) {
                 id value=[user objectForKey:key]; unsigned number;
-                if (value && !VCProfileUnsignedScalar(value,0,&number)) return nil;
+                if (value && !VCProfileUnsignedScalar(value,0,&number)) { if (reason) *reason=[@"Unsupported " stringByAppendingString:key]; return nil; }
             }
-            if (VCProfileForbidden(user,@[@"experiments",@"authenticatedLength",@"noTerminationSignal",@"globalPadding",@"chunkStream",@"chunkMasking"],@"user.")) return nil;
+            NSString *forbidden=VCProfileForbidden(user,@[@"experiments",@"authenticatedLength",@"noTerminationSignal",@"globalPadding",@"chunkStream",@"chunkMasking"],@"user.");
+            if (forbidden) { if (reason) *reason=[@"Unsupported " stringByAppendingString:forbidden]; return nil; }
             [self addHappURIQueryValue:cipher ?: @"auto" key:@"encryption" toParts:query];
         } else {
+            if (reason) *reason=@"Unsupported flow";
             [self addHappURIQueryValue:[encryption length] ? encryption : @"none" key:@"encryption" toParts:query];
             if ([flow length] && ![flow isEqual:@"xtls-rprx-vision"]) return nil;
             [self addHappURIQueryValue:flow key:@"flow" toParts:query];
         }
     }
-    if (![self appendTransportSettings:[proxy objectForKey:@"streamSettings"] query:query]) return nil;
+    if (![self appendTransportSettings:[proxy objectForKey:@"streamSettings"] query:query reason:reason]) return nil;
     NSString *host=[address rangeOfString:@":"].location == NSNotFound ? address : [NSString stringWithFormat:@"[%@]",address];
     id title=[config objectForKey:@"remarks"];
+    if (reason) *reason=@"Invalid remarks";
     if (title && !VCProfileText(title)) return nil;
     NSString *fragment=[title length] ? [@"#" stringByAppendingString:[self percentEncodedHappURIValue:title]] : @"";
     NSString *uri=[NSString stringWithFormat:@"%@://%@@%@:%u?%@%@",[protocol isEqual:@"shadowsocks"] ? @"ss" : protocol,credential,host,port,[query componentsJoinedByString:@"&"],fragment];
     NSDictionary *entry=[self metadataForURI:uri];
-    if ([entry objectForKey:@"reason"]) return nil;
+    if ([entry objectForKey:@"reason"]) { if (reason) *reason=[entry objectForKey:@"reason"]; return nil; }
     if (metadata) *metadata=entry;
     [VCCurrentSubscriptionTask() profileMetadataPrepared:@{uri:entry}];
     return uri;
@@ -1875,11 +2053,21 @@ failure:
 }
 
 - (BOOL)appendTransportSettings:(NSDictionary *)stream query:(NSMutableArray *)query {
+    return [self appendTransportSettings:stream query:query reason:NULL];
+}
+
+- (BOOL)appendTransportSettings:(NSDictionary *)stream query:(NSMutableArray *)query reason:(NSString **)reason {
+    if (reason) *reason=@"Invalid or unsupported streamSettings";
     if (stream && ![stream isKindOfClass:[NSDictionary class]]) return NO;
     for (NSString *field in @[@"network",@"security"]) if ([stream objectForKey:field] && !VCProfileText([stream objectForKey:field])) return NO;
-    for (NSString *field in @[@"sockopt",@"tcpSettings",@"rawSettings"]) {
-        id value=[stream objectForKey:field];
-        if (value && (![value isKindOfClass:[NSDictionary class]] || [value count])) return NO;
+    if (VCProfileTCPSettingsReason(stream)) return NO;
+    id sockopt=[stream objectForKey:@"sockopt"];
+    if (sockopt) {
+        if (reason) *reason=@"Invalid sockopt object";
+        if (![sockopt isKindOfClass:[NSDictionary class]]) return NO;
+        NSData *data=[NSJSONSerialization dataWithJSONObject:sockopt options:0 error:NULL];
+        if (!data) return NO;
+        [self addHappURIQueryValue:[[[NSString alloc] initWithData:data encoding:NSUTF8StringEncoding] autorelease] key:@"sockopt" toParts:query];
     }
     NSString *network = [[self safeTrim:[self happJSONStringValue:[stream objectForKey:@"network"]]] lowercaseString];
     NSString *security = [[self safeTrim:[self happJSONStringValue:[stream objectForKey:@"security"]]] lowercaseString];
@@ -1896,6 +2084,7 @@ failure:
     BOOL grpcSupported = [network isEqualToString:@"grpc"] &&
                          ([security isEqualToString:@"none"] || [security isEqualToString:@"tls"] || [security isEqualToString:@"reality"]);
     BOOL upgradeSupported = [network isEqual:@"httpupgrade"] && ([security isEqual:@"none"] || [security isEqual:@"tls"]);
+    if (reason) *reason=@"Invalid or unsupported streamSettings.network or streamSettings.security";
     if (!tcpSupported && !xhttpSupported && !wsSupported && !grpcSupported && !upgradeSupported) return NO;
 
     [self addHappURIQueryValue:network key:@"type" toParts:query];
@@ -1907,8 +2096,10 @@ failure:
         securitySettings = [self happJSONDictionaryValue:[stream objectForKey:@"tlsSettings"]];
     }
     NSString *securityField = [security isEqualToString:@"tls"] ? @"tlsSettings" : [security isEqualToString:@"reality"] ? @"realitySettings" : nil;
+    if (reason && securityField) *reason=[@"Invalid or unsupported " stringByAppendingString:securityField];
     if (securityField && [stream objectForKey:securityField] && !securitySettings) return NO;
-    if (VCProfileForbidden(securitySettings,@[@"certificates",@"pinnedPeerCertificateChainSha256",@"pinnedPeerCertificatePublicKeySha256",@"verifyPeerCertInNames",@"disableSystemRoot",@"minVersion",@"maxVersion",@"cipherSuites",@"echConfigList",@"echForceQuery"],@"security.")) return NO;
+    NSString *forbidden=VCProfileForbidden(securitySettings,@[@"certificates",@"pinnedPeerCertificateChainSha256",@"pinnedPeerCertificatePublicKeySha256",@"verifyPeerCertInNames",@"disableSystemRoot",@"minVersion",@"maxVersion",@"cipherSuites",@"echConfigList",@"echForceQuery"],@"security.");
+    if (forbidden) { if (reason) *reason=[@"Unsupported " stringByAppendingString:forbidden]; return NO; }
     VCProfileUnknown(securitySettings,@[@"serverName",@"fingerprint",@"alpn",@"allowInsecure",@"publicKey",@"password",@"shortId",@"spiderX"],securityField ? [securityField stringByAppendingString:@"."] : @"security.");
 
     NSString *sni = [self safeTrim:[self happJSONStringValue:[securitySettings objectForKey:@"serverName"]]];
@@ -1949,6 +2140,7 @@ failure:
     }
 
     if (xhttpSupported) {
+        if (reason) *reason=@"Invalid or unsupported xhttpSettings/splithttpSettings";
         BOOL valid = YES;
         id raw = VCProfileAlias(stream, @[@"xhttpSettings", @"splithttpSettings"], &valid);
         if (!valid || (raw && ![raw isKindOfClass:[NSDictionary class]])) return NO;
@@ -1980,6 +2172,7 @@ failure:
         [self addHappURIQueryValue:mode key:@"mode" toParts:query];
         [self addHappURIQueryValue:[self happJSONStringFromDictionary:extra] key:@"extra" toParts:query];
     } else if (upgradeSupported) {
+        if (reason) *reason=@"Invalid or unsupported httpupgradeSettings";
         id raw=[stream objectForKey:@"httpupgradeSettings"];
         if (raw && ![raw isKindOfClass:[NSDictionary class]]) return NO;
         NSDictionary *upgrade=raw;
@@ -2000,6 +2193,7 @@ failure:
         if (early) [self addHappURIQueryValue:[NSString stringWithFormat:@"%u",number] key:@"ed" toParts:query];
         VCProfileUnknown(upgrade,@[@"host",@"path",@"headers",@"ed",@"maxEarlyData"],@"httpupgradeSettings.");
     } else if (wsSupported) {
+        if (reason) *reason=@"Invalid or unsupported wsSettings";
         id rawWS = [stream objectForKey:@"wsSettings"];
         if (rawWS && ![rawWS isKindOfClass:[NSDictionary class]]) return NO;
         NSDictionary *ws = rawWS;
@@ -2030,6 +2224,7 @@ failure:
         if (heartbeat) [self addHappURIQueryValue:[NSString stringWithFormat:@"%u", number] key:@"heartbeatPeriod" toParts:query];
         VCProfileUnknown(ws, @[@"host", @"path", @"headers", @"ed", @"maxEarlyData", @"heartbeatPeriod"], @"wsSettings.");
     } else if (grpcSupported) {
+        if (reason) *reason=@"Invalid or unsupported grpcSettings";
         id rawGRPC = [stream objectForKey:@"grpcSettings"];
         if (rawGRPC && ![rawGRPC isKindOfClass:[NSDictionary class]]) return NO;
         NSDictionary *grpc = rawGRPC;

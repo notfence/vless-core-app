@@ -17,6 +17,7 @@ APP_SOURCES := test_app_logic.m ../common/foundation_logic.m ../common/profile_l
 APP_OBJECTS := $(addprefix $(HOST_BUILD_DIR)/,$(patsubst ../%,%,$(APP_SOURCES:.m=.o)))
 APP_OBJECTS := $(APP_OBJECTS:.c=.o)
 APP_OBJECTS += $(HOST_BUILD_DIR)/core-parser/json.o
+APP_OBJECTS += $(HOST_BUILD_DIR)/core-parser/sockopt.o
 HOST_TESTS := $(HOST_BUILD_DIR)/test_app_logic $(HOST_BUILD_DIR)/test_legacy_loopback_host $(HOST_BUILD_DIR)/test_legacy_dns_host
 HOST_TESTS += $(HOST_BUILD_DIR)/test_main_geometry $(HOST_BUILD_DIR)/test_daemon_policy
 HOST_TESTS += $(HOST_BUILD_DIR)/test_control_auth $(HOST_BUILD_DIR)/test_socket_peer

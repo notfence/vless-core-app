@@ -281,6 +281,9 @@ def main():
     if 'updatedSubscriptionDictionaryFromSource:' in refresh or 'startBackgroundSubscriptionRefresh]' not in refresh:
         raise AssertionError('app/single-refresh-must-be-background')
     work = (ROOT / 'app/subscription_work.m').read_text()
+    text_worker = work.split('- (void)startTextImport:', 1)[1].split('- (void)startBackgroundSubscription', 1)[0]
+    if '[self showProfileImportWarnings:@[warnings]]' not in text_worker or '@"warnings"' in text_worker:
+        raise AssertionError('app/background-text-import-must-report-skips-without-socket-notices')
     if 'incy' in (ROOT / 'app/Info.plist').read_text().lower():
         raise AssertionError('app/incy-must-not-register-a-third-party-url-scheme')
     if 'textImportReportFromText:decoded' not in work or 'VCIncyIsCryptLink(uri)' not in work:

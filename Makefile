@@ -64,6 +64,7 @@ APP_SRC += app/settings_icons.m
 APP_SRC += common/qr_photo.c app/qr_photo_source.m
 APP_HEADERS := $(wildcard app/*.h) integrations/happ/happ_crypto.h integrations/karing/karing_backup.h integrations/incy/incy_links.h daemon/vpnctld_protocol.h $(COMMON_APP_HEADERS)
 APP_HEADERS += ../vless-core-cli/include/json.h
+APP_HEADERS += ../vless-core-cli/include/sockopt.h
 APP_OBJ := \
 	$(patsubst %.m,$(BUILD_DIR)/app/%.o,$(filter %.m,$(APP_SRC))) \
 	$(patsubst %.c,$(BUILD_DIR)/app/%.o,$(filter %.c,$(APP_SRC)))
@@ -72,6 +73,8 @@ APP_ARM64_OBJ := \
 	$(patsubst %.c,$(BUILD_DIR)/arm64/app/%.o,$(filter-out common/qr_photo.c,$(filter %.c,$(APP_SRC))))
 APP_OBJ += $(BUILD_DIR)/app/core-json.o
 APP_ARM64_OBJ += $(BUILD_DIR)/arm64/app/core-json.o
+APP_OBJ += $(BUILD_DIR)/app/core-sockopt.o
+APP_ARM64_OBJ += $(BUILD_DIR)/arm64/app/core-sockopt.o
 DAEMON_SRC := daemon/vpnctld.c daemon/core_config.c common/daemon_policy.c common/control_auth.c common/helper_monitor.c common/dns_relay.c daemon/socket_peer_pid.c daemon/legacy_loopback.c daemon/legacy_dns.c daemon/vpnicon_statusbar.c daemon/system_proxy.c
 DAEMON_HEADERS := daemon/vpnctld_protocol.h daemon/core_config.h daemon/socket_peer_pid.h daemon/legacy_loopback.h daemon/legacy_dns.h daemon/system_proxy.h common/daemon_policy.h common/control_auth.h common/helper_monitor.h common/dns_relay.h
 BOOTSTRAP_SRC := daemon/vpnctld_bootstrap.c
@@ -196,6 +199,14 @@ check-package-inputs:
 $(BUILD_DIR)/app/core-json.o: ../vless-core-cli/src/json.c ../vless-core-cli/include/json.h | preflight
 	mkdir -p $(dir $@)
 	PATH="$(IOS_BIN):$$PATH" $(IOS_RUNTIME_ENV) $(IOS_CC) $(APP_CFLAGS) -I../vless-core-cli/include -c $< -o $@
+
+$(BUILD_DIR)/app/core-sockopt.o: ../vless-core-cli/src/sockopt.c ../vless-core-cli/include/sockopt.h ../vless-core-cli/include/json.h | preflight
+	mkdir -p $(dir $@)
+	PATH="$(IOS_BIN):$$PATH" $(IOS_RUNTIME_ENV) $(IOS_CC) $(APP_CFLAGS) -I../vless-core-cli/include -c $< -o $@
+
+$(BUILD_DIR)/arm64/app/core-sockopt.o: ../vless-core-cli/src/sockopt.c ../vless-core-cli/include/sockopt.h ../vless-core-cli/include/json.h | preflight
+	mkdir -p $(dir $@)
+	PATH="$(IOS_BIN):$$PATH" $(IOS_RUNTIME_ENV) $(IOS_CC) $(APP_ARM64_CFLAGS) -I../vless-core-cli/include -c $< -o $@
 
 $(BUILD_DIR)/arm64/app/core-json.o: ../vless-core-cli/src/json.c ../vless-core-cli/include/json.h | preflight
 	mkdir -p $(dir $@)
