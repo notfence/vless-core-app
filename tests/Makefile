@@ -58,6 +58,7 @@ HOST_TESTS += $(HOST_BUILD_DIR)/test_main_lifecycle
 HOST_TESTS += $(HOST_BUILD_DIR)/test_main_status
 HOST_TESTS += $(HOST_BUILD_DIR)/test_subscription_fetch
 HOST_TESTS += $(HOST_BUILD_DIR)/test_subscription_edit
+HOST_TESTS += $(HOST_BUILD_DIR)/test_subscription_info
 HOST_TESTS += $(HOST_BUILD_DIR)/test_subscription_menu
 CORE_PARSE_SRC := uri utils xhttp_config xhttp_download xhttp_payload buffer_budget websocket grpc http_headers core_log
 CORE_PARSE_SRC += vmess_uri shadowsocks_uri shadowsocks_crypto blake3 trojan core_random deadline socket_util relay_memory connection_trace resolver
@@ -114,6 +115,7 @@ test: requirements $(HOST_TESTS)
 	$(HOST_BUILD_DIR)/test_main_status
 	$(HOST_BUILD_DIR)/test_subscription_fetch
 	$(HOST_BUILD_DIR)/test_subscription_edit
+	$(HOST_BUILD_DIR)/test_subscription_info
 	$(HOST_BUILD_DIR)/test_subscription_menu
 	$(HOST_BUILD_DIR)/test_proxy_probe
 	$(HOST_BUILD_DIR)/test_core_config
@@ -171,6 +173,16 @@ $(HOST_BUILD_DIR)/test_subscription_fetch: $(HOST_BUILD_DIR)/test_subscription_f
 	$(HOST_CC) $(SANITIZE) $^ -o $@ -L$(ROOT)/../toolchains/ios6/lib -Wl,-rpath,$(ROOT)/../toolchains/ios6/lib -lBlocksRuntime $(HOST_LIBS)
 
 $(HOST_BUILD_DIR)/test_subscription_edit: $(HOST_BUILD_DIR)/test_subscription_edit.o $(filter-out $(HOST_BUILD_DIR)/test_app_logic.o,$(APP_OBJECTS))
+	$(HOST_CC) $(SANITIZE) $^ -o $@ $(HOST_LIBS)
+
+$(HOST_BUILD_DIR)/subscription_info_rows.inc: ../app/subscription_info.m extract_ui_methods.py
+	mkdir -p $(dir $@)
+	python3 extract_ui_methods.py $< $@ '- (NSDictionary *)rowWithTitle:' '- (NSString *)formattedTimestamp:' '- (NSArray *)lastUpdateRows'
+
+$(HOST_BUILD_DIR)/test_subscription_info.o: $(HOST_BUILD_DIR)/subscription_info_rows.inc
+$(HOST_BUILD_DIR)/test_subscription_info.o: HOST_CPPFLAGS += -I$(HOST_BUILD_DIR)
+
+$(HOST_BUILD_DIR)/test_subscription_info: $(HOST_BUILD_DIR)/test_subscription_info.o $(filter-out $(HOST_BUILD_DIR)/test_app_logic.o,$(APP_OBJECTS))
 	$(HOST_CC) $(SANITIZE) $^ -o $@ $(HOST_LIBS)
 
 $(HOST_BUILD_DIR)/subscription_menu_sheet.inc: ../app/subscription_info.m extract_ui_methods.py

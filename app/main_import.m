@@ -245,7 +245,7 @@
     [self commitConfigurations:_configs subscriptions:draft completion:^(BOOL saved) {
     if (!saved) return;
     [self saveData];
-    [self showProfileImportWarnings:@[updated]];
+    if (existingIndex < 0) [self showProfileImportWarnings:@[updated]];
     VCRecordAppEvent(@"subscription",
                      existingIndex >= 0 ? @"Subscription replaced" : @"Subscription added",
                      [NSString stringWithFormat:@"configs=%lu subscriptions=%lu",
@@ -549,6 +549,7 @@
                 [urlsToImport release]; [fallbackSubscriptions release]; return;
             }
             NSMutableArray *draft=[NSMutableArray arrayWithArray:_subscriptions];
+            NSMutableArray *initialImportReports=[NSMutableArray array];
             NSMutableDictionary *indices=[NSMutableDictionary dictionary];
             for (NSUInteger i=0;i<[draft count];i++) {
                 NSString *url=[[draft objectAtIndex:i] objectForKey:@"url"];
@@ -582,6 +583,7 @@
 
                 [indices setObject:@([draft count]) forKey:urlString];
                 [draft addObject:sub];
+                [initialImportReports addObject:sub];
                 addedCount++;
                 lastAddedIndex = [draft count] - 1;
             }
@@ -599,7 +601,7 @@
             }
             if (addedCount > 0 || replacedCount > 0 || savedPlainHTTPApproval) {
                 [self saveData];
-                [self showProfileImportWarnings:importedSubs];
+                [self showProfileImportWarnings:initialImportReports];
             }
             if (addedCount > 0 || replacedCount > 0) {
                 [self selectSubscriptionAtIndex:lastAddedIndex];
@@ -894,7 +896,6 @@
 }
 
 - (void)importKaringSubscriptionEntries:(NSArray *)entries {
-    [self showProfileImportWarnings:entries];
     if (![entries isKindOfClass:[NSArray class]] || [entries count] == 0) {
         VCRecordAppEvent(@"import", @"Karing backup contained no entries", nil);
         [self showStatus:@"The Karing backup has no supported subscriptions" ok:NO];

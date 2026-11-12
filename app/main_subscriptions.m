@@ -381,7 +381,6 @@ static BOOL SubscriptionResponseIsForbidden(NSString *headers) {
         @try {
 
         NSMutableArray *updatedSubs = [[NSMutableArray alloc] initWithArray:snapshot];
-        NSMutableArray *updatedReports = [[NSMutableArray alloc] init];
         NSMutableArray *failureTexts = [[NSMutableArray alloc] init];
         NSMutableDictionary *failureCategories = [[NSMutableDictionary alloc] init];
         NSUInteger okCount = 0;
@@ -399,7 +398,6 @@ static BOOL SubscriptionResponseIsForbidden(NSString *headers) {
             NSDictionary *updated = [self updatedSubscriptionDictionaryFromSource:sub errorText:&errorText];
             if (updated) {
                 [updatedSubs replaceObjectAtIndex:i withObject:updated];
-                [updatedReports addObject:updated];
                 okCount++;
             } else {
                 [failureTexts addObject:[self shortUpdateFailureTextForSubscription:sub errorText:errorText]];
@@ -411,7 +409,7 @@ static BOOL SubscriptionResponseIsForbidden(NSString *headers) {
         dispatch_async(dispatch_get_main_queue(), ^{
             if (task != _subscriptionTask || task.isCancelled) {
                 [self finishSubscriptionTask:task success:NO];
-                [failureTexts release]; [failureCategories release]; [updatedSubs release]; [updatedReports release]; [refreshIndices release]; [snapshot release]; return;
+                [failureTexts release]; [failureCategories release]; [updatedSubs release]; [refreshIndices release]; [snapshot release]; return;
             }
             if (sourceRevision != _configurationRevision || ![self subscriptionsMatchSnapshotForLaunchAutoUpdate:snapshot]) {
                 [self setUpdatingSubscriptionIndex:-1];
@@ -424,7 +422,6 @@ static BOOL SubscriptionResponseIsForbidden(NSString *headers) {
                 [failureTexts release];
                 [failureCategories release];
                 [updatedSubs release];
-                [updatedReports release];
                 [refreshIndices release];
                 [snapshot release];
                 return;
@@ -436,10 +433,9 @@ static BOOL SubscriptionResponseIsForbidden(NSString *headers) {
             [self setSubscriptionRefreshInProgress:NO];
             if (!saved) {
                 [self finishSubscriptionTask:task success:NO];
-                [failureTexts release]; [failureCategories release]; [updatedSubs release]; [updatedReports release]; [refreshIndices release]; [snapshot release];
+                [failureTexts release]; [failureCategories release]; [updatedSubs release]; [refreshIndices release]; [snapshot release];
                 return;
             }
-            [self showProfileImportWarnings:updatedReports];
 
             [self normalizeSelection];
             [self reloadMainTableDataAfterExternalChange];
@@ -467,7 +463,6 @@ static BOOL SubscriptionResponseIsForbidden(NSString *headers) {
             [failureTexts release];
             [failureCategories release];
             [updatedSubs release];
-            [updatedReports release];
             [refreshIndices release];
             [snapshot release];
             }];

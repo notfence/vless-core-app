@@ -280,6 +280,12 @@ def main():
     refresh = subscriptions.split('- (BOOL)refreshSubscriptionAtIndex:', 1)[1].split('\n}', 1)[0]
     if 'updatedSubscriptionDictionaryFromSource:' in refresh or 'startBackgroundSubscriptionRefresh]' not in refresh:
         raise AssertionError('app/single-refresh-must-be-background')
+    refresh_worker = subscriptions.split('- (void)startBackgroundSubscriptionRefreshAllowPlainHTTP:', 1)[1].split('- (void)startLaunchAutoUpdateIfNeeded', 1)[0]
+    if 'showProfileImportWarnings:' in refresh_worker or 'showSubscriptionUpdateFailures:failureTexts' not in refresh_worker:
+        raise AssertionError('app/refresh-must-be-quiet-for-skips-without-hiding-failures')
+    info = (ROOT / 'app/subscription_info.m').read_text().split('@implementation SubscriptionInfoVC', 1)[1]
+    if 'sectionWithTitle:@"Last Update" rows:updateRows' not in info or 'NSArray *updateRows=[self lastUpdateRows];' not in info:
+        raise AssertionError('app/subscription-information-must-show-the-latest-import-report')
     work = (ROOT / 'app/subscription_work.m').read_text()
     text_worker = work.split('- (void)startTextImport:', 1)[1].split('- (void)startBackgroundSubscription', 1)[0]
     if '[self showProfileImportWarnings:@[warnings]]' not in text_worker or '@"warnings"' in text_worker:

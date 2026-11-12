@@ -365,6 +365,34 @@ static CGRect VCSubscriptionInputFrame(CGRect bounds, CGFloat textLeft) {
     return [formatter stringFromDate:date];
 }
 
+- (NSArray *)lastUpdateRows {
+    NSArray *items=[_subscription objectForKey:@"items"];
+    NSUInteger accepted=[items isKindOfClass:[NSArray class]] ? [items count] : 0;
+    id value=[_subscription objectForKey:@"import_skipped"];
+    NSUInteger skipped=[value isKindOfClass:[NSNumber class]] && [value longLongValue]>0 ? [value unsignedIntegerValue] : 0;
+    NSDictionary *metadata=VCSubscriptionMetadataDictionary(_subscription);
+    NSNumber *timestamp=[metadata objectForKey:kSubscriptionLastUpdatedKey];
+    BOOL hasTimestamp=[timestamp isKindOfClass:[NSNumber class]] && [timestamp longLongValue]>0;
+    if (!hasTimestamp && !accepted && !skipped) return @[];
+    NSMutableArray *rows=[NSMutableArray array];
+    if (hasTimestamp) {
+        NSString *date=[self formattedTimestamp:[timestamp unsignedLongLongValue] includeTime:YES];
+        if ([date length]) [rows addObject:[self rowWithTitle:@"Updated" detail:date]];
+    }
+    [rows addObject:[self rowWithTitle:@"Accepted configurations" detail:[NSString stringWithFormat:@"%lu",(unsigned long)accepted]]];
+    [rows addObject:[self rowWithTitle:@"Skipped configurations" detail:[NSString stringWithFormat:@"%lu",(unsigned long)skipped]]];
+    NSArray *issues=[_subscription objectForKey:@"import_issues"];
+    NSMutableArray *reasons=[NSMutableArray array];
+    if (skipped && [issues isKindOfClass:[NSArray class]]) for (id issue in issues) {
+        if (![issue isKindOfClass:[NSString class]]) continue;
+        NSString *reason=issue;
+        if ([reason hasPrefix:@"configs[]: "]) reason=[reason substringFromIndex:[@"configs[]: " length]];
+        if ([reason length] && [reasons count]<16 && ![reasons containsObject:reason]) [reasons addObject:reason];
+    }
+    if ([reasons count]) [rows addObject:[self rowWithTitle:[reasons count]==1 ? @"Reason" : @"Reasons" detail:[reasons componentsJoinedByString:@"\n"]]];
+    return rows;
+}
+
 - (void)buildSections {
     NSMutableArray *newSections = [NSMutableArray array];
     NSMutableArray *generalRows = [NSMutableArray array];
@@ -441,6 +469,9 @@ static CGRect VCSubscriptionInputFrame(CGRect bounds, CGFloat textLeft) {
     }
     [newSections addObject:[self sectionWithTitle:@"Usage" rows:usageRows]];
 
+    NSArray *updateRows=[self lastUpdateRows];
+    if ([updateRows count]) [newSections addObject:[self sectionWithTitle:@"Last Update" rows:updateRows]];
+
     NSString *webPageURL = [metadata objectForKey:kSubscriptionWebPageURLKey];
     if ([webPageURL isKindOfClass:[NSString class]] && [webPageURL length] > 0) {
         [providerRows addObject:[self rowWithTitle:@"Web Page"
@@ -456,13 +487,6 @@ static CGRect VCSubscriptionInputFrame(CGRect bounds, CGFloat textLeft) {
         unsigned long long hours = [intervalNumber unsignedLongLongValue];
         NSString *interval = [NSString stringWithFormat:@"%llu hour%@", hours, (hours == 1 ? @"" : @"s")];
         [providerRows addObject:[self rowWithTitle:@"Suggested Update Interval" detail:interval]];
-    }
-    NSNumber *lastUpdatedNumber = [metadata objectForKey:kSubscriptionLastUpdatedKey];
-    if ([lastUpdatedNumber isKindOfClass:[NSNumber class]]) {
-        NSString *lastUpdated = [self formattedTimestamp:[lastUpdatedNumber unsignedLongLongValue] includeTime:YES];
-        if ([lastUpdated length] > 0) {
-            [providerRows addObject:[self rowWithTitle:@"Last Updated" detail:lastUpdated]];
-        }
     }
     [providerRows addObject:[self rowWithTitle:@"Source"
                                        detail:(encryptedHappSubscription

@@ -191,12 +191,21 @@ static void refreshWarningTests(void) {
         if (scenario==4) screen->_configurationRevision++;
         runWork();
         if (scenario<2) {
-            CHECK("refresh-warning/only-fresh-successful-results",shownAlerts==initial+1 && [alertMessage hasPrefix:@"Skipped 1 configuration(s)."] && [alertMessage rangeOfString:@"Old A issue"].location==NSNotFound && [alertMessage rangeOfString:@"Old C issue"].location==NSNotFound);
+            CHECK("refresh-warning/successful-updates-are-quiet",shownAlerts==initial);
             CHECK("refresh-warning/new-warnings-persisted",[[[screen->_subscriptions objectAtIndex:0] objectForKey:@"import_skipped"] unsignedIntegerValue]==1);
             CHECK("refresh-warning/failed-or-unselected-data-kept",[[screen->_subscriptions objectAtIndex:2] isEqual:[sources objectAtIndex:2]]);
         } else {
             CHECK("refresh-warning/no-stale-warning-on-failure-or-cancel",shownAlerts==initial && [screen->_subscriptions isEqual:sources]);
         }
+    }
+    for (NSUInteger existing=0;existing<4;existing++) {
+        MainVC *screen=newImport();
+        if (existing) [screen->_subscriptions addObject:@{@"url":sourceURL,@"items":existing==2 ? @[] : @[clean]}];
+        setup(@[@200]); responseBodies=@[mixed];
+        NSUInteger initial=shownAlerts;
+        [screen performSubscriptionImportForURLs:@[sourceURL] allowInsecureFetch:existing==3 fallbackSubscriptionsByURL:nil allowPlainHTTP:NO useCompatibleUserAgent:NO];
+        runWork();
+        CHECK("import-warning/only-new-subscriptions-show-warning",shownAlerts==initial+(existing ? 0 : 1));
     }
 }
 static void importWarningTests(void) {
