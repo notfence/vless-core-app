@@ -5,7 +5,30 @@ import tempfile
 
 ROOT = Path(__file__).resolve().parents[1]
 
+def host_prefix_selection():
+    with tempfile.TemporaryDirectory(prefix="vless-host-environment-") as temporary:
+        config = Path(temporary) / "gnustep-config"
+        config.write_text("#!/bin/sh\nexit 0\n")
+        config.chmod(0o700)
+        environment = dict(os.environ)
+        for name in ("MAKEFLAGS", "MFLAGS", "MAKELEVEL", "MAKEOVERRIDES", "HOST_PREFIX"):
+            environment.pop(name, None)
+        command = ["make", "-s", "--eval=print-host-prefix:;@printf '%s' '$(HOST_PREFIX)'", "print-host-prefix", f"GNUSTEP_CONFIG={config}"]
+        result = subprocess.run(command, cwd=ROOT / "tests", env=environment, capture_output=True, text=True, timeout=10, check=True)
+        if result.stdout:
+            raise AssertionError("system-gnustep-must-precede-bundled-host-libraries")
+        result = subprocess.run([*command, f"HOST_PREFIX={temporary}"], cwd=ROOT / "tests", env=environment, capture_output=True, text=True, timeout=10, check=True)
+        if result.stdout != temporary:
+            raise AssertionError("explicit-host-prefix-must-remain-supported")
+        command[-1] = f"GNUSTEP_CONFIG={config}.missing"
+        result = subprocess.run(command, cwd=ROOT / "tests", env=environment, capture_output=True, text=True, timeout=10, check=True)
+        fallback = ROOT.parent / "toolchains/host-tests"
+        expected = str(fallback) if (fallback / "usr/include/GNUstep/Foundation/Foundation.h").is_file() else ""
+        if result.stdout != expected:
+            raise AssertionError("bundled-host-prefix-must-remain-a-fallback")
+
 def main():
+    host_prefix_selection()
     with tempfile.TemporaryDirectory(prefix="vless-preflight-") as temporary:
         root = Path(temporary)
         marker = root / "ios-compiler-called"

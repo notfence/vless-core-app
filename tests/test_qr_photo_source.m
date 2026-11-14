@@ -78,9 +78,9 @@ CGColorSpaceRef CGColorSpaceCreateDeviceGray(void) { return (void *)1; }
 void CGColorSpaceRelease(CGColorSpaceRef space) { CHECK("photo-source/gray-space",space==(void *)1); }
 CGContextRef CGBitmapContextCreate(void *bytes,size_t w,size_t h,size_t bits,size_t row,CGColorSpaceRef space,unsigned alpha) { (void)h; (void)space; (void)alpha; CHECK("photo-source/gray-not-rgba",bits==8 && row==w); return fault==3 ? NULL : bytes; }
 void CGContextSetGrayFillColor(CGContextRef context,double gray,double alpha) { (void)context; CHECK("photo-source/white-alpha-background",gray==1 && alpha==1); }
-void CGContextFillRect(CGContextRef context,CGRect rect) { memset(context,255,(size_t)(rect.width*rect.height)); }
+void CGContextFillRect(CGContextRef context,CGRect rect) { memset(context,255,(size_t)(rect.size.width*rect.size.height)); }
 void CGContextDrawImage(CGContextRef context,CGRect rect,CGImageRef image) {
-    drawCalls++; uint8_t *bytes=context; size_t width=(size_t)rect.width;
+    drawCalls++; uint8_t *bytes=context; size_t width=(size_t)rect.size.width;
     Provider *provider=[image objectForKey:@"provider"]; uint8_t sourceByte=0;
     CHECK("photo-source/deferred-draw-keeps-source-alive",provider->callbacks.getBytesAtPosition(provider->context,&sourceByte,0,1)==1);
     BOOL white=YES;

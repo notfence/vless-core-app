@@ -3,14 +3,13 @@
 #import <Foundation/Foundation.h>
 #include <sys/types.h>
 #import <CoreFoundation/CoreFoundation.h>
+#include "../../../common/main_geometry.h"
 typedef id CGDataProviderRef;
 typedef id CGImageRef;
 typedef void *CGContextRef;
 typedef void *CGColorSpaceRef;
-typedef struct { double x,y,width,height; } CGRect;
-static inline CGRect CGRectMake(double x,double y,double w,double h) { return (CGRect){x,y,w,h}; }
-static inline double CGRectGetMinX(CGRect rect) { return rect.x; }
-static inline double CGRectGetMaxY(CGRect rect) { return rect.y+rect.height; }
+static inline double CGRectGetMinX(CGRect rect) { return rect.origin.x; }
+static inline double CGRectGetMaxY(CGRect rect) { return rect.origin.y+rect.size.height; }
 typedef struct { unsigned version; const void *(*getBytePointer)(void *); void (*releaseBytePointer)(void *,const void *); size_t (*getBytesAtPosition)(void *,void *,off_t,size_t); void (*releaseInfo)(void *); } CGDataProviderDirectCallbacks;
 typedef unsigned CGImageAlphaInfo;
 enum { kCGImageAlphaNone=0,kCGImageAlphaPremultipliedLast=1,kCGImageAlphaNoneSkipLast=5,kCGImageAlphaNoneSkipFirst=6 };

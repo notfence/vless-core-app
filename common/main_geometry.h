@@ -3,10 +3,12 @@
 #if defined(__APPLE__)
 #include <CoreGraphics/CoreGraphics.h>
 #else
+#ifndef CF_DEFINES_CG_TYPES
 typedef double CGFloat;
 typedef struct { CGFloat x, y; } CGPoint;
 typedef struct { CGFloat width, height; } CGSize;
 typedef struct { CGPoint origin; CGSize size; } CGRect;
+#endif
 static inline CGRect CGRectMake(CGFloat x, CGFloat y, CGFloat w, CGFloat h) { return (CGRect){{x, y}, {w, h}}; }
 #endif
 typedef struct {

@@ -2,10 +2,10 @@
 #import "../common/connection_logic.h"
 #include "support/objc/blocks_runtime.h"
 #include "check.h"
+#include "../common/main_geometry.h"
 typedef NSUInteger dispatch_once_t;
 typedef int dispatch_queue_t;
 enum { DISPATCH_QUEUE_SERIAL=0,UIApplicationStateActive=0 };
-typedef struct { double x,y; } CGPoint;
 static const CGPoint CGPointZero={0,0};
 static void (^queued[2][128])(void);
 static NSUInteger queuedCount[2],sent,displayed;

@@ -2,11 +2,7 @@
 #include "support/objc/blocks_runtime.h"
 #include "check.h"
 #include <math.h>
-typedef double CGFloat;
-typedef struct { double x,y; } CGPoint;
-typedef struct { double width,height; } CGSize;
-typedef struct { CGPoint origin; CGSize size; } CGRect;
-static CGRect CGRectMake(double x,double y,double w,double h) { return (CGRect){{x,y},{w,h}}; }
+#include "../common/main_geometry.h"
 static CGPoint CGPointMake(double x,double y) { return (CGPoint){x,y}; }
 enum { UIPopoverArrowDirectionAny=0 };
 enum { UIControlStateNormal=0 };

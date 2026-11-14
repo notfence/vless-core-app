@@ -1,8 +1,8 @@
 ROOT := $(abspath ..)
 HOST_BUILD_DIR ?= $(ROOT)/build/host-tests
 HOST_CC ?= /usr/bin/clang
-HOST_PREFIX ?= $(if $(wildcard $(ROOT)/../toolchains/host-tests/usr/include/GNUstep/Foundation/Foundation.h),$(abspath $(ROOT)/../toolchains/host-tests),)
 GNUSTEP_CONFIG ?= gnustep-config
+HOST_PREFIX ?= $(if $(shell command -v "$(GNUSTEP_CONFIG)" 2>/dev/null),,$(if $(wildcard $(ROOT)/../toolchains/host-tests/usr/include/GNUstep/Foundation/Foundation.h),$(abspath $(ROOT)/../toolchains/host-tests),))
 HOST_CPPFLAGS := -I$(ROOT)/tests/support -I$(ROOT)/tests -I$(ROOT)/common -I$(shell gcc -print-file-name=include)
 ifneq ($(HOST_PREFIX),)
 HOST_CPPFLAGS += -I$(HOST_PREFIX)/usr/include/GNUstep -I$(HOST_PREFIX)/usr/include
@@ -127,7 +127,7 @@ test: requirements $(HOST_TESTS)
 requirements:
 	@test -x "$(HOST_CC)" || { echo 'Missing host compiler: install clang or set HOST_CC.' >&2; exit 1; }
 	@if [ -z "$(HOST_PREFIX)" ]; then command -v "$(GNUSTEP_CONFIG)" >/dev/null || { echo 'Missing GNUstep development headers: install libgnustep-base-dev and gnustep-make, or set HOST_PREFIX. make never installs packages.' >&2; exit 1; }; fi
-	@printf '%s\n' '#import <Foundation/Foundation.h>' '#include <sqlite3.h>' '#include <openssl/evp.h>' '#include <zlib.h>' | $(HOST_CC) $(HOST_CPPFLAGS) $(HOST_OBJCFLAGS) -x objective-c -fsyntax-only - >/dev/null || { echo 'Missing host development dependencies: libgnustep-base-dev, libobjc-dev, libsqlite3-dev, libssl-dev, zlib1g-dev.' >&2; exit 1; }
+	@printf '%s\n' '#import <Foundation/Foundation.h>' '#include <sqlite3.h>' '#include <openssl/evp.h>' '#include <zlib.h>' | $(HOST_CC) $(HOST_CPPFLAGS) $(filter-out -MMD -MP,$(HOST_OBJCFLAGS)) -x objective-c -fsyntax-only - >/dev/null || { echo 'Missing host development dependencies: libgnustep-base-dev, libobjc-dev, libsqlite3-dev, libssl-dev, zlib1g-dev.' >&2; exit 1; }
 
 $(HOST_BUILD_DIR)/%.o: %.m | requirements
 	mkdir -p $(dir $@)
@@ -384,7 +384,7 @@ $(HOST_BUILD_DIR)/main_health_async.inc: ../app/main_connection.m extract_ui_met
 	mkdir -p $(dir $@)
 	python3 extract_ui_methods.py $< $@ '- (void)xhttpConnectHealthCheckResultOnMain:'
 
-$(HOST_BUILD_DIR)/test_main_logs: test_main_logs.m $(HOST_BUILD_DIR)/daemon_async.inc $(HOST_BUILD_DIR)/log_text.inc $(HOST_BUILD_DIR)/log_async.inc $(HOST_BUILD_DIR)/main_logs.inc $(HOST_BUILD_DIR)/main_health_async.inc $(HOST_BUILD_DIR)/common/connection_logic.o check.h
+$(HOST_BUILD_DIR)/test_main_logs: test_main_logs.m $(HOST_BUILD_DIR)/daemon_async.inc $(HOST_BUILD_DIR)/log_text.inc $(HOST_BUILD_DIR)/log_async.inc $(HOST_BUILD_DIR)/main_logs.inc $(HOST_BUILD_DIR)/main_health_async.inc $(HOST_BUILD_DIR)/common/connection_logic.o check.h ../common/main_geometry.h support/objc/blocks_runtime.h
 	$(HOST_CC) $(HOST_CPPFLAGS) $(HOST_OBJCFLAGS) $(HOST_CFLAGS) -fblocks -I$(HOST_BUILD_DIR) $< $(HOST_BUILD_DIR)/common/connection_logic.o -o $@ -L$(ROOT)/../toolchains/ios6/lib -Wl,-rpath,$(ROOT)/../toolchains/ios6/lib -lBlocksRuntime $(HOST_LIBS)
 
 $(HOST_BUILD_DIR)/status_connection_logic.o: ../common/connection_logic.m ../common/connection_logic.h
@@ -491,13 +491,13 @@ $(HOST_BUILD_DIR)/qr_lifecycle.inc: ../app/qr_scanner.m extract_ui_methods.py Ma
 $(HOST_BUILD_DIR)/qr_batch.inc: ../app/main_import.m extract_ui_methods.py | requirements
 	python3 extract_ui_methods.py $< $@ '- (void)advancePhotoQRImport'
 
-$(HOST_BUILD_DIR)/test_qr_lifecycle: test_qr_lifecycle.m $(HOST_BUILD_DIR)/qr_lifecycle.inc $(HOST_BUILD_DIR)/qr_batch.inc | requirements
+$(HOST_BUILD_DIR)/test_qr_lifecycle: test_qr_lifecycle.m $(HOST_BUILD_DIR)/qr_lifecycle.inc $(HOST_BUILD_DIR)/qr_batch.inc ../common/main_geometry.h support/objc/blocks_runtime.h | requirements
 	$(HOST_CC) $(HOST_CPPFLAGS) $(HOST_OBJCFLAGS) $(HOST_CFLAGS) -fblocks -D__IPHONE_OS_VERSION_MAX_ALLOWED=110000 -I$(HOST_BUILD_DIR) $< -o $@ -L$(ROOT)/../toolchains/ios6/lib -Wl,-rpath,$(ROOT)/../toolchains/ios6/lib -lBlocksRuntime $(HOST_LIBS)
 
-$(HOST_BUILD_DIR)/test_qr_photo_source: test_qr_photo_source.m ../app/qr_photo_source.m ../app/qr_photo_source.h support/AssetsLibrary/AssetsLibrary.h ../common/qr_photo.c ../common/qr_photo.h $(HOST_ZBAR_OBJECTS) | requirements
+$(HOST_BUILD_DIR)/test_qr_photo_source: test_qr_photo_source.m ../app/qr_photo_source.m ../app/qr_photo_source.h support/AssetsLibrary/AssetsLibrary.h support/CoreGraphics/CoreGraphics.h ../common/main_geometry.h ../common/qr_photo.c ../common/qr_photo.h $(HOST_ZBAR_OBJECTS) | requirements
 	$(HOST_CC) $(HOST_CPPFLAGS) $(HOST_OBJCFLAGS) $(HOST_CFLAGS) -fblocks -I$(ROOT)/$(ZBAR_DIR) $< ../common/qr_photo.c $(HOST_ZBAR_OBJECTS) -o $@ -L$(ROOT)/../toolchains/ios6/lib -Wl,-rpath,$(ROOT)/../toolchains/ios6/lib -lBlocksRuntime $(HOST_LIBS)
 
-$(HOST_BUILD_DIR)/test_qr_photo_native: test_qr_photo_native.m test_qr_photo_source.m support/Vision/Vision.h support/CoreGraphics/CoreGraphics.h support/AssetsLibrary/AssetsLibrary.h ../app/qr_photo_source.m ../app/qr_photo_source.h | requirements
+$(HOST_BUILD_DIR)/test_qr_photo_native: test_qr_photo_native.m test_qr_photo_source.m support/Vision/Vision.h support/CoreGraphics/CoreGraphics.h support/AssetsLibrary/AssetsLibrary.h ../common/main_geometry.h ../app/qr_photo_source.m ../app/qr_photo_source.h | requirements
 	$(HOST_CC) $(HOST_CPPFLAGS) $(HOST_OBJCFLAGS) $(HOST_CFLAGS) -fblocks -D__IPHONE_OS_VERSION_MIN_REQUIRED=110000 $< -o $@ -L$(ROOT)/../toolchains/ios6/lib -Wl,-rpath,$(ROOT)/../toolchains/ios6/lib -lBlocksRuntime $(HOST_LIBS)
 
 $(HOST_BUILD_DIR)/test_httpupgrade_import: $(HOST_BUILD_DIR)/test_httpupgrade_import.o $(filter-out $(HOST_BUILD_DIR)/test_app_logic.o,$(APP_OBJECTS)) $(CORE_PARSE_OBJ)
