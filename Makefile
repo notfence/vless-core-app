@@ -365,7 +365,7 @@ package-root: check-package-inputs $(APP_ARMV7_BIN) $(APP_ARM64_BIN) $(DAEMON_AR
 		$(PKG_ROOT)/usr/bin/vless-core-darwin-arm64 \
 		$(PKG_ROOT)/usr/bin/vless-core-curl-arm64 \
 		$(PKG_ROOT)/usr/bin/redsocks-vless-core-arm64; do \
-		$(ARM64_LDID) -S "$$binary"; \
+		$(ARM64_LDID) -S$(DAEMON_ENTITLEMENTS) "$$binary"; \
 	done
 	$(ARM64_LDID) -S$(APP_ENTITLEMENTS) $(PKG_ROOT)/Applications/vless-core.app/vless-core-arm64
 	$(ARM64_LDID) -S$(DAEMON_ENTITLEMENTS) $(PKG_ROOT)/usr/bin/vpnctld-arm64

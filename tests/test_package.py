@@ -182,8 +182,12 @@ def macho_contract(name, data, cpu, minimum):
         check(f"signature/{name}/sha256-primary", directory[37] == 2)
         version = struct.unpack_from(">I", directory, 8)[0]
         check(f"signature/{name}/execution-segment", version >= 0x20400 and len(directory) >= 88 and struct.unpack_from(">Q", directory, 80)[0] & 1)
-        if name in ("Applications/vless-core.app/vless-core-arm64", "usr/bin/vpnctld-arm64"):
-            check(f"signature/{name}/entitlements-and-der", 5 in slots and 7 in slots)
+        check(f"signature/{name}/entitlements-and-der", 5 in slots and 7 in slots)
+        entitlements = plistlib.loads(slots[5][8:])
+        expected = {"platform-application": True}
+        if name == "Applications/vless-core.app/vless-core-arm64":
+            expected["com.apple.private.security.no-container"] = True
+        check(f"signature/{name}/minimal-platform-entitlements", isinstance(entitlements, dict) and entitlements.get("platform-application") is True and entitlements == expected)
 
 def archive_members(data):
     check("deb/ar-magic", data[:8] == b"!<arch>\n")
