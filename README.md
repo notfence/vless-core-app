@@ -86,8 +86,8 @@ username/password authentication. It does not use this transport matrix.
 - Shadowsocks supports four AEAD methods and three SS 2022 methods, including
   AES SIP023 key chains. See the [CLI documentation](https://github.com/notfence/vless-core-cli#supported-configurations)
   for method names and protocol restrictions.
-- Supported fingerprints: `chrome`, `firefox`, `edge`, `random`,
-  `randomized`, and `qq`.
+- Supported fingerprints: `chrome`, `firefox`, `edge`, `ios`, `safari`,
+  `360`, `random`, `randomized`, and `qq`.
 - XHTTP supports `auto`, `packet-up`, `stream-one`, and `stream-up`, XMUX,
   and a separate download channel. `auto` selects `packet-up` with none/TLS.
   With REALITY, it selects `stream-one`, or `stream-up` when a separate
