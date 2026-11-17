@@ -5,6 +5,7 @@
 #import "../integrations/incy/incy_links.h"
 #include "../../vless-core-cli/include/json.h"
 #include "../../vless-core-cli/include/sockopt.h"
+#include "../../vless-core-cli/include/fingerprint.h"
 #include <arpa/inet.h>
 #include <errno.h>
 #include <ctype.h>
@@ -904,6 +905,14 @@ failure:
     fp=VCProfileText(fp) ? [fp lowercaseString] : @"";
     if (![fp length]) fp=@"chrome";
     if (!reason && ![security isEqual:@"none"] && ![self isSupportedRealityFingerprint:fp]) reason=@"unsupported fp";
+    if (!reason && [security isEqual:@"reality"]) {
+        fingerprint_mode_t fingerprint;
+        if (!core_fingerprint_parse([fp UTF8String],&fingerprint) && !core_fingerprint_tls13(fingerprint)) reason=@"fingerprint requires TLS 1.3 for REALITY";
+    }
+    if (!reason && [transport isEqual:@"grpc"] && ![security isEqual:@"none"]) {
+        fingerprint_mode_t fingerprint;
+        if (!core_fingerprint_parse([fp UTF8String],&fingerprint) && fingerprint == FP_360_7_5) reason=@"fingerprint is incompatible with gRPC TLS";
+    }
     NSString *mode=vmess ? [vmess objectForKey:@"mode"] : [fields objectForKey:@"mode"];
     if (mode && !VCProfileText(mode)) reason=@"invalid transport mode";
     mode=VCProfileText(mode) ? [mode lowercaseString] : nil;
@@ -1911,12 +1920,8 @@ failure:
 
 - (BOOL)isSupportedRealityFingerprint:(NSString *)fp {
     if (![fp isKindOfClass:[NSString class]] || [fp length] == 0) return NO;
-    return [fp isEqualToString:@"chrome"] ||
-           [fp isEqualToString:@"firefox"] ||
-           [fp isEqualToString:@"edge"] ||
-           [fp isEqualToString:@"random"] ||
-           [fp isEqualToString:@"randomized"] ||
-           [fp isEqualToString:@"qq"];
+    fingerprint_mode_t mode;
+    return core_fingerprint_parse([fp UTF8String],&mode) == 0;
 }
 
 - (NSArray *)happJSONArrayValue:(id)value {

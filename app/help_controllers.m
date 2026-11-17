@@ -51,7 +51,7 @@
         [self question:@"Which protocols are supported?"
                  answer:@"VLESS, Trojan, VMess AEAD, Shadowsocks, and upstream SOCKS5. For more details, please visit a vless-core-cli repo page."],
         [self question:@"Which transports are supported?"
-                 answer:@"TCP/raw, gRPC gun/multi, and XHTTP with none, TLS, or REALITY. WebSocket and HTTPUpgrade support none or TLS (REALITY unsupported). HTTPUpgrade uses HTTP/1.1. SOCKS5 is a separate upstream protocol. Supported fingerprints are chrome, firefox, edge, random, randomized, and qq."],
+                 answer:@"TCP/raw, gRPC gun/multi, and XHTTP with none, TLS, or REALITY. WebSocket and HTTPUpgrade support none or TLS (REALITY unsupported). HTTPUpgrade uses HTTP/1.1. SOCKS5 is a separate upstream protocol. Fingerprints include chrome, firefox, edge, qq, safari, ios, 360, their hello*_auto aliases, and the supported modern hello profiles."],
         [self question:@"What does XHTTP support?"
                  answer:@"XHTTP supports auto, packet-up, stream-one, and stream-up modes, XMUX, and a separate download channel. Auto selects packet-up with none/TLS. With REALITY it selects stream-one, or stream-up when a separate download channel is configured. Use XMUX controls only whether its XMUX settings are used for a new connection."],
         [self question:@"How does Use XMUX work?"
@@ -561,6 +561,15 @@
                           [self licensedRowWithTitle:@"OpenSSL"
                                               detail:[NSString stringWithFormat:@"TLS library, version %@, %@. License: Apache 2.0.", [deps objectForKey:@"openssl"], opensslPatchStatus]
                                               marker:@"OpenSSL 3.5.7"],
+                          [self licensedRowWithTitle:@"uTLS profiles"
+                                              detail:@"ClientHello profile data from uTLS aa6edf4b11af, used by Xray 26.6.27. License: BSD 3-Clause."
+                                              marker:@"uTLS ClientHello profiles"],
+                          [self licensedRowWithTitle:@"Brotli"
+                                              detail:@"TLS certificate decompression in the core, version 1.2.1. License: MIT."
+                                              marker:@"Brotli 1.2.1"],
+                          [self licensedRowWithTitle:@"Zstandard"
+                                              detail:@"TLS certificate decompression in the core, version 1.5.7. License: BSD."
+                                              marker:@"Zstandard 1.5.7"],
                           [self licensedRowWithTitle:@"zlib"
                                               detail:[NSString stringWithFormat:@"Compression library, version %@. License: zlib license.", [deps objectForKey:@"zlib"]]
                                               marker:@"zlib 1.3.1"],

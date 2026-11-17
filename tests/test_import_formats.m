@@ -202,7 +202,7 @@ static void trojanProfiles(void) {
     NSString *uri=[p URIFromKaringServer:server error:NULL]; vless_config_t config=parsed(uri);
     CHECK("trojan/karing-no-trim-or-double-decode",!memcmp(config.trojan_hash,expected,28) && !strcmp(config.security,"none"));
     CHECK("trojan/default-tls",[[p securityTypeFromURI:@"trojan://a+b%00%FF@example.test:443"] isEqual:@"tls"]);
-    for (NSString *suffix in @[@"?flow=xtls-rprx-vision",@"?encryption=mlkem768x25519plus.native.0rtt.secret",@"?type=ws&security=reality",@"?fp=safari",@"?security=",@"?security=none&security=tls"])
+    for (NSString *suffix in @[@"?flow=xtls-rprx-vision",@"?encryption=mlkem768x25519plus.native.0rtt.secret",@"?type=ws&security=reality",@"?fp=android",@"?security=",@"?security=none&security=tls"])
         CHECK("trojan/unsupported-options-rejected",[p unsupportedConfigReasonForURI:[@"trojan://private@example.test:443" stringByAppendingString:suffix]] != nil);
     for (NSString *credential in @[@"",@"a%",@"a%0",@"a%GG"])
         CHECK("trojan/invalid-password-envelope",[p unsupportedConfigReasonForURI:[NSString stringWithFormat:@"trojan://%@@example.test:443",credential]] != nil);
@@ -375,6 +375,57 @@ static void crypt3Fixtures(void) {
     VCSetCurrentSubscriptionTask(previous);
 }
 
+static void modernFingerprints(void) {
+    VCProfileLogic *logic=VCProfiles();
+    NSArray *names=@[@"chrome",@"firefox",@"edge",@"qq",@"random",@"randomized",@"ios",@"safari",@"360",
+        @"hellochrome_120",@"hellochrome_131",@"hellochrome_133",@"hellofirefox_120",@"hellofirefox_148",
+        @"helloios_13",@"helloios_14",@"helloedge_106",@"hellosafari_26_3",@"hello360_11_0",@"helloqq_11_1",
+        @"hellochrome_auto",@"hellofirefox_auto",@"helloedge_auto",@"helloqq_auto",@"helloios_auto",@"hellosafari_auto",@"hello360_auto"];
+    for (NSString *name in names) {
+        NSString *uri=[NSString stringWithFormat:@"vless://11111111-2222-4333-8444-555555555555@198.51.100.1:443?security=tls&fp=%@#Original%%20name",name];
+        CHECK("fingerprint/direct-import",[logic isSupportedConfigTupleForURI:uri]);
+        NSDictionary *report=[logic textImportReportFromText:uri];
+        CHECK("fingerprint/original-uri-preserved",[[report objectForKey:@"uris"] isEqual:@[uri]]);
+        for (NSNumber *enabled in @[@(NO),@(YES)]) CHECK("fingerprint/xmux-keeps-original-uri",[[logic runtimeURI:uri useXmux:[enabled boolValue] error:NULL] isEqual:uri]);
+        for (NSString *prefix in @[@"trojan://fixture-password",@"vmess://11111111-2222-4333-8444-555555555555",@"ss://aes-128-gcm:fixture-password"]) {
+            NSString *link=[NSString stringWithFormat:@"%@@198.51.100.1:443?security=tls&fp=%@",prefix,name];
+            CHECK("fingerprint/all-protocols",[logic isSupportedConfigTupleForURI:link]);
+            parsed(link);
+        }
+        NSDictionary *karing=@{@"type":@"vless",@"server":@"example.test",@"server_port":@443,@"uuid":@"11111111-2222-4333-8444-555555555555",
+            @"tls":@{@"enabled":@(YES),@"utls":@{@"enabled":@(YES),@"fingerprint":name}}};
+        NSString *karingURI=[logic URIFromKaringServer:karing error:NULL];
+        CHECK("fingerprint/karing-import",karingURI && [[logic queryValueForURLString:karingURI key:@"fp"] isEqual:name]);
+        parsed(karingURI);
+        NSMutableDictionary *config=[profile(@"tcp",@{},@{@"id":@"11111111-2222-4333-8444-555555555555"}) mutableCopy];
+        NSMutableDictionary *outbound=[[[config objectForKey:@"outbounds"] objectAtIndex:0] mutableCopy];
+        NSMutableDictionary *stream=[[outbound objectForKey:@"streamSettings"] mutableCopy];
+        [stream setObject:@{@"serverName":@"example.test",@"fingerprint":name} forKey:@"tlsSettings"];
+        [outbound setObject:stream forKey:@"streamSettings"]; [config setObject:@[outbound] forKey:@"outbounds"];
+        NSString *converted=[logic URIFromHappJSONConfig:config];
+        CHECK("fingerprint/json-import",converted && [[logic queryValueForURLString:converted key:@"fp"] isEqual:name]);
+        if (converted) {
+            vless_config_t a=parsed(uri),b=parsed(converted);
+            CHECK("fingerprint/converter-core-parity",a.fp_mode == b.fp_mode);
+        }
+        NSDictionary *vmess=@{@"v":@"2",@"add":@"example.test",@"port":@443,@"id":@"11111111-2222-4333-8444-555555555555",@"aid":@0,@"net":@"tcp",@"tls":@"tls",@"fp":name};
+        CHECK("fingerprint/vmess-json-import",[logic isSupportedConfigTupleForURI:vmessJSONURI(vmess)]);
+        [stream release]; [outbound release]; [config release];
+    }
+    NSMutableArray *mixed=[NSMutableArray array];
+    for (NSUInteger i=0;i<49;i++) {
+        NSString *name=i<33 ? @"hellofirefox_120" : i<37 ? @"ios" : i<41 ? @"firefox" : @"chrome";
+        [mixed addObject:[NSString stringWithFormat:@"vless://11111111-2222-4333-8444-555555555555@198.51.100.1:%lu?security=tls&fp=%@",(unsigned long)443+i,name]];
+    }
+    NSDictionary *report=[logic subscriptionImportReportFromData:[[mixed componentsJoinedByString:@"\n"] dataUsingEncoding:NSUTF8StringEncoding]];
+    CHECK("fingerprint/mixed-49-supported",[[report objectForKey:@"uris"] count] == 49 && ![[report objectForKey:@"skipped"] unsignedIntegerValue]);
+    NSData *encoded=[[[[mixed componentsJoinedByString:@"\n"] dataUsingEncoding:NSUTF8StringEncoding] base64EncodedStringWithOptions:0] dataUsingEncoding:NSUTF8StringEncoding];
+    report=[logic subscriptionImportReportFromData:encoded];
+    CHECK("fingerprint/base64-subscription",[[report objectForKey:@"uris"] count] == 49 && ![[report objectForKey:@"skipped"] unsignedIntegerValue]);
+    CHECK("fingerprint/360-grpc-rejected",![logic isSupportedConfigTupleForURI:@"vless://11111111-2222-4333-8444-555555555555@198.51.100.1:443?security=tls&type=grpc&fp=360&alpn=h2"]);
+    CHECK("fingerprint/360-reality-rejected",![logic isSupportedConfigTupleForURI:@"vless://11111111-2222-4333-8444-555555555555@198.51.100.1:443?security=reality&fp=360&pbk=AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"]);
+}
+
 int main(int argc, char **argv) {
     if (argc==2 && (!strcmp(argv[1],"--happ-prepare") || !strcmp(argv[1],"--happ-update"))) {
         NSAutoreleasePool *pool=[[NSAutoreleasePool alloc] init];
@@ -469,6 +520,7 @@ int main(int argc, char **argv) {
     parserDependencies();
     extendedProfiles();
     socketProfiles();
+    modernFingerprints();
     converterParity();
     trojanProfiles();
     vmessProfiles();
