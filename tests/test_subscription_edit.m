@@ -17,6 +17,13 @@ int main(void) {
     edited=[logic subscriptionByEditingSource:source name:@"  🇳🇱 Моё имя  " link:url userAgent:kHappSubscriptionUserAgent error:&error];
     CHECK("subscription-edit/name-and-agent",[[edited objectForKey:@"name"] isEqual:@"🇳🇱 Моё имя"] && [[edited objectForKey:kSubscriptionCustomNameKey] isEqual:@"🇳🇱 Моё имя"] && [[edited objectForKey:kSubscriptionHappUserAgentKey] boolValue]);
     CHECK("subscription-edit/happ-agent-not-happ-source",!SubscriptionDictionaryUsesHappHeaders(edited) && !SubscriptionDictionaryIsHappEncrypted(edited));
+    for (NSString *name in @[@"🍄 Provider",@"🍄\u200D🟫 Provider",@"👩\u200D⚕️ Provider",@"\U0001f3f4\U000e0067\U000e0062\U000e0065\U000e006e\U000e0067\U000e007f Provider"]) {
+        NSDictionary *original=@{@"url":url,@"name":name,@"items":[source objectForKey:@"items"]};
+        edited=[logic subscriptionByEditingSource:original name:name link:url userAgent:nil error:&error];
+        CHECK("subscription-edit/emoji-save-unchanged",!error && [edited isEqual:original]);
+        edited=[logic subscriptionByEditingSource:source name:name link:url userAgent:nil error:&error];
+        CHECK("subscription-edit/emoji-rename-preserves-sequence",!error && [[edited objectForKey:@"name"] isEqual:name] && [[edited objectForKey:kSubscriptionCustomNameKey] isEqual:name]);
+    }
     NSString *agent=@"Client/1.2 (custom; iOS) + % @";
     edited=[logic subscriptionByEditingSource:source name:@"Provider" link:url userAgent:agent error:&error];
     CHECK("subscription-edit/custom-agent-bytes",[[edited objectForKey:kSubscriptionUserAgentKey] isEqual:agent] && ![edited objectForKey:kSubscriptionHappUserAgentKey] && [VCSubscriptionUserAgent(edited,@"app") isEqual:agent]);
@@ -25,8 +32,18 @@ int main(void) {
     CHECK("subscription-edit/link-change-keeps-explicit-agent",[[edited objectForKey:kSubscriptionUserAgentKey] isEqual:agent]);
     CHECK("subscription-edit/source-never-mutated",[[source objectForKey:@"items"] count]==1 && [[source objectForKey:@"url"] isEqual:url] && [[source objectForKey:kSubscriptionHappUserAgentKey] boolValue]);
     for (NSString *bad in @[@"",@"  ",@"a\nb",@"a\rb",@"a\tb"]) CHECK("subscription-edit/bad-name",![logic subscriptionByEditingSource:source name:bad link:url userAgent:nil error:&error] && error);
+    for (unichar control=0;control<=0x9f;control++) {
+        if (control>0x1f && control<0x7f) continue;
+        unichar text[]={'a',control,'b'};
+        NSString *bad=[NSString stringWithCharacters:text length:3];
+        CHECK("subscription-edit/control-character",![logic subscriptionByEditingSource:source name:bad link:url userAgent:nil error:&error] && error);
+    }
+    CHECK("subscription-edit/bidi-override",![logic subscriptionByEditingSource:source name:@"a\u202Eb" link:url userAgent:nil error:&error] && error);
     NSString *large=[@"a" stringByPaddingToLength:1025 withString:@"a" startingAtIndex:0];
     CHECK("subscription-edit/name-size",![logic subscriptionByEditingSource:source name:large link:url userAgent:nil error:&error]);
+    NSString *emojiLimit=[@"🍄" stringByPaddingToLength:512 withString:@"🍄" startingAtIndex:0];
+    CHECK("subscription-edit/emoji-name-1024-bytes",[logic subscriptionByEditingSource:source name:emojiLimit link:url userAgent:nil error:&error] && !error);
+    CHECK("subscription-edit/emoji-name-1025-bytes",![logic subscriptionByEditingSource:source name:[emojiLimit stringByAppendingString:@"a"] link:url userAgent:nil error:&error] && error);
     for (id bad in @[@"",@"  ",@"file:///tmp/private",@"https://",@"https://provider.test/a\nb",@"vless://uuid@host.test:443",@"happ://connect/https://provider.test",@"happ://crypt5/broken",@"incy://autorouting/https://provider.test",@"happ://add/incy://add/https://provider.test",@1])
         CHECK("subscription-edit/bad-link",![logic subscriptionByEditingSource:source name:@"Name" link:bad userAgent:nil error:&error]);
     large=[@"https://provider.test/" stringByPaddingToLength:kVCMaximumSubscriptionURLBytes+1 withString:@"a" startingAtIndex:0];
@@ -47,6 +64,7 @@ int main(void) {
     edited=[logic subscriptionByEditingSource:edited name:@"Name" link:url userAgent:nil error:&error];
     CHECK("subscription-edit/happ-default-is-app-agent",SubscriptionDictionaryUsesHappHeaders(edited) && [VCSubscriptionUserAgent(edited,@"app") isEqual:@"app"]);
     CHECK("subscription-edit/unmodified-happ-source-keeps-agent",[VCSubscriptionUserAgent(@{@"url":url,kSubscriptionHappSourceKey:@(YES)},@"app") isEqual:kHappSubscriptionUserAgent]);
+    CHECK("subscription-edit/happ-preset-uses-current-version",[VCSubscriptionUserAgent(source,@"app") isEqual:@"Happ/6.4.0/iOS"]);
     NSDictionary *reloaded=[NSJSONSerialization JSONObjectWithData:[NSJSONSerialization dataWithJSONObject:edited options:0 error:NULL] options:0 error:NULL];
     CHECK("subscription-edit/explicit-default-survives-reload",[VCSubscriptionUserAgent(reloaded,@"new-app-version") isEqual:@"new-app-version"]);
     NSString *incy=@"incy://crypt1/AAECAwQFBgcICQoLNyIQL3rDwRZqnyoD8pGKSLXP6o8NdSXQVSSALNbbUyIr__tWGFUexdIfKvvmDnuDGbmBvuppfNef6aKNZUwOm4c-Sg";

@@ -518,3 +518,4 @@ asan:
 .PHONY: test requirements sanitizers asan
 -include $(HOST_BUILD_DIR)/test_main_network.d
 -include $(HOST_BUILD_DIR)/test_temp_probe.d $(HOST_BUILD_DIR)/test_temp_spawn.d $(HOST_BUILD_DIR)/test_probe_log.d
+-include $(HOST_BUILD_DIR)/test_subscription_edit.d $(HOST_BUILD_DIR)/test_subscription_fetch.d

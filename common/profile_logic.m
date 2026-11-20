@@ -79,6 +79,25 @@ static BOOL VCProfileText(id value) {
     return YES;
 }
 
+static BOOL VCSubscriptionNameIsValid(NSString *name) {
+    NSUInteger length=[name length], bytes=0;
+    if (!length || length>1024) return NO;
+    NSCharacterSet *controls=[NSCharacterSet controlCharacterSet];
+    for (NSUInteger i=0;i<length;i++) {
+        uint32_t scalar=[name characterAtIndex:i];
+        if (scalar>=0xd800 && scalar<=0xdfff) {
+            if (scalar>=0xdc00 || ++i==length) return NO;
+            unichar low=[name characterAtIndex:i];
+            if (low<0xdc00 || low>0xdfff) return NO;
+            scalar=0x10000+((scalar-0xd800)<<10)+(low-0xdc00);
+        }
+        BOOL emojiFormat=scalar==0x200d || (scalar>=0xe0020 && scalar<=0xe007f);
+        if (!emojiFormat && [controls longCharacterIsMember:scalar]) return NO;
+        bytes+=scalar<0x80 ? 1 : scalar<0x800 ? 2 : scalar<0x10000 ? 3 : 4;
+    }
+    return bytes<=1024;
+}
+
 static BOOL VCProfileUnsigned(id value, unsigned maximum, unsigned *result) {
     if (![value isKindOfClass:[NSNumber class]]) return NO;
     const char *text = [[value stringValue] UTF8String];
@@ -1261,8 +1280,7 @@ failure:
     if (error) *error=nil;
     if (![source isKindOfClass:[NSDictionary class]] || ![name isKindOfClass:[NSString class]] || ![link isKindOfClass:[NSString class]]) return nil;
     name=TrimSimpleString(name); link=TrimSimpleString(link);
-    if (![name length] || ![name dataUsingEncoding:NSUTF8StringEncoding] || [name lengthOfBytesUsingEncoding:NSUTF8StringEncoding]>1024 ||
-        [name rangeOfCharacterFromSet:[NSCharacterSet controlCharacterSet]].location!=NSNotFound) {
+    if (!VCSubscriptionNameIsValid(name)) {
         if (error) *error=@"Enter a subscription name of up to 1024 UTF-8 bytes without control characters.";
         return nil;
     }
