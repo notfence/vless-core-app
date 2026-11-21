@@ -79,6 +79,39 @@ static BOOL VCProfileText(id value) {
     return YES;
 }
 
+static NSString *VCProfileDecodeQueryComponent(NSString *component, NSString *key) {
+    if (![component isKindOfClass:[NSString class]]) return nil;
+
+    NSUInteger length = [component length];
+    for (NSUInteger i = 0; i < length; i++) {
+        if ([component characterAtIndex:i] != '%') continue;
+        if (i + 2 >= length ||
+            !VCIsASCIIHexDigit([component characterAtIndex:(i + 1)]) ||
+            !VCIsASCIIHexDigit([component characterAtIndex:(i + 2)])) {
+            return nil;
+        }
+        i += 2;
+    }
+
+    NSString *escaped = [component stringByReplacingOccurrencesOfString:@"+" withString:@"%20"];
+    NSString *decoded = [escaped stringByReplacingPercentEscapesUsingEncoding:NSUTF8StringEncoding];
+    if (![decoded isKindOfClass:[NSString class]]) return nil;
+    BOOL validateJSON = NO;
+    for (NSUInteger i = 0; i < [decoded length]; i++) {
+        unichar value = [decoded characterAtIndex:i];
+        if (value >= 0x20 && value != 0x7f) continue;
+        if ((value != '\t' && value != '\r' && value != '\n') || ![key isEqual:@"extra"]) return nil;
+        validateJSON = YES;
+    }
+    if (validateJSON) {
+        core_json_t *root = core_json_parse([decoded UTF8String], NULL, 0);
+        BOOL valid = root && root->type == CORE_JSON_OBJECT;
+        core_json_free(root);
+        if (!valid) return nil;
+    }
+    return decoded;
+}
+
 static BOOL VCSubscriptionNameIsValid(NSString *name) {
     NSUInteger length=[name length], bytes=0;
     if (!length || length>1024) return NO;
@@ -728,7 +761,7 @@ static NSString *VCProfileRuntimeJSON(NSString *text,VCRuntimeJSONScope scope,un
             NSString *key=equal.location == NSNotFound ? nil : [self canonicalConfigQueryKey:[pair substringToIndex:equal.location]];
             NSString *next=pair;
             if ([key isEqual:@"extra"] || [key isEqual:@"downloadsettings"]) {
-                NSString *value=[self strictDecodedConfigQueryComponent:[pair substringFromIndex:equal.location+1]];
+                NSString *value=VCProfileDecodeQueryComponent([pair substringFromIndex:equal.location+1],key);
                 NSString *output=value ? VCProfileRuntimeJSON(value,[key isEqual:@"extra"] ? VCRuntimeExtra : VCRuntimeDownload,0,NULL) : nil;
                 if (!output) goto failure;
                 if (output != value) {
@@ -787,7 +820,7 @@ failure:
         NSString *raw=equals.location == NSNotFound ? @"" : [pair substringFromIndex:equals.location+1];
         if (strict && ![key length]) error=error ?: @"invalid query parameter name";
         if ((strict || [key isEqual:@"sockopt"]) && [seen containsObject:key ?: @""]) error=error ?: @"duplicate query parameter";
-        NSString *value=[self strictDecodedConfigQueryComponent:raw];
+        NSString *value=VCProfileDecodeQueryComponent(raw,key);
         if (strict && [scheme isEqual:@"trojan"] && [key isEqual:@"security"] && ![raw length]) error=error ?: @"invalid Trojan security";
         if (strict && !value) error=error ?: @"invalid query parameter encoding";
         if (error) { if (reason) *reason=error; return nil; }
@@ -1423,27 +1456,7 @@ failure:
 }
 
 - (NSString *)strictDecodedConfigQueryComponent:(NSString *)component {
-    if (![component isKindOfClass:[NSString class]]) return nil;
-
-    NSUInteger length = [component length];
-    for (NSUInteger i = 0; i < length; i++) {
-        if ([component characterAtIndex:i] != '%') continue;
-        if (i + 2 >= length ||
-            !VCIsASCIIHexDigit([component characterAtIndex:(i + 1)]) ||
-            !VCIsASCIIHexDigit([component characterAtIndex:(i + 2)])) {
-            return nil;
-        }
-        i += 2;
-    }
-
-    NSString *escaped = [component stringByReplacingOccurrencesOfString:@"+" withString:@"%20"];
-    NSString *decoded = [escaped stringByReplacingPercentEscapesUsingEncoding:NSUTF8StringEncoding];
-    if (![decoded isKindOfClass:[NSString class]]) return nil;
-    for (NSUInteger i = 0; i < [decoded length]; i++) {
-        unichar value = [decoded characterAtIndex:i];
-        if (value < 0x20 || value == 0x7f) return nil;
-    }
-    return decoded;
+    return VCProfileDecodeQueryComponent(component, nil);
 }
 
 - (NSString *)canonicalConfigQueryKey:(NSString *)encodedKey {
@@ -1529,7 +1542,7 @@ failure:
         NSString *decodedKey = [self canonicalConfigQueryKey:rawKey];
         if (![decodedKey isEqualToString:wanted]) continue;
 
-        NSString *decodedValue = [self strictDecodedConfigQueryComponent:rawValue];
+        NSString *decodedValue = VCProfileDecodeQueryComponent(rawValue, wanted);
         if ([decodedValue length] > 0) return decodedValue;
     }
 

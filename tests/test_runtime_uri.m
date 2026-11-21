@@ -51,7 +51,32 @@ static void parity(NSString *uri) {
     CHECK("runtime/enabled-preserves-policy",[VCProfiles() runtimeURI:uri useXmux:YES error:&error] == uri && !error);
 }
 
+static void formattedExtra(void) {
+    VCProfileLogic *profiles=VCProfiles();
+    NSString *extra=@"{\r\n\t\"xmux\": {\n\t\t\"maxConnections\": 1\r\n\t},\n\t\"headers\": {\"X-Test\": \"A+B%20\"}\n}";
+    NSString *uri=[base stringByAppendingFormat:@"&mode=auto&path=%%2Fsomepath&security=reality&encryption=none&extra=%@&pbk=AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8&fp=ios&sni=example.test#Import%%20test",encoded(extra)];
+    NSDictionary *report=[profiles textImportReportFromText:uri];
+    CHECK("runtime/formatted-extra-clipboard",[[report objectForKey:@"uris"] isEqual:@[uri]] && ![[report objectForKey:@"skipped"] unsignedIntegerValue]);
+    NSData *data=[uri dataUsingEncoding:NSUTF8StringEncoding];
+    for (NSData *body in @[data,[data base64EncodedDataWithOptions:0]]) {
+        report=[profiles subscriptionImportReportFromData:body];
+        CHECK("runtime/formatted-extra-subscription",[[report objectForKey:@"uris"] isEqual:@[uri]] && ![[report objectForKey:@"skipped"] unsignedIntegerValue]);
+    }
+    CHECK("runtime/formatted-extra-decoded-unchanged",[[profiles queryValueForURLString:uri key:@"extra"] isEqual:extra]);
+    vless_config_t config=parsed(uri);
+    CHECK("runtime/formatted-extra-xmux-active",config.xmux.present && config.xmux.max_connections.max == 1);
+    parity(uri);
+    unchanged([base stringByAppendingFormat:@"&extra=%@",encoded(@"{\n\t\"path\": \"/keep\"\r\n}")]);
+    for (NSString *value in @[@"%7B%00%7D",@"%7B%0B%7D",@"%7B%7F%7D",@"%7B%0A%7",@"%7B%0A%FF%7D",@"%7B%0A",encoded(@"{\"path\":\"/bad\npath\"}"),encoded(@"{\"path\":\"/bad\tpath\"}")]) {
+        NSString *bad=[base stringByAppendingFormat:@"&extra=%@",value];
+        CHECK("runtime/formatted-extra-invalid-stays-invalid",![profiles isSupportedConfigTupleForURI:bad] && ![profiles runtimeURI:bad useXmux:NO error:NULL]);
+    }
+    for (NSString *field in @[@"path=%2Fa%0Ab",@"sni=a%0Db",@"fp=ios%09",@"ex%09tra=%7B%7D"])
+        CHECK("runtime/formatted-extra-does-not-relax-other-fields",![profiles isSupportedConfigTupleForURI:[base stringByAppendingFormat:@"&%@",field]]);
+}
+
 static void cases(void) {
+    formattedExtra();
     unchanged(base);
     unchanged([base stringByAppendingString:@"&extra=%7B%22headers%22%3A%7B%22xmux%22%3A%22keep%22%7D%7D#%F0%9F%87%B3%F0%9F%87%B1"]);
     for (NSString *transport in @[@"tcp",@"ws",@"grpc"]) unchanged([NSString stringWithFormat:@"trojan://A+%%3A%%40%%25@example.test:443?type=%@&extra=%%7B%%22xmux%%22%%3A%%7B%%7D%%7D",transport]);
