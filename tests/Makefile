@@ -348,11 +348,15 @@ $(HOST_BUILD_DIR)/main_header_configure.inc: ../app/main_layout.m extract_ui_met
 $(HOST_BUILD_DIR)/test_main_headers: test_main_headers.m $(HOST_BUILD_DIR)/main_header_description.inc $(HOST_BUILD_DIR)/main_header_visible.inc $(HOST_BUILD_DIR)/main_header_inputs.inc $(HOST_BUILD_DIR)/main_header_configure.inc check.h $(filter-out $(HOST_BUILD_DIR)/test_app_logic.o,$(APP_OBJECTS))
 	$(HOST_CC) $(HOST_CPPFLAGS) $(HOST_OBJCFLAGS) $(HOST_CFLAGS) -I$(HOST_BUILD_DIR) $< $(filter-out $(HOST_BUILD_DIR)/test_app_logic.o,$(APP_OBJECTS)) -o $@ $(HOST_LIBS)
 
-$(HOST_BUILD_DIR)/main_phone_layout.inc: ../app/main_layout.m extract_ui_methods.py Makefile
+$(HOST_BUILD_DIR)/main_connection_layout.inc: ../app/main_layout.m extract_ui_methods.py Makefile
 	mkdir -p $(dir $@)
-	python3 extract_ui_methods.py $< $@ '- (void)updatePhoneConnectionLayout'
+	python3 extract_ui_methods.py $< $@ '- (void)updatePhoneConnectionLayout' '- (void)updatePadConnectionLayout'
 
-$(HOST_BUILD_DIR)/test_main_layout: test_main_layout.m $(HOST_BUILD_DIR)/main_phone_layout.inc ../common/main_geometry.c check.h
+$(HOST_BUILD_DIR)/main_screen_layout.inc: ../app/main_screen.m extract_ui_methods.py Makefile
+	mkdir -p $(dir $@)
+	python3 extract_ui_methods.py $< $@ '- (void)viewDidLayoutSubviews'
+
+$(HOST_BUILD_DIR)/test_main_layout: test_main_layout.m $(HOST_BUILD_DIR)/main_connection_layout.inc $(HOST_BUILD_DIR)/main_screen_layout.inc ../common/main_geometry.c check.h
 	$(HOST_CC) $(HOST_CPPFLAGS) $(HOST_OBJCFLAGS) $(HOST_CFLAGS) -I$(HOST_BUILD_DIR) $< ../common/main_geometry.c -o $@ $(HOST_LIBS)
 
 $(HOST_BUILD_DIR)/store_encrypt.inc: ../common/foundation_logic.m extract_ui_methods.py Makefile

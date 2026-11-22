@@ -317,7 +317,7 @@
 
 - (void)viewDidLayoutSubviews {
     [super viewDidLayoutSubviews];
-    if (![self isMainUIActive]) return;
+    if (!_mainScreenVisible) return;
     if (IsPadDevice()) {
         [self updatePadConnectionLayout];
     } else {

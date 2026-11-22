@@ -17,7 +17,6 @@ static CGFloat VCMainStatusBarInset(void) { return statusInset; }
 static CGRect CGRectInset(CGRect r, CGFloat x, CGFloat y) {
     return CGRectMake(r.origin.x + x, r.origin.y + y, r.size.width - 2*x, r.size.height - 2*y);
 }
-static BOOL CGSizeEqualToSize(CGSize a, CGSize b) { return a.width == b.width && a.height == b.height; }
 
 @interface UIFont : NSObject { CGFloat _pointSize; }
 @property(readonly) CGFloat pointSize;
@@ -59,12 +58,14 @@ static BOOL CGSizeEqualToSize(CGSize a, CGSize b) { return a.width == b.width &&
 @property NSInteger textAlignment;
 @property CGPoint contentOffset;
 @property UIEdgeInsets scrollIndicatorInsets;
+- (UIView *)backgroundView;
 @end
 @implementation UIView
 @synthesize frame = _frame, layer = _layer, font = _font, alpha = _alpha;
 @synthesize textAlignment = _textAlignment, contentOffset = _contentOffset, scrollIndicatorInsets = _scrollIndicatorInsets;
 - (id)init { if ((self = [super init])) _layer = [[CALayer alloc] init]; return self; }
 - (CGRect)bounds { return CGRectMake(0, 0, _frame.size.width, _frame.size.height); }
+- (UIView *)backgroundView { return nil; }
 - (void)dealloc { [_layer release]; [_font release]; [super dealloc]; }
 @end
 
@@ -93,12 +94,23 @@ static void VCSetLabelMinimumScaleFactor(UIView *label, CGFloat value) { (void)l
 #define VC_PERF_SCOPE(...) ((void)0)
 #define VC_PERF_COUNT(...) ((void)0)
 
-@interface MainVC : NSObject {
+@interface UIViewController : NSObject
+- (void)viewDidLayoutSubviews;
+@end
+@implementation UIViewController
+- (void)viewDidLayoutSubviews {}
+@end
+
+@interface MainVC : UIViewController {
 @public
     UIView *_view, *_tableView, *_connectBtn, *_uptimeLabel, *_statusLabel, *_mainSwitchView;
     UIView *_connectGlowView, *_compactConnectGlowView, *_connectPowerIcon, *_connectButtonTitle;
     UIView *_connectionStateLabel, *_selectionLabel, *_logSelector, *_logView;
     BOOL _mainSectionTransitionInProgress, _showingTerminal, _phoneConnectionCompact;
+    BOOL _mainScreenVisible, _applicationActive;
+    NSArray *_configs, *_subscriptions;
+    CGRect _mainEmptyStateViewport;
+    CGFloat _switcherLayoutWidth;
     VCPhoneLayoutState _phoneLayoutState;
 }
 @property(readonly) UIView *view;
@@ -122,7 +134,13 @@ static void VCSetLabelMinimumScaleFactor(UIView *label, CGFloat value) { (void)l
     for (unsigned i = 0; i < sizeof(views)/sizeof(views[0]); i++) [views[i] release];
     [super dealloc];
 }
-#include "main_phone_layout.inc"
+- (BOOL)isMainUIActive { return _mainScreenVisible && _applicationActive; }
+- (void)updatePhoneConnectionScrollInsets {}
+- (CGRect)mainEmptyStateViewport { return CGRectMake(0, 0, 0, 0); }
+- (void)updateMainEmptyState {}
+- (void)updateMainSwitcherView:(UIView *)header { _switcherLayoutWidth = header.bounds.size.width; }
+#include "main_connection_layout.inc"
+#include "main_screen_layout.inc"
 @end
 
 static void checkGeometry(MainVC *controller, CGFloat progress) {
@@ -130,6 +148,16 @@ static void checkGeometry(MainVC *controller, CGFloat progress) {
     CGRect button = controller->_connectBtn.frame, switcher = controller->_mainSwitchView.frame;
     CHECK("layout/actual-button-geometry", memcmp(&button, &expected.button, sizeof(CGRect)) == 0);
     CHECK("layout/actual-switcher-geometry", memcmp(&switcher, &expected.switcher, sizeof(CGRect)) == 0);
+}
+
+static void checkPadGeometry(MainVC *controller, CGFloat width, CGFloat height) {
+    VCMainGeometry expected = VCPadGeometry(width, height, statusInset);
+    CHECK("layout/ipad-rotation-centers-glow", CGRectEqualToRect(controller->_connectGlowView.frame,
+        CGRectInset(expected.button, -18, -18)));
+    CHECK("layout/ipad-rotation-resizes-both-tabs", CGRectEqualToRect(controller->_mainSwitchView.frame,
+        expected.switcher) && controller->_switcherLayoutWidth == width - 20);
+    CHECK("layout/ipad-rotation-keeps-summary-width", CGRectEqualToRect(controller->_connectionStateLabel.frame,
+        expected.state) && CGRectEqualToRect(controller->_selectionLabel.frame, expected.selection));
 }
 
 int main(void) {
@@ -216,6 +244,28 @@ int main(void) {
     CHECK("layout/completed-view-refreshes-late-log-controls", terminal->_logView.frame.origin.y == 318 &&
         terminal->_logSelector.frame.origin.y == 288);
     [terminal release];
+    pad = YES;
+    controller->_mainScreenVisible = YES;
+    controller->_applicationActive = YES;
+    controller->_view.frame = CGRectMake(0, 0, 768, 1024);
+    [controller viewDidLayoutSubviews];
+    checkPadGeometry(controller, 768, 1024);
+    for (unsigned rotation = 0; rotation < 2; rotation++) {
+        CGFloat width = rotation == 0 ? 1024 : 768, height = rotation == 0 ? 768 : 1024;
+        controller->_applicationActive = NO;
+        controller->_view.frame = CGRectMake(0, 0, width, height);
+        [controller viewDidLayoutSubviews];
+        controller->_applicationActive = YES;
+        checkPadGeometry(controller, width, height);
+    }
+    controller->_view.frame = CGRectMake(0, 0, 1024, 768);
+    [controller viewDidLayoutSubviews];
+    checkPadGeometry(controller, 1024, 768);
+    controller->_mainScreenVisible = NO;
+    controller->_view.frame = CGRectMake(0, 0, 768, 1024);
+    before = transactions;
+    [controller viewDidLayoutSubviews];
+    CHECK("layout/hidden-main-screen-skips-layout", transactions == before);
     [controller release]; [pool drain];
     FINISH("main layout callbacks"); return 0;
 }
