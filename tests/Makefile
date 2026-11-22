@@ -21,6 +21,7 @@ APP_OBJECTS += $(HOST_BUILD_DIR)/core-parser/sockopt.o
 APP_OBJECTS += $(HOST_BUILD_DIR)/core-parser/fingerprint.o
 HOST_TESTS := $(HOST_BUILD_DIR)/test_app_logic $(HOST_BUILD_DIR)/test_legacy_loopback_host $(HOST_BUILD_DIR)/test_legacy_dns_host
 HOST_TESTS += $(HOST_BUILD_DIR)/test_main_geometry $(HOST_BUILD_DIR)/test_daemon_policy
+HOST_TESTS += $(HOST_BUILD_DIR)/test_daemon_pf
 HOST_TESTS += $(HOST_BUILD_DIR)/test_control_auth $(HOST_BUILD_DIR)/test_socket_peer
 HOST_TESTS += $(HOST_BUILD_DIR)/test_system_proxy
 HOST_TESTS += $(HOST_BUILD_DIR)/test_qr $(HOST_BUILD_DIR)/test_import_formats
@@ -80,6 +81,7 @@ test: requirements $(HOST_TESTS)
 	$(HOST_BUILD_DIR)/test_legacy_dns_host
 	$(HOST_BUILD_DIR)/test_main_geometry
 	$(HOST_BUILD_DIR)/test_daemon_policy
+	$(HOST_BUILD_DIR)/test_daemon_pf
 	$(HOST_BUILD_DIR)/test_control_auth
 	$(HOST_BUILD_DIR)/test_socket_peer
 	$(HOST_BUILD_DIR)/test_system_proxy
@@ -408,10 +410,10 @@ $(HOST_BUILD_DIR)/test_main_lifecycle: test_main_lifecycle.m $(HOST_BUILD_DIR)/m
 
 $(HOST_BUILD_DIR)/main_status.inc: ../app/main_connection.m extract_ui_methods.py Makefile
 	@mkdir -p $(dir $@)
-	python3 extract_ui_methods.py $< $@ '- (void)queryInitialStatus'
+	python3 extract_ui_methods.py $< $@ '- (void)queryInitialStatus' '- (BOOL)showFirewallConflictForResponse:'
 
-$(HOST_BUILD_DIR)/test_main_status: test_main_status.m $(HOST_BUILD_DIR)/main_status.inc $(HOST_BUILD_DIR)/common/connection_logic.o check.h support/objc/blocks_runtime.h ../common/connection_logic.h
-	$(HOST_CC) $(HOST_CPPFLAGS) $(HOST_OBJCFLAGS) $(HOST_CFLAGS) -fblocks -I$(HOST_BUILD_DIR) $< $(HOST_BUILD_DIR)/common/connection_logic.o -o $@ -L$(ROOT)/../toolchains/ios6/lib -Wl,-rpath,$(ROOT)/../toolchains/ios6/lib -lBlocksRuntime $(HOST_LIBS)
+$(HOST_BUILD_DIR)/test_main_status: test_main_status.m $(HOST_BUILD_DIR)/main_status.inc $(HOST_BUILD_DIR)/common/connection_logic.o check.h support/objc/blocks_runtime.h ../common/connection_logic.h ../daemon/vpnctld_protocol.h
+	$(HOST_CC) $(HOST_CPPFLAGS) $(HOST_OBJCFLAGS) $(HOST_CFLAGS) -fblocks -I$(HOST_BUILD_DIR) $< $(HOST_BUILD_DIR)/common/connection_logic.o -o $@ -L$(ROOT)/../toolchains/ios6/lib -Wl,-rpath,$(ROOT)/../toolchains/ios6/lib -lBlocksRuntime $(HOST_LIBS) $(SANITIZE)
 
 $(HOST_BUILD_DIR)/app/proxy_probe.o: ../app/proxy_probe.m ../app/proxy_probe.h ../common/connection_logic.h | requirements
 	mkdir -p $(dir $@)
@@ -439,6 +441,21 @@ $(HOST_BUILD_DIR)/test_flags: test_flags.c ../common/flag_logic.c ../common/flag
 $(HOST_BUILD_DIR)/test_daemon_policy: test_daemon_policy.c ../common/daemon_policy.c ../common/daemon_policy.h check.h | requirements
 	mkdir -p $(dir $@)
 	$(HOST_CC) $(HOST_CPPFLAGS) $(HOST_CFLAGS) test_daemon_policy.c ../common/daemon_policy.c -o $@ -lcrypto $(SANITIZE)
+
+$(HOST_BUILD_DIR)/daemon_pf_state.inc: ../daemon/vpnctld.c Makefile
+	mkdir -p $(dir $@)
+	sed -n '/^typedef enum {$$/,/^static vpn_state_t g;$$/{p; /^static vpn_state_t g;$$/q;}' $< > $@
+
+$(HOST_BUILD_DIR)/daemon_pf_calls.inc: ../daemon/vpnctld.c extract_ui_methods.py Makefile
+	mkdir -p $(dir $@)
+	python3 extract_ui_methods.py $< $@ 'static pf_enabled_state_t pf_enabled_state_query(' 'static pf_enabled_state_t pf_enabled_state(' 'static int flush_pf_states(' 'static pf_root_state_t pf_root_state_query(' 'static pf_root_state_t pf_root_state(' 'static pf_root_state_t pf_root_state_quiet(' 'static int check_pf_for_connection(' 'static int install_pf_dispatch(' 'static int remove_owned_pf_dispatch(' 'static int apply_pf_rules(' 'static int flush_owned_pf_states(' 'static int restore_owned_pf_engine(' 'static int clear_pf_rules(' 'static int recover_stale_pf_state(' 'static int disconnect_all(void) {' 'static int try_connect_pf(' 'static void finish_failed_protected_connect(' 'static void report_pf_connect_failure(' 'static int connect_all(' 'static const char *pf_routing_state_name('
+
+$(HOST_BUILD_DIR)/daemon_pf_capture.inc: ../daemon/vpnctld.c extract_ui_methods.py Makefile
+	mkdir -p $(dir $@)
+	python3 extract_ui_methods.py $< $@ 'static int run_argv_capture_impl('
+
+$(HOST_BUILD_DIR)/test_daemon_pf: test_daemon_pf.c $(HOST_BUILD_DIR)/daemon_pf_state.inc $(HOST_BUILD_DIR)/daemon_pf_calls.inc $(HOST_BUILD_DIR)/daemon_pf_capture.inc ../common/daemon_policy.c ../common/helper_monitor.c ../daemon/vpnctld_protocol.h check.h | requirements
+	$(HOST_CC) $(HOST_CPPFLAGS) $(HOST_CFLAGS) -I$(HOST_BUILD_DIR) test_daemon_pf.c ../common/daemon_policy.c ../common/helper_monitor.c -o $@ $(SANITIZE)
 
 $(HOST_BUILD_DIR)/test_control_auth: test_control_auth.c ../common/control_auth.c ../common/control_auth.h check.h | requirements
 	mkdir -p $(dir $@)

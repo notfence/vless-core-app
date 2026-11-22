@@ -246,6 +246,36 @@ int pf_dispatch_rules_only(const char *rules, int nat_rules) {
     return nat_rules ? nat_count == 1 && rdr_count == 1 : filter_count == 1;
 }
 
+static int pf_has_dispatch(const char *rules, const char *dispatch) {
+    size_t length = strlen(dispatch);
+    for (const char *line = rules; line && *line; ) {
+        const char *end = strchr(line, '\n');
+        if (!end) end = line + strlen(line);
+        while (line < end && isspace((unsigned char)*line)) line++;
+        if ((size_t)(end - line) >= length &&
+            memcmp(line, dispatch, length) == 0 &&
+            (line + length == end || isspace((unsigned char)line[length]))) return 1;
+        line = *end ? end + 1 : NULL;
+    }
+    return 0;
+}
+
+pf_root_state_t pf_classify_root_rules(const char *nat_rules, const char *filter_rules) {
+    int nat = pf_has_dispatch(nat_rules, "nat-anchor \"vlesscore\"");
+    int rdr = pf_has_dispatch(nat_rules, "rdr-anchor \"vlesscore\"");
+    int filter = pf_has_dispatch(filter_rules, "anchor \"vlesscore\"");
+    if (nat && rdr && filter) {
+        return pf_dispatch_rules_only(nat_rules, 1) && pf_dispatch_rules_only(filter_rules, 0)
+            ? PF_ROOT_OWN_DISPATCH : PF_ROOT_SHARED_DISPATCH;
+    }
+    if (nat || rdr || filter) return PF_ROOT_PARTIAL_DISPATCH;
+    return text_has_nonspace(nat_rules) || text_has_nonspace(filter_rules) ? PF_ROOT_CONFLICT : PF_ROOT_EMPTY;
+}
+
+int pf_root_conflicts(pf_root_state_t state) {
+    return state == PF_ROOT_CONFLICT || state == PF_ROOT_PARTIAL_DISPATCH;
+}
+
 static int write_pf_bypass_table(FILE *fp, const char *server_ips, int bypass_lan) {
     if (fprintf(fp, "table <vlesscore_bypass> persist { 127.0.0.0/8, ") < 0) {
         return -1;

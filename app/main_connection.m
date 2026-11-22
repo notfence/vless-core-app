@@ -143,6 +143,22 @@
     [self refreshStatusText];
 }
 
+- (BOOL)showFirewallConflictForResponse:(NSString *)response explain:(BOOL)explain {
+    if (![response isEqualToString:@VC_PF_CONFLICT_REPLY]) return NO;
+    [self showStatus:@"Firewall rules conflict." ok:NO];
+    if (explain && [self isMainUIActive]) {
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wdeprecated-declarations"
+        UIAlertView *alert = [[[UIAlertView alloc] initWithTitle:@"Firewall rules conflict"
+                                                        message:@"Existing firewall rules prevent vless-core from connecting. These rules can remain loaded even when no other VPN is running."
+                                                       delegate:nil cancelButtonTitle:@"OK"
+                                              otherButtonTitles:nil] autorelease];
+        [alert show];
+#pragma clang diagnostic pop
+    }
+    return YES;
+}
+
 - (BOOL)isXHTTPTransportURI:(NSString *)uri {
     return [[VCProfiles() transportTypeFromURI:uri] isEqual:@"xhttp"];
 }
@@ -419,7 +435,9 @@
                 VCRecordAppEvent(@"connection", @"Configuration switch failed",
                                  [NSString stringWithFormat:@"stage=%@", stage]);
                 NSString *detail = routingSaved ? connectText : routingText;
-                [self showStatus:[NSString stringWithFormat:@"Reconnect failed (%@): %@", stage, detail] ok:NO];
+                if (!routingSaved || ![self showFirewallConflictForResponse:detail explain:NO]) {
+                    [self showStatus:[NSString stringWithFormat:@"Reconnect failed (%@): %@", stage, detail] ok:NO];
+                }
             }
 
             _reconnectInProgress = NO;
@@ -545,7 +563,9 @@
             } else {
                 VCRecordAppEvent(@"connection", disconnecting ? @"Disconnect failed" : @"Connection failed",
                                  disconnecting ? nil : @"stage=daemon_connect");
-                [self showStatus:text ok:NO];
+                if (disconnecting || ![self showFirewallConflictForResponse:text explain:YES]) {
+                    [self showStatus:text ok:NO];
+                }
             }
             [self updateConnectButton];
             [routingResponse release];

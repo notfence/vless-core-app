@@ -4,6 +4,7 @@ import json
 import io
 import os
 from pathlib import Path
+import re
 import subprocess
 import sys
 import tempfile
@@ -18,7 +19,9 @@ command = ["make", "-C", str(CORE / "tests"), "-j4", str(CORE_BUILD / "vless-cor
            f"HOST_BUILD_DIR={CORE_BUILD}", "HOST_CC=/usr/bin/clang", f"SANITIZE={os.environ.get('VC_TEST_SANITIZE', '')}"]
 subprocess.run(command, check=True, stdout=subprocess.DEVNULL)
 version = subprocess.run([str(CORE_BUILD / "vless-core-test"), "--version"], capture_output=True, text=True, timeout=5, check=True).stdout.strip()
-if not version.startswith("vless-core 2.0.1 (") or not version.endswith(")"):
+core_version = re.search(r'^#define VLESS_CORE_VERSION "([0-9]+\.[0-9]+\.[0-9]+)"$',
+                         (CORE / "src" / "main.c").read_text(), re.MULTILINE)
+if not core_version or not version.startswith(f"vless-core {core_version[1]} (") or not version.endswith(")"):
     raise AssertionError("unexpected current core version format")
 os.environ["TEST_BUILD_DIR"] = str(CORE_BUILD)
 os.environ["TEST_XRAY_BIN"] = str(APP.parent / "tools/xray-v26.6.27-linux-64/xray")

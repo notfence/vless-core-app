@@ -42,5 +42,15 @@ int ifname_is_safe(const char *ifname);
 int pf_interface_allowed(const char *ifname);
 int text_has_nonspace(const char *text);
 int pf_dispatch_rules_only(const char *rules, int nat_rules);
+typedef enum {
+    PF_ROOT_PARTIAL_DISPATCH = -3,
+    PF_ROOT_CONFLICT = -2,
+    PF_ROOT_ERROR = -1,
+    PF_ROOT_EMPTY = 0,
+    PF_ROOT_OWN_DISPATCH = 1,
+    PF_ROOT_SHARED_DISPATCH = 2,
+} pf_root_state_t;
+pf_root_state_t pf_classify_root_rules(const char *nat_rules, const char *filter_rules);
+int pf_root_conflicts(pf_root_state_t state);
 int vc_write_pf_conf(const char *path, int bypass_lan, const char *server_ips, char ifnames[][32], size_t if_count, int redir_port, int dns_port, pf_rule_mode_t mode);
 #endif

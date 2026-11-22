@@ -1,5 +1,6 @@
 #import <Foundation/Foundation.h>
 #import "../common/connection_logic.h"
+#include "../daemon/vpnctld_protocol.h"
 #ifdef __APPLE__
 #include <Block.h>
 #else
@@ -31,6 +32,23 @@ static void runOne(int queue) {
 static NSString *VCReadDaemonStatus(void) { requests++; return response; }
 static void VCRecordAppEvent(id category,id action,id detail) { (void)category; (void)action; (void)detail; events++; }
 
+static NSUInteger firewallAlerts;
+@interface UIAlertView : NSObject
+- (id)initWithTitle:(NSString *)title message:(NSString *)message delegate:(id)delegate
+    cancelButtonTitle:(NSString *)button otherButtonTitles:(NSString *)other, ...;
+- (void)show;
+@end
+@implementation UIAlertView
+- (id)initWithTitle:(NSString *)title message:(NSString *)message delegate:(id)delegate
+    cancelButtonTitle:(NSString *)button otherButtonTitles:(NSString *)other, ... {
+    CHECK("status/firewall-explains-inactive-vpn", [title isEqual:@"Firewall rules conflict"] &&
+          [message rangeOfString:@"even when no other VPN is running"].location != NSNotFound);
+    (void)delegate; (void)button; (void)other;
+    return [super init];
+}
+- (void)show { firewallAlerts++; }
+@end
+
 @interface MainVC : NSObject {
 @public
     BOOL _daemonStatusCheckInFlight,_didQueryInitialDaemonStatus,_connectionActionInProgress,_reconnectInProgress;
@@ -40,6 +58,7 @@ static void VCRecordAppEvent(id category,id action,id detail) { (void)category; 
     NSString *_pendingReconnectURI,*lastStatus;
 }
 - (void)queryInitialStatus;
+- (BOOL)showFirewallConflictForResponse:(NSString *)response explain:(BOOL)explain;
 @end
 @implementation MainVC
 - (id)init { if ((self=[super init])) active=YES; return self; }
@@ -97,6 +116,12 @@ int main(void) {
     CHECK("status/initial-failure-is-not-ready",!failed->_didQueryInitialDaemonStatus && !failed->lastOK && [failed->lastStatus isEqual:response]);
     response=@"OK disconnected\n"; query(failed);
     CHECK("status/initial-failure-recovers",failed->_didQueryInitialDaemonStatus && [failed->lastStatus isEqual:@"Ready"]);
+    CHECK("status/firewall-read-failure-not-conflict", ![vc showFirewallConflictForResponse:@VC_PF_QUERY_REPLY explain:YES] && !firewallAlerts);
+    CHECK("status/firewall-reconnect-only-status", [vc showFirewallConflictForResponse:@VC_PF_CONFLICT_REPLY explain:NO] &&
+          [vc->lastStatus isEqual:@"Firewall rules conflict."] && !vc->lastOK && !firewallAlerts);
+    CHECK("status/firewall-manual-connect-shows-explanation", [vc showFirewallConflictForResponse:@VC_PF_CONFLICT_REPLY explain:YES] && firewallAlerts == 1);
+    vc->active=NO;
+    CHECK("status/firewall-hidden-main-no-popup", [vc showFirewallConflictForResponse:@VC_PF_CONFLICT_REPLY explain:YES] && firewallAlerts == 1);
     CHECK("status/queues-drained",!queuedCount[0] && !queuedCount[1]);
     FINISH("main status refresh"); [pool drain]; return 0;
 }

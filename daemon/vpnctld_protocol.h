@@ -12,5 +12,8 @@
 #define VC_CORE_EXECUTABLE_NAME "vless-core-darwin-armv7"
 #endif
 #define VC_REDSOCKS_EXECUTABLE_PATH "/usr/bin/redsocks-vless-core"
+#define VC_PF_CONFLICT_REPLY "ERR Existing firewall rules conflict with vless-core."
+#define VC_PF_QUERY_REPLY "ERR Could not read firewall status or rules."
+#define VC_PF_APPLY_REPLY "ERR Could not apply vless-core firewall rules."
 
 #endif

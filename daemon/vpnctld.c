@@ -132,13 +132,11 @@ typedef enum {
     PF_ENABLED = 1,
 } pf_enabled_state_t;
 
-typedef enum {
-    PF_ROOT_ERROR = -1,
-    PF_ROOT_CONFLICT = -2,
-    PF_ROOT_EMPTY = 0,
-    PF_ROOT_OWN_DISPATCH = 1,
-    PF_ROOT_SHARED_DISPATCH = 2,
-} pf_root_state_t;
+enum {
+    PF_CONNECT_CONFLICT = -100,
+    PF_CONNECT_QUERY_ERROR = -101,
+    PF_CONNECT_APPLY_ERROR = -102,
+};
 
 typedef struct {
     char ip[INET_ADDRSTRLEN];
@@ -156,8 +154,12 @@ typedef struct {
     pid_t redsocks_log_relay_pid;
     pid_t dns_pid;
     vpn_mode_t mode;
-    int pf_enabled_before;
+    int pf_state_saved;
+    int pf_enable_pending;
     int pf_dispatch_installed;
+    int pf_anchor_touched;
+    int pf_flush_pending;
+    int pf_cleanup_pending;
     char server_ip[64];
     char server_ips[512];
     char download_ips[512];
@@ -185,6 +187,7 @@ static volatile sig_atomic_t g_terminate = 0;
 static int g_listen_fd = -1;
 static int g_instance_lock_fd = -1;
 static int g_vpn_icon_publisher_logged = 0;
+static int g_pf_recovery_pending = 0;
 static uid_t g_helper_uid = (uid_t)-1;
 static gid_t g_helper_gid = (gid_t)-1;
 
@@ -695,7 +698,7 @@ static int wait_spawned_quiet(pid_t pid) {
     return rc == pid && WIFEXITED(status) ? WEXITSTATUS(status) : -1;
 }
 
-static int run_argv_capture_impl(char *const argv[], char *out, size_t out_cap, int verbose) {
+static int run_argv_capture_impl(char *const argv[], char *out, size_t out_cap, int verbose, int complete) {
     if (!argv || !argv[0] || !out || out_cap == 0) return -1;
     out[0] = '\0';
 
@@ -726,6 +729,7 @@ static int run_argv_capture_impl(char *const argv[], char *out, size_t out_cap, 
     }
 
     size_t used = 0;
+    int incomplete = 0;
     for (;;) {
         char buf[512];
         ssize_t rd = read(pipefd[0], buf, sizeof(buf));
@@ -742,6 +746,9 @@ static int run_argv_capture_impl(char *const argv[], char *out, size_t out_cap, 
         }
         if (rd == 0) break;
 
+        if (complete && ((size_t)rd > out_cap - used - 1 || memchr(buf, '\0', (size_t)rd))) {
+            incomplete = 1;
+        }
         if (used + 1 < out_cap) {
             size_t copy = (size_t)rd;
             if (copy > out_cap - used - 1) {
@@ -754,15 +761,16 @@ static int run_argv_capture_impl(char *const argv[], char *out, size_t out_cap, 
     }
     close(pipefd[0]);
 
-    return verbose ? wait_spawned(pid, "run") : wait_spawned_quiet(pid);
+    int status = verbose ? wait_spawned(pid, "run") : wait_spawned_quiet(pid);
+    if (incomplete) {
+        if (verbose) log_warning("run: invalid or oversized PF query output");
+        return -1;
+    }
+    return status;
 }
 
 static int run_argv_capture(char *const argv[], char *out, size_t out_cap) {
-    return run_argv_capture_impl(argv, out, out_cap, 1);
-}
-
-static int run_argv_capture_quiet(char *const argv[], char *out, size_t out_cap) {
-    return run_argv_capture_impl(argv, out, out_cap, 0);
+    return run_argv_capture_impl(argv, out, out_cap, 1, 0);
 }
 
 static int can_exec(const char *path) {
@@ -2280,9 +2288,7 @@ static pf_enabled_state_t pf_enabled_state_query(const char *pfctl, int verbose)
         "info",
         NULL,
     };
-    int rc = verbose
-        ? run_argv_capture(argv, output, sizeof(output))
-        : run_argv_capture_quiet(argv, output, sizeof(output));
+    int rc = run_argv_capture_impl(argv, output, sizeof(output), verbose, 1);
     if (rc != 0) {
         if (verbose) log_warning("pf status query failed");
         return PF_ENABLED_ERROR;
@@ -2334,41 +2340,20 @@ static int flush_pf_states(void) {
     return -1;
 }
 
-
-
-
-
 static pf_root_state_t pf_root_state_query(const char *pfctl, int verbose) {
     char nat_rules[16384];
     char filter_rules[16384];
     char *nat_argv[] = { (char *)pfctl, "-sn", NULL };
     char *filter_argv[] = { (char *)pfctl, "-sr", NULL };
-    int nat_rc = verbose
-        ? run_argv_capture(nat_argv, nat_rules, sizeof(nat_rules))
-        : run_argv_capture_quiet(nat_argv, nat_rules, sizeof(nat_rules));
-    int filter_rc = verbose
-        ? run_argv_capture(filter_argv, filter_rules, sizeof(filter_rules))
-        : run_argv_capture_quiet(filter_argv, filter_rules, sizeof(filter_rules));
-    if (nat_rc != 0 || filter_rc != 0) {
+    if (run_argv_capture_impl(nat_argv, nat_rules, sizeof(nat_rules), verbose, 1) != 0 ||
+        run_argv_capture_impl(filter_argv, filter_rules, sizeof(filter_rules), verbose, 1) != 0) {
         return PF_ROOT_ERROR;
     }
-
-    int has_nat = contains_ci(nat_rules, "nat-anchor \"vlesscore\"");
-    int has_rdr = contains_ci(nat_rules, "rdr-anchor \"vlesscore\"");
-    int has_filter = contains_ci(filter_rules, "anchor \"vlesscore\"");
-    if (has_nat && has_rdr && has_filter) {
-        if (pf_dispatch_rules_only(nat_rules, 1) &&
-            pf_dispatch_rules_only(filter_rules, 0)) {
-            return PF_ROOT_OWN_DISPATCH;
-        }
-        return PF_ROOT_SHARED_DISPATCH;
+    pf_root_state_t state = pf_classify_root_rules(nat_rules, filter_rules);
+    if (verbose && pf_root_conflicts(state)) {
+        log_warning("pf root rules exist without vlesscore anchor; refusing to replace them");
     }
-
-    if (text_has_nonspace(nat_rules) || text_has_nonspace(filter_rules)) {
-        if (verbose) log_warning("pf root rules exist without vlesscore anchor; refusing to replace them");
-        return PF_ROOT_CONFLICT;
-    }
-    return PF_ROOT_EMPTY;
+    return state;
 }
 
 static pf_root_state_t pf_root_state(const char *pfctl) {
@@ -2377,6 +2362,18 @@ static pf_root_state_t pf_root_state(const char *pfctl) {
 
 static pf_root_state_t pf_root_state_quiet(const char *pfctl) {
     return pf_root_state_query(pfctl, 0);
+}
+
+static int check_pf_for_connection(const char *pfctl, pf_enabled_state_t *enabled, pf_root_state_t *root) {
+    if (!pfctl) {
+        log_error("pfctl binary not found");
+        return PF_CONNECT_QUERY_ERROR;
+    }
+    *enabled = pf_enabled_state(pfctl);
+    if (*enabled == PF_ENABLED_ERROR) return PF_CONNECT_QUERY_ERROR;
+    *root = pf_root_state(pfctl);
+    if (*root == PF_ROOT_ERROR) return PF_CONNECT_QUERY_ERROR;
+    return pf_root_conflicts(*root) ? PF_CONNECT_CONFLICT : 0;
 }
 
 static int install_pf_dispatch(const char *pfctl) {
@@ -2397,6 +2394,10 @@ static int install_pf_dispatch(const char *pfctl) {
         (char *)path,
         NULL,
     };
+    pf_root_state_t root = pf_root_state(pfctl);
+    if (root == PF_ROOT_ERROR) return PF_CONNECT_QUERY_ERROR;
+    if (root != PF_ROOT_EMPTY) return PF_CONNECT_CONFLICT;
+    g.pf_dispatch_installed = 1;
     if (run_argv(load_argv) != 0) {
         log_error("pf failed to install vlesscore anchor dispatch");
         return -1;
@@ -2429,31 +2430,11 @@ static int remove_owned_pf_dispatch(const char *pfctl) {
 
 static int apply_pf_rules(const char *server_ips, int redir_port, int dns_port) {
     const char *pfctl = find_pfctl_bin();
-    if (!pfctl) {
-        log_error("pfctl binary not found");
-        return -1;
-    }
-
-    pf_enabled_state_t enabled_state = pf_enabled_state(pfctl);
-    if (enabled_state == PF_ENABLED_ERROR) return -8;
-
-    pf_root_state_t root_state = pf_root_state(pfctl);
-    if (root_state == PF_ROOT_ERROR || root_state == PF_ROOT_CONFLICT) return -7;
-
-    ensure_pf_os_file();
+    pf_enabled_state_t enabled_state;
+    pf_root_state_t root_state;
+    int check = check_pf_for_connection(pfctl, &enabled_state, &root_state);
+    if (check != 0) return check;
     int was_enabled = enabled_state == PF_ENABLED;
-    g.pf_enabled_before = was_enabled;
-    g.pf_dispatch_installed =
-        root_state == PF_ROOT_EMPTY || root_state == PF_ROOT_OWN_DISPATCH;
-    if (write_pf_previous_state(g.pf_enabled_before, g.pf_dispatch_installed) != 0) {
-        log_error("failed to persist previous PF state");
-        return -1;
-    }
-    if (root_state == PF_ROOT_EMPTY && install_pf_dispatch(pfctl) != 0) return -7;
-
-    if (was_enabled) {
-        log_msg("pf already enabled; will reload rules");
-    }
 
     char ifnames[8][32];
     memset(ifnames, 0, sizeof(ifnames));
@@ -2473,22 +2454,27 @@ static int apply_pf_rules(const char *server_ips, int redir_port, int dns_port) 
     }
     log_msg("pf target interfaces: %s", if_list);
 
-    int enabled_now = 0;
-
-    if (was_enabled) {
-        enabled_now = 1;
-    } else {
+    ensure_pf_os_file();
+    g.pf_state_saved = 1;
+    if (write_pf_previous_state(was_enabled, root_state != PF_ROOT_SHARED_DISPATCH) != 0) {
+        log_error("failed to persist previous PF state");
+        return -1;
+    }
+    if (root_state == PF_ROOT_EMPTY) {
+        int installed = install_pf_dispatch(pfctl);
+        if (installed != 0) return installed == -1 ? -7 : installed;
+    }
+    if (!was_enabled) {
         char *enable_argv[] = {
             (char *)pfctl,
             "-q",
             "-e",
             NULL,
         };
+        g.pf_enable_pending = 1;
         (void)run_argv(enable_argv);
         pf_enabled_state_t state_after_enable = pf_enabled_state(pfctl);
-        if (state_after_enable == PF_ENABLED) {
-            enabled_now = 1;
-        } else if (state_after_enable == PF_DISABLED) {
+        if (state_after_enable == PF_DISABLED) {
             char *enable_old_argv[] = {
                 (char *)pfctl,
                 "-q",
@@ -2496,14 +2482,12 @@ static int apply_pf_rules(const char *server_ips, int redir_port, int dns_port) 
                 NULL,
             };
             (void)run_argv(enable_old_argv);
-            if (pf_enabled_state(pfctl) == PF_ENABLED) {
-                enabled_now = 1;
-            }
+            state_after_enable = pf_enabled_state(pfctl);
         }
-    }
-
-    if (!enabled_now) {
-        return -5;
+        if (state_after_enable != PF_ENABLED) {
+            if (state_after_enable == PF_DISABLED) g.pf_enable_pending = 0;
+            return -5;
+        }
     }
 
     const pf_rule_mode_t modes_default[] = {
@@ -2556,7 +2540,16 @@ static int apply_pf_rules(const char *server_ips, int redir_port, int dns_port) 
             "/var/run/vlesscore-pf.conf",
             NULL,
         };
+        g.pf_anchor_touched = 1;
         if (run_argv(load_argv) == 0) {
+            g.pf_flush_pending = 1;
+            g.pf_dispatch_installed = root_state != PF_ROOT_SHARED_DISPATCH;
+            pf_root_state_t current = pf_root_state(pfctl);
+            if (current == PF_ROOT_ERROR) return PF_CONNECT_QUERY_ERROR;
+            if (current != root_state &&
+                !(root_state == PF_ROOT_EMPTY && current == PF_ROOT_OWN_DISPATCH)) {
+                return PF_CONNECT_CONFLICT;
+            }
             log_msg("pf rules loaded mode=%s", pf_rule_mode_name(mode));
             (void)flush_pf_states();
             return 0;
@@ -2566,56 +2559,53 @@ static int apply_pf_rules(const char *server_ips, int redir_port, int dns_port) 
     return -4;
 }
 
-static int clear_pf_rules(void) {
-    const char *pfctl = find_pfctl_bin();
-    if (!pfctl) return -1;
-    int result = 0;
-    int legacy = vc_legacy_loopback_required();
+static int flush_owned_pf_states(const char *pfctl) {
+    if (!g.pf_flush_pending) return 0;
+    pf_root_state_t root = pf_root_state_quiet(pfctl);
+    if (root == PF_ROOT_ERROR) return -1;
+    if (root == PF_ROOT_OWN_DISPATCH && flush_pf_states() != 0) return -1;
+    g.pf_flush_pending = 0;
+    return 0;
+}
 
-    char *empty_argv[] = {
-        (char *)pfctl,
-        "-q",
-        "-a",
-        "vlesscore",
-        "-f",
-        "/dev/null",
-        NULL,
-    };
-    if (run_argv(empty_argv) != 0) result = -1;
-    if (legacy && flush_pf_states() != 0) result = -1;
-
-    char *flush_tables_argv[] = {
-        (char *)pfctl,
-        "-q",
-        "-a",
-        "vlesscore",
-        "-F",
-        "Tables",
-        NULL,
-    };
-    if (run_argv(flush_tables_argv) != 0) result = -1;
-
-    if (g.pf_dispatch_installed && remove_owned_pf_dispatch(pfctl) != 0) result = -1;
-
-    if (!legacy && flush_pf_states() != 0) result = -1;
-
-    if (!g.pf_enabled_before) {
-        char *disable_argv[] = {
-            (char *)pfctl,
-            "-q",
-            "-d",
-            NULL,
-        };
-        if (run_argv(disable_argv) != 0 && pf_enabled_state(pfctl) != PF_DISABLED) {
-            result = -1;
+static int restore_owned_pf_engine(const char *pfctl) {
+    if (!g.pf_enable_pending) return 0;
+    pf_root_state_t root = pf_root_state_quiet(pfctl);
+    if (root == PF_ROOT_ERROR) return -1;
+    if (root == PF_ROOT_OWN_DISPATCH) {
+        pf_enabled_state_t enabled = pf_enabled_state(pfctl);
+        if (enabled == PF_ENABLED_ERROR) return -1;
+        if (enabled == PF_ENABLED) {
+            char *argv[] = {(char *)pfctl, "-q", "-d", NULL};
+            (void)run_argv(argv);
+            if (pf_enabled_state(pfctl) != PF_DISABLED) return -1;
         }
     }
+    g.pf_enable_pending = 0;
+    return 0;
+}
 
-    if (result == 0) {
+static int clear_pf_rules(void) {
+    if (!g.pf_state_saved) return 0;
+    if (g.pf_anchor_touched || g.pf_dispatch_installed || g.pf_flush_pending || g.pf_enable_pending) {
+        const char *pfctl = find_pfctl_bin();
+        if (!pfctl || pf_root_state_quiet(pfctl) == PF_ROOT_ERROR) return -1;
+        int legacy = vc_legacy_loopback_required();
+        if (g.pf_anchor_touched) {
+            char *empty_argv[] = {(char *)pfctl, "-q", "-a", "vlesscore", "-f", "/dev/null", NULL};
+            if (run_argv(empty_argv) != 0) return -1;
+            if (legacy && flush_owned_pf_states(pfctl) != 0) return -1;
+            char *tables_argv[] = {(char *)pfctl, "-q", "-a", "vlesscore", "-F", "Tables", NULL};
+            if (run_argv(tables_argv) != 0) return -1;
+            g.pf_anchor_touched = 0;
+        }
+        if (flush_owned_pf_states(pfctl) != 0 || restore_owned_pf_engine(pfctl) != 0) return -1;
+        if (g.pf_dispatch_installed && remove_owned_pf_dispatch(pfctl) != 0) return -1;
         g.pf_dispatch_installed = 0;
-        if (remove_pf_previous_state() != 0) result = -1;
     }
-    return result;
+    if (remove_pf_previous_state() != 0) return -1;
+    g.pf_state_saved = 0;
+    return 0;
 }
 
 static int recover_stale_pf_state(void) {
@@ -2628,48 +2618,24 @@ static int recover_stale_pf_state(void) {
     int state_result = read_pf_previous_state(&was_enabled, &dispatch_installed);
     const char *pfctl = find_pfctl_bin();
     pf_root_state_t root_state = pfctl ? pf_root_state(pfctl) : PF_ROOT_ERROR;
-    int stale_dispatch_present =
-        root_state == PF_ROOT_OWN_DISPATCH || root_state == PF_ROOT_SHARED_DISPATCH;
-    if (vc_legacy_loopback_required() && state_result == 0 && !was_enabled &&
-        root_state == PF_ROOT_OWN_DISPATCH) {
-        char *disable_argv[] = {(char *)pfctl, "-q", "-d", NULL};
-        (void)run_argv(disable_argv);
-        if (pf_enabled_state(pfctl) != PF_DISABLED) return -1;
-        log_msg("iOS 5: disabled owned stale PF before recovery");
-    }
+    if (root_state == PF_ROOT_ERROR) return state_result == 1 ? 0 : 1;
+    int owned = root_state == PF_ROOT_OWN_DISPATCH;
+    int attached = owned || root_state == PF_ROOT_SHARED_DISPATCH ||
+        (root_state == PF_ROOT_PARTIAL_DISPATCH && state_result == 0);
+    if (!attached && state_result == 1) return 0;
 
-    if (state_result == 1) {
-        if (!stale_dispatch_present) return 0;
-        g.pf_enabled_before = 1;
-        g.pf_dispatch_installed = root_state == PF_ROOT_OWN_DISPATCH;
-        log_warning("recovering orphaned PF dispatch without state file");
-        if (clear_pf_rules() != 0) return -1;
-        restart_system_dns_resolver();
-        return 0;
-    }
-    if (state_result != 0) {
-        log_warning("invalid PF state file; recovering conservatively");
-        g.pf_enabled_before = 1;
-        g.pf_dispatch_installed = root_state == PF_ROOT_OWN_DISPATCH;
-        if (stale_dispatch_present && clear_pf_rules() != 0) return -1;
-        if (!stale_dispatch_present && remove_pf_previous_state() != 0) return -1;
-        if (stale_dispatch_present) restart_system_dns_resolver();
-        return 0;
-    }
-
-    g.pf_enabled_before = was_enabled;
-    if (dispatch_installed < 0) {
-        dispatch_installed = root_state == PF_ROOT_OWN_DISPATCH;
-    }
-    g.pf_dispatch_installed = dispatch_installed;
-    log_warning("recovering stale PF state previous_enabled=%d dispatch_installed=%d",
-                was_enabled,
-                dispatch_installed);
+    g.pf_state_saved = 1;
+    g.pf_anchor_touched = attached;
+    g.pf_flush_pending = owned;
+    g.pf_dispatch_installed = owned && (state_result != 0 || dispatch_installed != 0);
+    g.pf_enable_pending = owned && state_result == 0 && !was_enabled;
+    if (attached) log_warning("recovering stale vlesscore PF rules");
+    if (vc_legacy_loopback_required() && restore_owned_pf_engine(pfctl) != 0) return -1;
     if (clear_pf_rules() != 0) return -1;
     (void)unlink("/var/run/vlesscore-redsocks.conf");
     (void)unlink("/var/run/vlesscore-pf.conf");
     (void)unlink("/var/run/vlesscore-pf-dispatch.conf");
-    if (stale_dispatch_present) restart_system_dns_resolver();
+    if (attached) restart_system_dns_resolver();
     return 0;
 }
 
@@ -2689,7 +2655,10 @@ static int disconnect_all(void) {
     int (*restore_proxy)(void) = NULL;
 #endif
     const VCNetworkRestoreOperations operations = {vc_legacy_dns_stop, vc_legacy_loopback_stop, restore_proxy, clear_pf_rules, diagnostic_event, log_error};
-    if (VCRestoreNetworkBeforeStoppingHelpers(proxy_enabled, g.mode == MODE_PF, &operations) != 0) return -1;
+    if (VCRestoreNetworkBeforeStoppingHelpers(proxy_enabled, g.pf_state_saved, &operations) != 0) {
+        g.pf_cleanup_pending = 1;
+        return -1;
+    }
 
     if (had_active_state && !protected_logs) {
         core_log_event("I", "VPN session stopping");
@@ -2718,6 +2687,10 @@ static int disconnect_all(void) {
 }
 
 static void monitor_connected_children(void) {
+    if (g.pf_cleanup_pending) {
+        (void)disconnect_all();
+        return;
+    }
     const VCHelperMonitorOperations operations = {child_process_running, diagnostic_event, log_error, log_warning, disconnect_all};
     if (!VCMonitorHelpers(g.connected, &g.core_pid, &g.redsocks_pid, &g.dns_pid, &operations)) return;
 
@@ -2769,13 +2742,9 @@ static int try_connect_pf(int socks_port) {
     const char *pf_server_ips = g.bypass_ips;
     int pf_rc = apply_pf_rules(pf_server_ips, redir_port, dns_port);
     if (pf_rc != 0) {
-        if (clear_pf_rules() != 0) {
-            log_error("failed to roll back PF after connection error");
-        }
-        stop_pid(&g.dns_pid);
-        stop_pid(&g.redsocks_pid);
-        finish_log_relay(&g.redsocks_log_relay_pid);
-        return -40 + pf_rc;
+        if (pf_rc == PF_CONNECT_CONFLICT || pf_rc == PF_CONNECT_QUERY_ERROR) return pf_rc;
+        log_error("failed to apply PF rules rc=%d", pf_rc);
+        return PF_CONNECT_APPLY_ERROR;
     }
     diagnostic_event("PF routing activated");
 
@@ -2787,8 +2756,6 @@ static int try_connect_pf(int socks_port) {
             if (legacy_rc != 0) log_error("iOS 5 DNS override failed result=%d", legacy_rc);
         }
         if (legacy_rc != 0) {
-            g.mode = MODE_PF;
-            (void)disconnect_all();
             return -49;
         }
         log_msg("iOS 5 ordinary loopback routes and unscoped DNS activated");
@@ -2808,8 +2775,37 @@ static void finish_failed_protected_connect(void) {
     g.protect_logs = 0;
 }
 
+static void report_pf_connect_failure(int result, char *msg, size_t msg_cap) {
+    const char *reply;
+    const char *event;
+    switch (result) {
+        case PF_CONNECT_CONFLICT:
+            reply = VC_PF_CONFLICT_REPLY;
+            event = "PF rules conflict";
+            break;
+        case PF_CONNECT_QUERY_ERROR:
+            reply = VC_PF_QUERY_REPLY;
+            event = "PF status or rules could not be read";
+            break;
+        case PF_CONNECT_APPLY_ERROR:
+            reply = VC_PF_APPLY_REPLY;
+            event = "PF rules could not be applied";
+            break;
+        default:
+            snprintf(msg, msg_cap, "ERR pf backend unavailable: pf_rc=%d (see /var/log/vpnctld.log)", result);
+            diagnostic_event("Connection failed: PF routing unavailable");
+            return;
+    }
+    snprintf(msg, msg_cap, "%s", reply);
+    diagnostic_event("%s", event);
+}
+
 static int connect_all(const char *uri, const char *xray_version, int requested_port,
                        int protect_logs, char *msg, size_t msg_cap) {
+    if (g.pf_cleanup_pending && disconnect_all() != 0) {
+        report_pf_connect_failure(PF_CONNECT_APPLY_ERROR, msg, msg_cap);
+        return -1;
+    }
     if (g.connected) {
         if (g.protect_logs != (protect_logs ? 1 : 0)) {
             snprintf(msg, msg_cap, "ERR already connected with different log protection");
@@ -2825,6 +2821,23 @@ static int connect_all(const char *uri, const char *xray_version, int requested_
     g.protect_logs = protect_logs ? 1 : 0;
     if (g.protect_logs) {
         clear_logs();
+    }
+    pf_enabled_state_t enabled;
+    pf_root_state_t root;
+    int precheck = check_pf_for_connection(find_pfctl_bin(), &enabled, &root);
+    if (precheck != 0) {
+        report_pf_connect_failure(precheck, msg, msg_cap);
+        finish_failed_protected_connect();
+        return -1;
+    }
+    if (g_pf_recovery_pending) {
+        int recovered = recover_stale_pf_state();
+        if (recovered != 0 || vc_legacy_dns_stop() != 0 || vc_legacy_loopback_stop() != 0) {
+            report_pf_connect_failure(recovered == 1 ? PF_CONNECT_QUERY_ERROR : PF_CONNECT_APPLY_ERROR, msg, msg_cap);
+            finish_failed_protected_connect();
+            return -1;
+        }
+        g_pf_recovery_pending = 0;
     }
     if (xray_version && *xray_version) {
         log_msg("Xray version spoof enabled: %s", xray_version);
@@ -2911,9 +2924,8 @@ static int connect_all(const char *uri, const char *xray_version, int requested_
         return 0;
     }
 
-    (void)disconnect_all();
-    diagnostic_event("Connection failed: PF routing unavailable");
-    snprintf(msg, msg_cap, "ERR pf backend unavailable: pf_rc=%d (see /var/log/vpnctld.log)", pf_rc);
+    if (disconnect_all() != 0) log_error("failed to roll back after connection error");
+    report_pf_connect_failure(pf_rc, msg, msg_cap);
     return -1;
 }
 
@@ -3047,11 +3059,11 @@ static const char *pf_enabled_state_name(pf_enabled_state_t state) {
 
 static const char *pf_routing_state_name(pf_enabled_state_t enabled,
                                          pf_root_state_t root) {
-    if (!g.connected || g.mode != MODE_PF) return "inactive";
+    if (pf_root_conflicts(root)) return "conflict";
     if (enabled == PF_ENABLED_ERROR || root == PF_ROOT_ERROR) return "error";
+    if (!g.connected || g.mode != MODE_PF) return "inactive";
     if (enabled != PF_ENABLED) return "missing";
     if (root == PF_ROOT_OWN_DISPATCH || root == PF_ROOT_SHARED_DISPATCH) return "active";
-    if (root == PF_ROOT_CONFLICT) return "conflict";
     return "missing";
 }
 
@@ -3374,11 +3386,14 @@ int main(int argc, char **argv) {
         return 1;
     }
 #endif
-    if (recover_stale_pf_state() != 0) {
+    int pf_recovery = recover_stale_pf_state();
+    if (pf_recovery < 0) {
         log_error("fatal: cannot restore stale PF state");
         return 1;
     }
-    if (vc_legacy_dns_stop() != 0 || vc_legacy_loopback_stop() != 0) {
+    g_pf_recovery_pending = pf_recovery > 0;
+    if (g_pf_recovery_pending) log_warning("PF recovery deferred until the rules can be read");
+    if (!g_pf_recovery_pending && (vc_legacy_dns_stop() != 0 || vc_legacy_loopback_stop() != 0)) {
         log_error("fatal: cannot restore stale iOS 5 DNS/routes");
         return 1;
     }
@@ -3403,7 +3418,7 @@ int main(int argc, char **argv) {
         FD_SET(lfd, &read_fds);
         struct timeval monitor_timeout;
         struct timeval *timeout_ptr = NULL;
-        if (g.connected) {
+        if (g.connected || g.pf_cleanup_pending) {
             monitor_timeout.tv_sec = 1;
             monitor_timeout.tv_usec = 0;
             timeout_ptr = &monitor_timeout;

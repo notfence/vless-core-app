@@ -1163,7 +1163,8 @@ static NSString *VCDiagnosticValue(NSDictionary *dictionary,
     [report appendFormat:@"Connection: %@\n", [[state objectForKey:@"connected"] boolValue] ? @"connected" : @"disconnected"];
     [report appendFormat:@"Mode: %@\n", VCDiagnosticValue(state, @"mode", @"unknown")];
     [report appendFormat:@"PF engine: %@\n", VCDiagnosticValue(state, @"pf", @"unknown")];
-    [report appendFormat:@"PF routing: %@\n", VCDiagnosticValue(state, @"pf_routing", @"unknown")];
+    NSString *pfRouting = VCDiagnosticValue(state, @"pf_routing", @"unknown");
+    [report appendFormat:@"PF routing: %@\n", [pfRouting isEqualToString:@"conflict"] ? @"PF rules conflict" : pfRouting];
     [report appendFormat:@"PAC: %@\n", VCDiagnosticValue(state, @"pac", @"unknown")];
     [report appendFormat:@"Core helper: %@\n", VCDiagnosticValue(state, @"core", @"unknown")];
     [report appendFormat:@"Traffic redirector: %@\n", VCDiagnosticValue(state, @"redsocks", @"unknown")];
@@ -1414,8 +1415,9 @@ static NSString *VCDiagnosticValue(NSDictionary *dictionary,
             detail = _lastNetwork ? _lastNetwork : VCActiveNetworkDescription();
         } else if (indexPath.row == 3) {
             title = @"PF routing";
+            NSString *pfRouting = VCDiagnosticValue(_daemonState, @"pf_routing", @"unknown");
             detail = error ? @"Unavailable" : [NSString stringWithFormat:@"%@ (engine: %@)",
-                                                VCDiagnosticValue(_daemonState, @"pf_routing", @"unknown"),
+                                                [pfRouting isEqualToString:@"conflict"] ? @"PF rules conflict" : pfRouting,
                                                 VCDiagnosticValue(_daemonState, @"pf", @"unknown")];
         } else if (indexPath.row == 4) {
             title = @"PAC for Safari/WebKit";

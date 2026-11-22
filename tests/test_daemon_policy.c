@@ -51,6 +51,10 @@ int main(void) {
     CHECK("pf/own-dispatch-recognized", pf_dispatch_rules_only("nat-anchor \"vlesscore\"\nrdr-anchor \"vlesscore\"\n", 1));
     CHECK("pf/foreign-rules-not-ours", !pf_dispatch_rules_only("nat-anchor \"vlesscore\"\nrdr-anchor \"vlesscore\"\npass all\n", 1));
     CHECK("pf/duplicate-anchor-not-ours", !pf_dispatch_rules_only("anchor \"vlesscore\"\nanchor \"vlesscore\"\n", 0));
+    CHECK("pf/empty-root-is-allowed", pf_classify_root_rules(" \n", "") == PF_ROOT_EMPTY);
+    CHECK("pf/anchor-looking-label-is-not-an-anchor", pf_classify_root_rules(
+          "nat-anchor \"vlesscore\"\nrdr-anchor \"vlesscore\"\n", "pass label \"anchor \"vlesscore\"\"\n") == PF_ROOT_PARTIAL_DISPATCH);
+    CHECK("pf/other-anchor-is-foreign", pf_classify_root_rules("", "anchor \"vlesscore-other\" all\n") == PF_ROOT_CONFLICT);
     CHECK("pf/interface-injection-rejected", !ifname_is_safe("en0;touch /tmp/x"));
     CHECK("pf/wifi-cellular-allowed", pf_interface_allowed("en0") && pf_interface_allowed("pdp_ip0") && !pf_interface_allowed("lo0"));
     char directory[] = "/tmp/vless-host-pf.XXXXXX"; CHECK("pf/private-test-directory", mkdtemp(directory) != NULL);
