@@ -113,6 +113,7 @@ BOOL VCSaveProtectedConfigurationData(NSArray *configs, NSArray *subscriptions);
 NSDictionary *VCLoadProtectedConfigurationData(BOOL *fileExistsOut);
 
 NSString *SendCommand(NSString *cmdLine);
+NSString *VCReadDiagnosticReport(BOOL includeTechnicalLogs);
 
 NSString *ConnectCommandForURI(NSString *uri, BOOL protectLogs);
 

@@ -2,6 +2,7 @@
 #include <arpa/inet.h>
 #include <errno.h>
 #include <fcntl.h>
+#include <poll.h>
 #include <spawn.h>
 #include <stdarg.h>
 #include <stdint.h>
@@ -59,6 +60,10 @@ static int wait_spawned_quiet(pid_t pid) {
     return result == pid && WIFEXITED(status) ? WEXITSTATUS(status) : -1;
 }
 static int wait_spawned(pid_t pid, const char *name) { (void)name; return wait_spawned_quiet(pid); }
+uint64_t vc_core_now_ms(void) {
+    struct timespec now;
+    return clock_gettime(CLOCK_MONOTONIC, &now) == 0 ? (uint64_t)now.tv_sec * 1000 + (uint64_t)now.tv_nsec / 1000000 : 0;
+}
 #include "daemon_pf_capture.inc"
 
 static int mock_capture(char *const argv[], char *out, size_t capacity, int verbose, int complete) {
@@ -194,7 +199,14 @@ static int commands(const int *expected, size_t n) {
 }
 #define COMMANDS(...) commands((int[]){__VA_ARGS__}, sizeof((int[]){__VA_ARGS__}) / sizeof(int))
 
-int main(void) {
+int main(int argc, char **argv) {
+    if (argc == 3 && !strcmp(argv[1], "-s")) {
+        const char *reply = !strcmp(argv[2], "info") ? "Status: Enabled\n" :
+                            !strcmp(argv[2], "oversize") ? "12345678\n" : NULL;
+        if (reply) _exit(write(STDOUT_FILENO, reply, strlen(reply)) != (ssize_t)strlen(reply));
+        if (!strcmp(argv[2], "timeout")) pause();
+        _exit(5);
+    }
     char out[8];
     char *fits[] = {"/usr/bin/printf", "%s", "1234567", NULL};
     char *over[] = {"/usr/bin/printf", "%s", "12345678", NULL};
@@ -202,6 +214,17 @@ int main(void) {
     CHECK("pf/read-complete-output", run_argv_capture_impl(fits, out, sizeof(out), 0, 1) == 0 && !strcmp(out, "1234567"));
     CHECK("pf/read-truncated-output-rejected", run_argv_capture_impl(over, out, sizeof(out), 0, 1) != 0);
     CHECK("pf/read-nul-output-rejected", run_argv_capture_impl(nul, out, sizeof(out), 0, 1) != 0);
+
+    char report[32], error[64];
+    const char *query_error = diagnostic_pf_query("/proc/self/exe", "info", report, sizeof(report), vc_core_now_ms() + 2000, error);
+    CHECK("pf/report-complete-output", !query_error && pf_enabled_state_from_output(report) == PF_ENABLED);
+    query_error = diagnostic_pf_query("/proc/self/exe", "oversize", out, sizeof(out), vc_core_now_ms() + 2000, error);
+    CHECK("pf/report-rejects-truncated-output", query_error && strstr(query_error, "output too large") && !*out);
+    query_error = diagnostic_pf_query("/proc/self/exe", "fail", report, sizeof(report), vc_core_now_ms() + 2000, error);
+    CHECK("pf/report-child-error", query_error && strstr(query_error, "exit=5") && !*report);
+    query_error = diagnostic_pf_query("/proc/self/exe", "timeout", report, sizeof(report), vc_core_now_ms() + 120, error);
+    CHECK("pf/report-query-deadline", query_error && strstr(query_error, "timed out") && !*report);
+    CHECK("pf/report-no-zombie", waitpid(-1, NULL, WNOHANG) < 0 && errno == ECHILD);
 
     char msg[256];
     for (int enabled = 0; enabled <= 1; enabled++) {

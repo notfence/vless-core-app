@@ -2,17 +2,23 @@
 #import "settings.h"
 #import "subscription_info.h"
 
-static BOOL SubscriptionResponseIsForbidden(NSString *headers) {
-    BOOL forbidden=NO;
+static NSInteger SubscriptionResponseStatus(NSString *headers) {
+    NSInteger status=0;
     for (NSString *line in [headers componentsSeparatedByCharactersInSet:[NSCharacterSet newlineCharacterSet]]) {
         if (![line hasPrefix:@"HTTP/"]) continue;
         NSRange space=[line rangeOfString:@" "];
+        status=0;
+        if (space.location==NSNotFound) continue;
         NSUInteger start=NSMaxRange(space);
-        forbidden=space.location!=NSNotFound && start<=[line length] && [line length]-start>=3 &&
-            [[line substringWithRange:NSMakeRange(start,3)] isEqual:@"403"] &&
-            ([line length]-start==3 || [line characterAtIndex:start+3]==' ' || [line characterAtIndex:start+3]=='\t');
+        if ([line length]-start<3 ||
+            ([line length]-start>3 && [line characterAtIndex:start+3]!=' ' && [line characterAtIndex:start+3]!='\t')) continue;
+        for (NSUInteger i=start;i<start+3;i++) {
+            unichar digit=[line characterAtIndex:i];
+            if (digit<'0' || digit>'9') { status=0; break; }
+            status=status*10+digit-'0';
+        }
     }
-    return forbidden;
+    return status>=100 && status<=599 ? status : 0;
 }
 
 @implementation MainVC (VCMainSubscriptions)
@@ -158,6 +164,10 @@ static BOOL SubscriptionResponseIsForbidden(NSString *headers) {
                                             &curlHeaders,
                                             &curlExitCode);
     if (VCCurrentSubscriptionTask().isCancelled) { if (errorTextOut) *errorTextOut=VCCurrentSubscriptionTask().cancellationReason; return nil; }
+    NSInteger curlHTTPStatus=SubscriptionResponseStatus(curlHeaders);
+    NSInteger httpStatus=curlHTTPStatus;
+    NSString *sourceKind=incy ? @"incy" : useHappHeaders ? @"happ" : @"plain";
+    NSString *agentMode=[sub objectForKey:kSubscriptionUserAgentKey] ? @"custom" : [userAgent isEqual:kHappSubscriptionUserAgent] ? @"happ" : @"default";
     if (!data && !allowInsecureFetch && CurlExitCodeCanRetryInsecurely(curlExitCode)) {
         if (insecureRetryAvailableOut) *insecureRetryAvailableOut = YES;
     }
@@ -191,6 +201,7 @@ static BOOL SubscriptionResponseIsForbidden(NSString *headers) {
         NSURLResponse *resp = nil;
         NSError *err = nil;
         data = VCFetchSubscriptionRequest(req,20,&resp,&err);
+        if ([resp isKindOfClass:[NSHTTPURLResponse class]]) httpStatus=[(NSHTTPURLResponse *)resp statusCode];
         if (!data || err) {
             fetchErr = [err localizedDescription];
             if (!allowInsecureFetch && NSURLErrorCanRetryInsecurely(err)) {
@@ -205,9 +216,12 @@ static BOOL SubscriptionResponseIsForbidden(NSString *headers) {
     }
 
     if (!data) {
+        if (!VCCurrentSubscriptionTask().isCancelled) VCRecordAppEvent(@"subscription", @"Subscription fetch failed",
+                         [NSString stringWithFormat:@"source=%@ agent=%@ http_status=%ld curl_exit=%d reason=%@",
+                          sourceKind,agentMode,(long)httpStatus,curlExitCode,VCDiagnosticErrorCategory(fetchErr)]);
         if (incy) fetchErr=VCIncySafeFetchError(fetchErr);
         if (SubscriptionDictionaryIsHappEncrypted(sub)) fetchErr=@"Could not download the encrypted HAPP subscription.";
-        if (curlExitCode==22 && SubscriptionResponseIsForbidden(curlHeaders)) {
+        if (curlExitCode==22 && curlHTTPStatus==403) {
             fetchErr=@"HTTP 403. The server rejected the subscription download.";
         }
         if (![fetchErr isKindOfClass:[NSString class]] || [fetchErr length] == 0) {
@@ -217,7 +231,7 @@ static BOOL SubscriptionResponseIsForbidden(NSString *headers) {
         return nil;
     }
 
-    return [VCProfiles() updatedSubscriptionFromSource:sub
+    NSDictionary *updated=[VCProfiles() updatedSubscriptionFromSource:sub
                                                  data:data
                                      nameFromMetadata:nameFromMeta
                                  userInfoFromMetadata:userInfoFromMeta
@@ -226,6 +240,15 @@ static BOOL SubscriptionResponseIsForbidden(NSString *headers) {
                                              hostName:hostName
                                               options:VCCurrentSubscriptionTask() ?: self
                                             errorText:errorTextOut];
+    if (!VCCurrentSubscriptionTask().isCancelled) {
+        NSMutableDictionary *categories=[NSMutableDictionary dictionary];
+        for (NSString *issue in [updated objectForKey:@"import_issues"]) VCIncrementDiagnosticCategory(categories,issue);
+        VCRecordAppEvent(@"subscription",updated ? @"Subscription fetch completed" : @"Subscription parse failed",
+                         [NSString stringWithFormat:@"source=%@ agent=%@ http_status=%ld accepted=%lu skipped=%lu reasons=%@",
+                          sourceKind,agentMode,(long)httpStatus,(unsigned long)[[updated objectForKey:@"items"] count],
+                          (unsigned long)[[updated objectForKey:@"import_skipped"] unsignedIntegerValue],VCDiagnosticCategoryCountsText(categories)]);
+    }
+    return updated;
 }
 
 - (NSDictionary *)updatedSubscriptionDictionaryFromSource:(NSDictionary *)sub errorText:(NSString **)errorTextOut {

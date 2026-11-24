@@ -3,6 +3,11 @@
 
 #define VC_DAEMON_SOCKET_PATH "/var/run/vpnctld.sock"
 #define VC_DAEMON_LOCK_PATH "/var/run/vpnctld.lock"
+#define VC_DIAGNOSTIC_REPORT_HEADER "OK report=2\n"
+#define VC_DIAGNOSTIC_LOG_PREFIX "base64\t"
+#define VC_DIAGNOSTIC_LOG_TAIL_PREFIX "base64-tail\t"
+#define VC_DIAGNOSTIC_LOG_TAIL_BYTES 8192
+#define VC_DIAGNOSTIC_LOG_BASE64_BYTES (((VC_DIAGNOSTIC_LOG_TAIL_BYTES + 2) / 3) * 4)
 #define VC_APP_EXECUTABLE_PATH "/Applications/vless-core.app/vless-core"
 #define VC_BOOTSTRAP_EXECUTABLE_PATH "/usr/bin/vpnctld-bootstrap"
 #ifndef VC_CORE_EXECUTABLE_PATH

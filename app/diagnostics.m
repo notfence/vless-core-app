@@ -1,4 +1,6 @@
 #import "diagnostics.h"
+#import "main_screen.h"
+#include <sys/sysctl.h>
 
 NSString *ClearLogsViaDaemon(void) {
     return SendCommand(@"CLEAR_LOGS\n");
@@ -41,13 +43,13 @@ NSString *ReadDaemonLog(NSInteger index, NSUInteger maxBytes) {
 }
 
 NSString *ReadLogAtIndex(NSInteger index) {
-    return ReadDaemonLog(index, 8192);
+    return ReadDaemonLog(index, VC_DIAGNOSTIC_LOG_TAIL_BYTES);
 }
 
 void ReadLogAtIndexAsync(NSInteger index, void (^completion)(NSString *)) {
     NSString *name = index == 1 ? @"core" : @"daemon";
     VCSendCommandAsync([NSString stringWithFormat:@"LOG\t%@\n", name], ^(NSString *response) {
-        if (completion) completion(VCLogTextFromResponse(response, index, 8192));
+        if (completion) completion(VCLogTextFromResponse(response, index, VC_DIAGNOSTIC_LOG_TAIL_BYTES));
     });
 }
 
@@ -395,8 +397,8 @@ static NSString *VCEventMessage(NSDictionary *event) {
     return VCSanitizeDiagnosticText([event objectForKey:@"action"], 96);
 }
 
-static NSString *VCEventMetadata(NSDictionary *event) {
-    NSMutableArray *parts = [NSMutableArray arrayWithObject:VCEventTimeText(event)];
+static NSString *VCEventMetadata(NSDictionary *event, NSString *time) {
+    NSMutableArray *parts = [NSMutableArray arrayWithObject:time];
     NSString *source = [event objectForKey:@"source"];
     NSString *category = [event objectForKey:@"category"];
     if ([source isEqualToString:@"daemon"]) {
@@ -511,7 +513,7 @@ static NSString *VCEventMetadata(NSDictionary *event) {
     } else {
         NSDictionary *event = [_events objectAtIndex:[_events count] - 1 - indexPath.row];
         cell.textLabel.text = VCEventMessage(event);
-        cell.detailTextLabel.text = VCEventMetadata(event);
+        cell.detailTextLabel.text = VCEventMetadata(event, VCEventTimeText(event));
     }
     cell.textLabel.numberOfLines = 2;
     cell.detailTextLabel.numberOfLines = 2;
@@ -837,6 +839,119 @@ static NSString *VCDiagnosticValue(NSDictionary *dictionary,
     return [value isKindOfClass:[NSString class]] && [value length] > 0 ? value : fallback;
 }
 
+static NSString *VCReportOSBuild(void) {
+    char value[64];
+    size_t size = sizeof(value);
+    if (sysctlbyname("kern.osversion", value, &size, NULL, 0) != 0 || size < 2 || size > sizeof(value) || value[size - 1]) return @"unknown";
+    for (size_t i = 0; i + 1 < size; i++) if (!isalnum((unsigned char)value[i])) return @"unknown";
+    return [NSString stringWithUTF8String:value];
+}
+
+static NSString *VCReportAppPath(void) {
+    NSString *path = [[NSBundle mainBundle] executablePath];
+    if (![path hasSuffix:@"/vless-core.app/vless-core"]) return @"unknown";
+    if ([path isEqualToString:@"/Applications/vless-core.app/vless-core"] ||
+        [path isEqualToString:@"/var/jb/Applications/vless-core.app/vless-core"]) return path;
+    if ([path hasPrefix:@"/private/var/db/stash/"] || [path hasPrefix:@"/var/stash/"])
+        return @"stash/…/vless-core.app/vless-core";
+    if ([path rangeOfString:@"/Containers/Bundle/Application/"].location != NSNotFound)
+        return @"Containers/Bundle/Application/…/vless-core.app/vless-core";
+    return @"other/…/vless-core.app/vless-core";
+}
+
+static NSString *VCReportDate(NSDateFormatter *formatter, long long seconds) {
+    if (seconds <= 0) return @"unknown";
+    return [formatter stringFromDate:[NSDate dateWithTimeIntervalSince1970:(NSTimeInterval)seconds]] ?: @"unknown";
+}
+
+static NSString *VCReportEventLine(NSDateFormatter *formatter, NSDictionary *event) {
+    NSString *date = VCReportDate(formatter, [[event objectForKey:@"timestamp"] longLongValue] / 1000);
+    return [NSString stringWithFormat:@"%@ — %@", VCEventMetadata(event, date), VCEventMessage(event)];
+}
+
+static NSDictionary *VCReportLastFailure(NSArray *events) {
+    NSDictionary *selected = nil;
+    BOOL selectedSpecific = NO;
+    for (NSDictionary *event in [events reverseObjectEnumerator]) {
+        NSString *message = [VCEventMessage(event) lowercaseString];
+        NSString *detail = [event objectForKey:@"detail"];
+        if ([message rangeOfString:@"cancel"].location != NSNotFound || [detail hasPrefix:@"reason=cancel"]) continue;
+        BOOL specific = [message hasPrefix:@"core inspect "] || [message hasPrefix:@"subscription curl "] ||
+                        [message hasPrefix:@"pf rules "] || [message hasPrefix:@"pf status "] ||
+                        [message rangeOfString:@"stopped signal="].location != NSNotFound ||
+                        [message rangeOfString:@"stopped exit="].location != NSNotFound ||
+                        [message rangeOfString:@"wait failed errno="].location != NSNotFound;
+        BOOL failure = specific || [message rangeOfString:@"failed"].location != NSNotFound ||
+                       [message rangeOfString:@"unexpectedly"].location != NSNotFound || [message hasSuffix:@"authorization rejected"] ||
+                       [message hasPrefix:@"control authorization rejected"];
+        if (!failure) continue;
+        if (!selected) { selected = event; selectedSpecific = specific; }
+        else if (specific && !selectedSpecific &&
+                 [[selected objectForKey:@"timestamp"] longLongValue] - [[event objectForKey:@"timestamp"] longLongValue] <= 1000) {
+            selected = event;
+            selectedSpecific = YES;
+        } else break;
+    }
+    return selected;
+}
+
+static NSString *VCReportNewestLogError(NSDictionary *snapshot, NSTimeInterval after) {
+    NSDateFormatter *format = [[[NSDateFormatter alloc] init] autorelease];
+    format.locale = [[[NSLocale alloc] initWithLocaleIdentifier:@"en_US_POSIX"] autorelease];
+    format.dateFormat = @"yyyy-MM-dd HH:mm:ss.SSS";
+    NSString *newest = nil;
+    for (NSString *source in @[@"daemon", @"core"]) {
+        for (NSString *line in [[snapshot objectForKey:source] componentsSeparatedByString:@"\n"]) {
+            if ([line length] <= 26 || ![[line substringWithRange:NSMakeRange(23, 3)] isEqualToString:@" E "]) continue;
+            NSDate *date = [format dateFromString:[line substringToIndex:23]];
+            NSTimeInterval time = [date timeIntervalSince1970];
+            if (date && time > after) { after = time; newest = line; }
+        }
+    }
+    return newest;
+}
+
+static NSString *VCReportLocalComponents(void) {
+    NSMutableString *description = [NSMutableString string];
+    const char *paths[] = {"/usr/bin/vpnctld", VC_BOOTSTRAP_EXECUTABLE_PATH, VC_CORE_EXECUTABLE_PATH,
+                           "/usr/bin/vless-core-curl", VC_REDSOCKS_EXECUTABLE_PATH};
+    for (NSUInteger i = 0; i < sizeof(paths) / sizeof(paths[0]); i++) {
+        struct stat st;
+        int rc = stat(paths[i], &st), error = errno;
+        const char *present = rc == 0 ? "yes" : error == ENOENT ? "no" : "unknown";
+        const char *executable = rc == 0 ? (S_ISREG(st.st_mode) && (st.st_mode & 0111) ? "yes" : "no") : "unknown";
+        [description appendFormat:@"%s | present=%s | executable bits=%s\n", paths[i], present, executable];
+    }
+    return description;
+}
+
+static NSString *VCWriteDiagnosticReport(NSString *report) {
+    NSData *data = [report dataUsingEncoding:NSUTF8StringEncoding];
+    if (!data || [data length] > 192 * 1024) return nil;
+    NSString *base = [NSTemporaryDirectory() stringByAppendingPathComponent:@"vless-core-report-XXXXXX"];
+    char directory[PATH_MAX];
+    if (![base getFileSystemRepresentation:directory maxLength:sizeof(directory)] || !mkdtemp(directory)) return nil;
+    NSString *path = [[NSString stringWithUTF8String:directory] stringByAppendingPathComponent:@"vless-core-diagnostics.txt"];
+    int fd = open([path fileSystemRepresentation], O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW, 0600);
+    BOOL ok = fd >= 0;
+    NSUInteger offset = 0;
+    while (ok && offset < [data length]) {
+        ssize_t n = write(fd, (const char *)[data bytes] + offset, [data length] - offset);
+        if (n < 0 && errno == EINTR) continue;
+        if (n <= 0) ok = NO;
+        else offset += (NSUInteger)n;
+    }
+    if (fd >= 0 && close(fd) != 0) ok = NO;
+    if (!ok) { unlink([path fileSystemRepresentation]); rmdir(directory); }
+    return ok ? path : nil;
+}
+
+static void VCRemoveDiagnosticReport(NSString *path) {
+    if (![path length]) return;
+    (void)unlink([path fileSystemRepresentation]);
+    (void)rmdir([[path stringByDeletingLastPathComponent] fileSystemRepresentation]);
+}
+
 @implementation DebugVC
 
 - (void)stopRefreshTimer {
@@ -857,6 +972,7 @@ static NSString *VCDiagnosticValue(NSDictionary *dictionary,
 
 - (void)applicationEnteredBackground:(NSNotification *)notification {
     (void)notification;
+    [self cancelReportModeChoice];
     [self stopRefreshTimer];
 }
 
@@ -961,6 +1077,7 @@ static NSString *VCDiagnosticValue(NSDictionary *dictionary,
 
 - (void)viewWillDisappear:(BOOL)animated {
     [super viewWillDisappear:animated];
+    [self cancelReportModeChoice];
     [self stopRefreshTimer];
 }
 
@@ -1131,17 +1248,30 @@ static NSString *VCDiagnosticValue(NSDictionary *dictionary,
 
 - (NSString *)buildReportWithState:(NSDictionary *)state
                             quality:(NSDictionary *)quality
-                             events:(NSArray *)events {
+                             events:(NSArray *)events
+                           snapshot:(NSDictionary *)snapshot
+                        protectLogs:(BOOL)protectLogs
+                  hideSensitiveData:(BOOL)hideSensitiveData {
     NSDateFormatter *formatter = [[[NSDateFormatter alloc] init] autorelease];
     formatter.dateFormat = @"yyyy-MM-dd HH:mm:ss ZZZZ";
     NSMutableString *report = [NSMutableString string];
     [report appendString:@"vless-core diagnostic report\n"];
     [report appendFormat:@"Generated: %@\n\n", [formatter stringFromDate:[NSDate date]]];
-    [report appendString:@"Privacy: configuration URIs, subscription URLs, server addresses, external IP addresses, UUIDs, credentials and keys are omitted.\n\n"];
+    if (protectLogs) [report appendString:@"Technical logs: omitted for protected subscriptions.\n\n"];
+    else if (hideSensitiveData) [report appendString:@"Technical logs: redacted. Recognized addresses, links and credentials are masked.\n\n"];
+    else [report appendString:@"Technical logs: full. May contain addresses, links and credentials. Share only with someone you trust.\n\n"];
+    [report appendString:@"Latest recorded failure\n-----------------------\n"];
+    NSDictionary *failure = VCReportLastFailure(events);
+    NSString *logError = protectLogs ? nil : VCReportNewestLogError(snapshot, [[failure objectForKey:@"timestamp"] longLongValue] / 1000.0);
+    if (logError) [report appendFormat:@"%@\n\n", logError];
+    else if (failure) [report appendFormat:@"%@\n\n", VCReportEventLine(formatter, failure)];
+    else [report appendString:@"No failure recorded.\n\n"];
     [report appendString:@"Application\n-----------\n"];
     [report appendFormat:@"Version: %@ (%@)\n", AppShortVersion(), AppBuildVersion()];
     [report appendFormat:@"Device: %@ (%@)\n", DeviceModelName(), VCMachineIdentifier()];
     [report appendFormat:@"iOS: %@\n", [[UIDevice currentDevice] systemVersion]];
+    [report appendFormat:@"iOS build: %@\n", VCReportOSBuild()];
+    [report appendFormat:@"Application executable: %@\n", VCReportAppPath()];
 #if defined(__LP64__)
     [report appendString:@"Application architecture: arm64\n"];
 #else
@@ -1157,18 +1287,34 @@ static NSString *VCDiagnosticValue(NSDictionary *dictionary,
         [report appendString:@"Daemon control: online\n"];
     }
     [report appendFormat:@"Daemon architecture: %@\n", VCDiagnosticValue(state, @"architecture", @"unknown")];
+    [report appendFormat:@"Daemon launch: %@\n", VCDiagnosticValue(state, @"daemon_launch", @"unknown")];
+    [report appendFormat:@"Daemon started: %@\n", VCReportDate(formatter, [[state objectForKey:@"daemon_started"] longLongValue])];
     [report appendFormat:@"Active network: %@\n\n", VCActiveNetworkDescription()];
 
     [report appendString:@"Routing and helpers\n-------------------\n"];
-    [report appendFormat:@"Connection: %@\n", [[state objectForKey:@"connected"] boolValue] ? @"connected" : @"disconnected"];
+    NSString *connection = [state objectForKey:@"connected"] ? ([[state objectForKey:@"connected"] boolValue] ? @"connected" : @"disconnected") : @"unknown";
+    [report appendFormat:@"Connection: %@\n", connection];
+    [report appendFormat:@"Connected since: %@\n", VCReportDate(formatter, [[state objectForKey:@"connected_since"] longLongValue])];
     [report appendFormat:@"Mode: %@\n", VCDiagnosticValue(state, @"mode", @"unknown")];
     [report appendFormat:@"PF engine: %@\n", VCDiagnosticValue(state, @"pf", @"unknown")];
     NSString *pfRouting = VCDiagnosticValue(state, @"pf_routing", @"unknown");
     [report appendFormat:@"PF routing: %@\n", [pfRouting isEqualToString:@"conflict"] ? @"PF rules conflict" : pfRouting];
+    [report appendFormat:@"PF dispatch anchors: %@\n", VCDiagnosticValue(state, @"pf_dispatch", @"unknown")];
     [report appendFormat:@"PAC: %@\n", VCDiagnosticValue(state, @"pac", @"unknown")];
     [report appendFormat:@"Core helper: %@\n", VCDiagnosticValue(state, @"core", @"unknown")];
     [report appendFormat:@"Traffic redirector: %@\n", VCDiagnosticValue(state, @"redsocks", @"unknown")];
     [report appendFormat:@"DNS helper: %@\n\n", VCDiagnosticValue(state, @"dns", @"unknown")];
+    if ([[state objectForKey:@"history_persistent"] isEqualToString:@"0"]) [report appendString:@"Daemon history could not be saved.\n\n"];
+    NSString *unavailable = [NSString stringWithFormat:@"(unavailable: %@)",
+                             [snapshot objectForKey:@"error"] ?: [snapshot objectForKey:@"partial"] ?: @"section missing"];
+    [report appendFormat:@"Installed components\n--------------------\n%@\n\n",
+     [snapshot objectForKey:@"installation"] ?: [NSString stringWithFormat:@"%@\nLocal file observations:\n%@", unavailable, VCReportLocalComponents()]];
+    [report appendFormat:@"PF snapshot (current, read-only)\n--------------------------------\nStatus: %@\nNAT and redirection:\n%@\nFilter:\n%@\n\n",
+     [snapshot objectForKey:@"pf_status"] ?: unavailable, [snapshot objectForKey:@"pf_nat"] ?: unavailable,
+     [snapshot objectForKey:@"pf_filter"] ?: unavailable];
+    [report appendFormat:@"vpnctld log\n-----------\n%@\n\nvless-core log\n--------------\n%@\n\n",
+     protectLogs ? @"(hidden for protected subscriptions)" : [snapshot objectForKey:@"daemon"] ?: unavailable,
+     protectLogs ? @"(hidden for protected subscriptions)" : [snapshot objectForKey:@"core"] ?: unavailable];
 
     [report appendString:@"Connection quality\n------------------\n"];
     NSArray *qualityRows = [NSArray arrayWithObjects:
@@ -1186,40 +1332,89 @@ static NSString *VCDiagnosticValue(NSDictionary *dictionary,
          VCDiagnosticValue(quality, [row objectAtIndex:1], @"not checked")];
     }
 
-    [report appendString:@"\nPrivacy-safe activity history\n-----------------------------\n"];
+    [report appendString:@"\nActivity History\n----------------\n"];
     if ([events count] == 0) {
         [report appendString:@"No events recorded.\n"];
     } else {
-        for (NSDictionary *event in events) {
-            [report appendFormat:@"%@ — %@\n",
-             VCEventMetadata(event),
-             VCEventMessage(event)];
-        }
+        for (NSDictionary *event in events) [report appendFormat:@"%@\n", VCReportEventLine(formatter, event)];
     }
     return report;
 }
 
-- (void)createReport {
-    if (_reporting || _checking) return;
+- (BOOL)reportSelectionIsProtected {
+    UIViewController *root = self.view.window.rootViewController;
+    return [root isKindOfClass:[MainVC class]] && [(MainVC *)root selectedSubscriptionIsHappEncrypted];
+}
+
+- (BOOL)canPresentDiagnosticReport {
+    return self.view.window && self.navigationController.topViewController == self &&
+           [UIApplication sharedApplication].applicationState == UIApplicationStateActive;
+}
+
+- (void)releaseDiagnosticReportDocument {
+    _documentController.delegate = nil;
+    VCRemoveDiagnosticReport([_documentController.URL path]);
+    [_documentController release];
+    _documentController = nil;
+}
+
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wdeprecated-declarations"
+- (void)cancelReportModeChoice {
+    if (!_reportModeAlert) return;
+    _reportModeAlert.delegate = nil;
+    [_reportModeAlert dismissWithClickedButtonIndex:_reportModeAlert.cancelButtonIndex animated:NO];
+    [_reportModeAlert release];
+    _reportModeAlert = nil;
+}
+
+- (void)showReportModeChoice {
+    if (_reporting || _reportModeAlert) return;
+    _reportModeAlert = [[UIAlertView alloc] initWithTitle:@"Diagnostic Report"
+        message:@"Hide sensitive data, or include full logs? Full logs may contain addresses, links and credentials. Only share them with someone you trust."
+        delegate:self cancelButtonTitle:@"Cancel" otherButtonTitles:@"Hide Sensitive Data", @"Include Full Logs", nil];
+    [_reportModeAlert show];
+}
+
+- (void)alertView:(UIAlertView *)alertView didDismissWithButtonIndex:(NSInteger)buttonIndex {
+    if (alertView != _reportModeAlert) return;
+    NSInteger first = alertView.firstOtherButtonIndex;
+    _reportModeAlert.delegate = nil;
+    [_reportModeAlert release];
+    _reportModeAlert = nil;
+    if (first < 0 || (buttonIndex != first && buttonIndex != first + 1) || ![self canPresentDiagnosticReport]) return;
+    [self startReportHidingSensitiveData:buttonIndex == first];
+}
+#pragma clang diagnostic pop
+
+- (void)startReportHidingSensitiveData:(BOOL)hideSensitiveData {
+    if (_reporting) return;
     VCRecordAppEvent(@"diagnostics", @"Diagnostic report requested", nil);
     _reporting = YES;
     [_tableView reloadSections:[NSIndexSet indexSetWithIndex:VCDebugSectionDiagnostics]
               withRowAnimation:UITableViewRowAnimationNone];
-    [NSThread detachNewThreadSelector:@selector(reportWorker) toTarget:self withObject:nil];
+    NSDictionary *input = @{ @"quality": _qualityState ?: @{}, @"local_events": [[_localEvents copy] autorelease] ?: @[],
+                             @"selected_protected": @([self reportSelectionIsProtected]), @"include_full_logs": @(!hideSensitiveData) };
+    [NSThread detachNewThreadSelector:@selector(reportWorker:) toTarget:self withObject:input];
 }
 
-- (void)reportWorker {
+- (void)reportWorker:(NSDictionary *)input {
     NSAutoreleasePool *pool = [[NSAutoreleasePool alloc] init];
-    NSDictionary *state = VCParseDaemonDiagnostics(SendCommand(@"DIAGNOSTICS\n"));
-    NSArray *events = VCParseDaemonEvents(SendCommand(@"EVENTS\n"));
-    NSDictionary *quality = VCRunConnectionQualityChecks(state);
+    BOOL selectedProtected = [[input objectForKey:@"selected_protected"] boolValue];
+    BOOL hideSensitiveData = ![[input objectForKey:@"include_full_logs"] boolValue];
+    NSDictionary *snapshot = VCParseDiagnosticReport(VCReadDiagnosticReport(!selectedProtected), hideSensitiveData);
+    NSString *stateText = [snapshot objectForKey:@"state"];
+    NSDictionary *state = stateText ? VCParseDaemonDiagnostics(stateText) :
+        @{ @"error": [snapshot objectForKey:@"error"] ?: @"incomplete diagnostic snapshot" };
+    NSArray *events = VCParseDaemonEvents([snapshot objectForKey:@"events"]);
     NSArray *appEvents = [[VCAppEventRecorder sharedRecorder] eventsSnapshot];
-    NSDictionary *payload = [NSDictionary dictionaryWithObjectsAndKeys:
-                             state, @"state",
-                             events, @"events",
-                             quality, @"quality",
-                             appEvents, @"app_events",
-                             nil];
+    BOOL protected = selectedProtected || [[state objectForKey:@"protected_logs"] boolValue];
+    NSString *report = [self buildReportWithState:state quality:[input objectForKey:@"quality"]
+                                           events:VCCombinedDiagnosticEvents(events, appEvents, [input objectForKey:@"local_events"])
+                                         snapshot:snapshot protectLogs:protected hideSensitiveData:hideSensitiveData];
+    NSString *path = VCWriteDiagnosticReport(report);
+    NSDictionary *payload = @{ @"path": path ?: @"", @"protected": @(protected),
+                               @"bytes": @([report lengthOfBytesUsingEncoding:NSUTF8StringEncoding]) };
     [self performSelectorOnMainThread:@selector(reportFinished:)
                            withObject:payload
                         waitUntilDone:NO];
@@ -1228,27 +1423,23 @@ static NSString *VCDiagnosticValue(NSDictionary *dictionary,
 
 - (void)reportFinished:(NSDictionary *)payload {
     _reporting = NO;
-    NSDictionary *reportState = [payload objectForKey:@"state"];
-    NSDictionary *reportQuality = [payload objectForKey:@"quality"];
-    NSArray *events = VCCombinedDiagnosticEvents([payload objectForKey:@"events"],
-                                                  [payload objectForKey:@"app_events"],
-                                                  _localEvents);
-    NSString *report = [self buildReportWithState:reportState
-                                          quality:reportQuality
-                                           events:events];
-    NSString *path = [NSTemporaryDirectory() stringByAppendingPathComponent:
-                      @"vless-core-diagnostics.txt"];
-    NSError *error = nil;
-    BOOL written = [report writeToFile:path
-                            atomically:YES
-                              encoding:NSUTF8StringEncoding
-                                 error:&error];
-    if (!written) {
+    NSString *path = [payload objectForKey:@"path"];
+    if (![self canPresentDiagnosticReport]) {
+        VCRemoveDiagnosticReport(path);
+        [_tableView reloadData];
+        return;
+    }
+    if (![[payload objectForKey:@"protected"] boolValue] && [self reportSelectionIsProtected]) {
+        VCRemoveDiagnosticReport(path);
+        [self startReportHidingSensitiveData:YES];
+        return;
+    }
+    if (![path length]) {
         VCRecordAppEvent(@"diagnostics", @"Diagnostic report failed", @"stage=file_write");
 #pragma clang diagnostic push
 #pragma clang diagnostic ignored "-Wdeprecated-declarations"
         UIAlertView *alert = [[[UIAlertView alloc] initWithTitle:@"Report Failed"
-                                                         message:(error ? [error localizedDescription] : @"Unable to write the report.")
+                                                         message:@"Unable to write the report."
                                                         delegate:nil
                                                cancelButtonTitle:@"OK"
                                                otherButtonTitles:nil] autorelease];
@@ -1257,13 +1448,10 @@ static NSString *VCDiagnosticValue(NSDictionary *dictionary,
         [_tableView reloadData];
         return;
     }
-    (void)chmod([path fileSystemRepresentation], 0600);
     VCRecordAppEvent(@"diagnostics", @"Diagnostic report created",
-                     [NSString stringWithFormat:@"events=%lu bytes=%lu",
-                      (unsigned long)[events count],
-                      (unsigned long)[report lengthOfBytesUsingEncoding:NSUTF8StringEncoding]]);
+                     [NSString stringWithFormat:@"bytes=%@", [payload objectForKey:@"bytes"]]);
 
-    [_documentController release];
+    [self releaseDiagnosticReportDocument];
     _documentController = [[UIDocumentInteractionController interactionControllerWithURL:
                             [NSURL fileURLWithPath:path]] retain];
     _documentController.delegate = self;
@@ -1503,7 +1691,7 @@ static NSString *VCDiagnosticValue(NSDictionary *dictionary,
             cell.accessoryView = nil;
             NSDictionary *event = [events objectAtIndex:[events count] - 1 - indexPath.row];
             cell.textLabel.text = VCEventMessage(event);
-            cell.detailTextLabel.text = VCEventMetadata(event);
+            cell.detailTextLabel.text = VCEventMetadata(event, VCEventTimeText(event));
             cell.textLabel.numberOfLines = 2;
             cell.detailTextLabel.numberOfLines = 2;
         }
@@ -1519,15 +1707,15 @@ static NSString *VCDiagnosticValue(NSDictionary *dictionary,
         cell = [[[UITableViewCell alloc] initWithStyle:UITableViewCellStyleSubtitle
                                       reuseIdentifier:identifier] autorelease];
     }
-    BOOL operationInProgress = _checking || _reporting;
+    BOOL operationInProgress = indexPath.row == 0 ? (_checking || _reporting) : _reporting;
     BOOL currentOperation = indexPath.row == 0 ? _checking : _reporting;
     cell.selectionStyle = operationInProgress
         ? UITableViewCellSelectionStyleNone
         : UITableViewCellSelectionStyleBlue;
     cell.textLabel.text = indexPath.row == 0 ? @"Run connection check" : @"Create diagnostic report";
     cell.detailTextLabel.text = indexPath.row == 0
-        ? @"Test DNS, proxy HTTP and the Safari/WebKit path"
-        : @"Export one privacy-safe text file";
+        ? @"Test Connection Quality"
+        : @"Export Recent Logs";
     cell.accessoryType = UITableViewCellAccessoryNone;
     if (currentOperation) {
         UIActivityIndicatorViewStyle style = VCAppearanceIsDark()
@@ -1562,7 +1750,7 @@ static NSString *VCDiagnosticValue(NSDictionary *dictionary,
     }
     if (indexPath.section != VCDebugSectionDiagnostics) return;
     if (indexPath.row == 0) [self runQualityCheck];
-    else [self createReport];
+    else [self showReportModeChoice];
 }
 
 - (CGFloat)tableView:(UITableView *)tableView heightForRowAtIndexPath:(NSIndexPath *)indexPath {
@@ -1618,9 +1806,9 @@ static NSString *VCDiagnosticValue(NSDictionary *dictionary,
 
 - (void)dealloc {
     [[NSNotificationCenter defaultCenter] removeObserver:self];
+    [self cancelReportModeChoice];
     [self stopRefreshTimer];
-    _documentController.delegate = nil;
-    [_documentController release];
+    [self releaseDiagnosticReportDocument];
     [_appActivitySwitch release];
     [_tableView release];
     [_daemonState release];

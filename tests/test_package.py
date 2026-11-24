@@ -130,7 +130,16 @@ def installer_contracts(major):
         check(f"installer/ios{major}/refuse-unrestored-network", result.returncode == 1 and stale.exists())
         stale.unlink()
         check(f"installer/ios{major}/remove-after-cleanup", invoke("prerm", "remove").returncode == 0)
-        check(f"installer/ios{major}/postrm", invoke("postrm", "remove").returncode == 0)
+        state = fake_root / "var/db/vless-core"
+        history = (state / "diagnostic-events-v1", state / ".diagnostic-events.tmp")
+        preserved = state / "system-proxy-backup.plist"
+        preserved.write_text("saved system proxy state")
+        for action in ("remove", "purge"):
+            for path in history:
+                path.write_text("diagnostic history")
+            check(f"installer/ios{major}/postrm/{action}", invoke("postrm", action).returncode == 0)
+            check(f"installer/ios{major}/postrm/{action}/diagnostic-history-removed", not any(p.exists() for p in history))
+            check(f"installer/ios{major}/postrm/{action}/preserves-system-proxy-backup", preserved.read_text() == "saved system proxy state")
         check(f"installer/ios{major}/runtime-marker-removed", not (fake_root / "usr/share/vless-core/runtime-architecture").exists())
 
 def macho_contract(name, data, cpu, minimum):

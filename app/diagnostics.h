@@ -23,7 +23,7 @@
 - (id)initWithEvents:(NSArray *)events;
 @end
 
-@interface DebugVC : UIViewController <UITableViewDataSource, UITableViewDelegate, UIDocumentInteractionControllerDelegate> {
+@interface DebugVC : UIViewController <UITableViewDataSource, UITableViewDelegate, UIDocumentInteractionControllerDelegate, UIAlertViewDelegate> {
     UITableView *_tableView;
     NSDictionary *_daemonState;
     NSArray *_daemonEvents;
@@ -34,6 +34,7 @@
     NSString *_lastNetwork;
     NSTimer *_refreshTimer;
     UIDocumentInteractionController *_documentController;
+    UIAlertView *_reportModeAlert;
     UISwitch *_appActivitySwitch;
     BOOL _refreshing;
     BOOL _checking;

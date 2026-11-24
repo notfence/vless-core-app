@@ -78,8 +78,8 @@ APP_OBJ += $(BUILD_DIR)/app/core-sockopt.o
 APP_ARM64_OBJ += $(BUILD_DIR)/arm64/app/core-sockopt.o
 APP_OBJ += $(BUILD_DIR)/app/core-fingerprint.o
 APP_ARM64_OBJ += $(BUILD_DIR)/arm64/app/core-fingerprint.o
-DAEMON_SRC := daemon/vpnctld.c daemon/core_config.c common/daemon_policy.c common/control_auth.c common/helper_monitor.c common/dns_relay.c daemon/socket_peer_pid.c daemon/legacy_loopback.c daemon/legacy_dns.c daemon/vpnicon_statusbar.c daemon/system_proxy.c
-DAEMON_HEADERS := daemon/vpnctld_protocol.h daemon/core_config.h daemon/socket_peer_pid.h daemon/legacy_loopback.h daemon/legacy_dns.h daemon/system_proxy.h common/daemon_policy.h common/control_auth.h common/helper_monitor.h common/dns_relay.h
+DAEMON_SRC := daemon/vpnctld.c daemon/core_config.c daemon/diagnostic_report.c common/daemon_policy.c common/control_auth.c common/helper_monitor.c common/dns_relay.c daemon/socket_peer_pid.c daemon/legacy_loopback.c daemon/legacy_dns.c daemon/vpnicon_statusbar.c daemon/system_proxy.c
+DAEMON_HEADERS := daemon/vpnctld_protocol.h daemon/core_config.h daemon/diagnostic_report.h daemon/socket_peer_pid.h daemon/legacy_loopback.h daemon/legacy_dns.h daemon/system_proxy.h common/daemon_policy.h common/control_auth.h common/helper_monitor.h common/dns_relay.h
 BOOTSTRAP_SRC := daemon/vpnctld_bootstrap.c
 
 APP_CFLAGS := -fno-objc-arc -Wall -Wextra -O2 -arch armv7 -miphoneos-version-min=$(LEGACY_IOS_MIN_VERSION) -isysroot $(APP_IOS_SDK) -Iintegrations/happ -Iintegrations/karing -I$(ZBAR_DIR) -I$(OPENSSL_IOS_INCLUDE)

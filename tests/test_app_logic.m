@@ -275,9 +275,77 @@ static void dataTests(void) {
     CHECK("diagnostics/category-counts-sorted", [VCDiagnosticCategoryCountsText(categories) isEqual:@"dns:2,tls:1"]);
     CHECK("diagnostics/parse-daemon-error", [[VCParseDaemonDiagnostics(nil) objectForKey:@"error"] isEqual:@"daemon unavailable"]);
     CHECK("diagnostics/parse-daemon-values", [[VCParseDaemonDiagnostics(@"OK diagnostics\nconnected=1\ninvalid\nmode=pf\n") objectForKey:@"mode"] isEqual:@"pf"]);
+    NSDictionary *report = VCParseDiagnosticReport(@"OK report=2\nSECTION daemon\n(empty)\nEND\nSECTION core\n(cannot read log)\nEND\nDONE\n", YES);
+    CHECK("diagnostics/report-empty-log", [[report objectForKey:@"daemon"] isEqual:@"(empty)"]);
+    CHECK("diagnostics/report-read-error", [[report objectForKey:@"core"] isEqual:@"(cannot read log)"] && ![report objectForKey:@"partial"]);
+    report = VCParseDiagnosticReport(@"OK report=2\nSECTION daemon\n(empty)\nEND\nSECTION core\ninterrupted", YES);
+    CHECK("diagnostics/report-partial", [[report objectForKey:@"daemon"] isEqual:@"(empty)"] && ![report objectForKey:@"core"] && [report objectForKey:@"partial"]);
+    CHECK("diagnostics/report-old-daemon", [[VCParseDiagnosticReport(@"ERR unknown command\n", YES) objectForKey:@"error"] isEqual:@"diagnostic snapshot unsupported"]);
+    CHECK("diagnostics/report-denied", [[VCParseDiagnosticReport(@"ERR unauthorized client reason=path_mismatch errno=0 executable_class=stash\n", YES) objectForKey:@"error"] hasPrefix:@"ERR unauthorized client reason=path_mismatch"]);
+    CHECK("diagnostics/report-offline", [[VCParseDiagnosticReport(@"daemon offline (Connection refused)", YES) objectForKey:@"error"] isEqual:@"daemon offline"]);
+    NSString *logFixture=@"2026-11-22 12:00:01.012 E [connection] upstream connect failed: XHTTP requires h2 or http/1.1 ALPN\n"
+                           "2026-11-22 12:00:02.012 E [tls] peer 192.0.2.1:443, 2001:db8::1, proxy.example.test:8443: certificate has expired\n"
+                           "2026-11-22 12:00:03.012 E [new] Unexpected new upstream error (87)\n"
+                           "2026-11-22 12:00:03.013 E [http] Basic authentication failed\n"
+                           "2026-11-22 12:00:04.012 W vless://credential@private.test:443 https://private.test/subscription-access\n"
+                           "token=opaque-secret password=\"two words\" X-HWID: device-secret\n"
+                           "Authorization: Bearer credential-token\n"
+                           "proxy user:private-password@proxy.example.test:8443\n"
+                           "fetch https%3A%2F%2Fencoded-private.test/sub\n"
+                           "URL https:\\/\\/escaped-private.test\\/sub-secret\n"
+                           "server=[fe80::1%en0]:443 sni=test-node addr=::ffff:198.51.100.3\n"
+                           "configuration_uri=opaque-config subscription_url=opaque-subscription\n"
+                           "password=\"unterminated secret\n"
+                           "privateKey: signing-key\n-----BEGIN PRIVATE KEY-----\nkey-content\n-----END PRIVATE KEY-----\n"
+                           "UUID=11111111-2222-4333-8444-555555555555\n";
+    NSString *encoded=[[logFixture dataUsingEncoding:NSUTF8StringEncoding] base64EncodedStringWithOptions:0];
+    NSString *payload=[NSString stringWithFormat:@"OK report=2\nSECTION core\nbase64\t%@\nEND\nSECTION daemon\n(empty)\nEND\nDONE\n", encoded];
+    report=VCParseDiagnosticReport(payload, YES);
+    NSString *log=[report objectForKey:@"core"];
+    CHECK("diagnostics/report-v2-log-full-reason", log && [log rangeOfString:@"XHTTP requires h2 or http/1.1 ALPN"].location!=NSNotFound &&
+          [log rangeOfString:@"Unexpected new upstream error (87)"].location!=NSNotFound &&
+          [log rangeOfString:@"Basic authentication failed"].location!=NSNotFound);
+    CHECK("diagnostics/report-v2-hide-addresses-keep-ports", [log rangeOfString:@"peer <redacted>:443, <redacted>, <redacted>:8443: certificate has expired"].location!=NSNotFound &&
+          [log rangeOfString:@"server=[<redacted>]:443 sni=<redacted> addr=<redacted>"].location!=NSNotFound &&
+          [log rangeOfString:@"2026-11-22 12:00:02.012"].location!=NSNotFound);
+    CHECK("diagnostics/report-v2-log-masks-secrets", [log rangeOfString:@"<redacted>"].location!=NSNotFound &&
+          [log rangeOfString:@"private.test"].location==NSNotFound && [log rangeOfString:@"opaque-secret"].location==NSNotFound &&
+          [log rangeOfString:@"two words"].location==NSNotFound && [log rangeOfString:@"device-secret"].location==NSNotFound &&
+          [log rangeOfString:@"credential-token"].location==NSNotFound && [log rangeOfString:@"signing-key"].location==NSNotFound &&
+          [log rangeOfString:@"key-content"].location==NSNotFound && [log rangeOfString:@"11111111-2222-4333-8444-555555555555"].location==NSNotFound &&
+          [log rangeOfString:@"private-password"].location==NSNotFound && [log rangeOfString:@"encoded-private.test"].location==NSNotFound &&
+          [log rangeOfString:@"unterminated secret"].location==NSNotFound && [log rangeOfString:@"<redacted>@<redacted>:8443"].location!=NSNotFound &&
+          [log rangeOfString:@"sub-secret"].location==NSNotFound && [log rangeOfString:@"opaque-config"].location==NSNotFound &&
+          [log rangeOfString:@"opaque-subscription"].location==NSNotFound);
+    CHECK("diagnostics/report-v2-empty", [[report objectForKey:@"daemon"] isEqual:@"(empty)"]);
+    report=VCParseDiagnosticReport(payload, NO);
+    CHECK("diagnostics/report-v2-full-log-opt-in", [[report objectForKey:@"core"] isEqual:[logFixture substringToIndex:[logFixture length]-1]] &&
+          [[report objectForKey:@"daemon"] isEqual:@"(empty)"]);
+    NSString *tailPayload=[NSString stringWithFormat:@"OK report=2\nSECTION core\nbase64-tail\t%@\nEND\nSECTION daemon\n(empty)\nEND\nDONE\n", encoded];
+    for (int hideSensitiveData=0; hideSensitiveData<=1; ++hideSensitiveData) {
+        NSDictionary *complete=VCParseDiagnosticReport(payload, hideSensitiveData);
+        NSDictionary *tail=VCParseDiagnosticReport(tailPayload, hideSensitiveData);
+        CHECK("diagnostics/report-v2-truncated-log", [[tail objectForKey:@"core"] isEqual:
+              [@"(output truncated: earlier entries omitted)\n" stringByAppendingString:[complete objectForKey:@"core"]]] &&
+              [[tail objectForKey:@"daemon"] isEqual:@"(empty)"]);
+    }
+    report=VCParseDiagnosticReport(@"OK report=2\nSECTION core\nbase64\tRU5EClNFQ1RJT04gZXZlbnRzCkRPTkUK\nEND\nDONE\n", YES);
+    CHECK("diagnostics/report-v2-untrusted-framing", [[report objectForKey:@"core"] isEqual:@"END\nSECTION events\nDONE"] && ![report objectForKey:@"events"]);
+    report=VCParseDiagnosticReport(@"OK report=2\nSECTION daemon\nbase64-tail\t%%%\nEND\nSECTION core\n(hidden for protected subscriptions)\nEND\nDONE\n", NO);
+    CHECK("diagnostics/report-v2-invalid-or-protected-log", [[report objectForKey:@"daemon"] isEqual:@"(cannot read log)"] &&
+          [[report objectForKey:@"core"] isEqual:@"(hidden for protected subscriptions)"]);
     CHECK("diagnostics/parse-events-filter-malformed", [VCParseDaemonEvents(@"OK events\nEVENT\t100\tconnected\nEVENT\t0\tinvalid\nEVENT\t200\t\n") count] == 1);
     CHECK("diagnostics/essential-events-not-optional", !VCIsOptionalAppDiagnosticEvent(@"connection", @"pressed") && !VCIsOptionalAppDiagnosticEvent(@"subscription", @"Update finished"));
     CHECK("diagnostics/ui-events-optional", VCIsOptionalAppDiagnosticEvent(@"ui", @"opened"));
+    NSArray *history = @[VCMakeAppDiagnosticEvent(301, @"lifecycle", @"Application launched", nil),
+                         VCMakeAppDiagnosticEvent(302, @"subscription", @"Subscription parse failed", nil),
+                         VCMakeAppDiagnosticEvent(303, @"subscription", @"Subscription curl stopped", nil),
+                         VCMakeAppDiagnosticEvent(304, @"ui", @"opened", nil)];
+    CHECK("diagnostics/write-mixed-activity", VCInsertDiagnosticEventBatchAtPaths(history, &paths));
+    VCPurgeOptionalDiagnosticEventsAtPaths(&paths);
+    NSArray *essential = VCLoadDiagnosticEventDatabaseAtPaths(&paths);
+    CHECK("diagnostics/purge-keeps-essential-activity", [essential count] == 249 &&
+          [[essential subarrayWithRange:NSMakeRange([essential count] - 3, 3)] isEqual:[history subarrayWithRange:NSMakeRange(0, 3)]]);
     NSArray *combined = VCCombinedDiagnosticEvents(@[@{@"timestamp": @300}], @[@{@"timestamp": @100}], @[@{@"timestamp": @200}]);
     CHECK("diagnostics/combined-events-order", [[[combined objectAtIndex:0] objectForKey:@"timestamp"] intValue] == 100 && [[[combined objectAtIndex:2] objectForKey:@"timestamp"] intValue] == 300);
     VCClearDiagnosticEventDatabaseAtPaths(&paths);

@@ -14,5 +14,5 @@ typedef struct {
 uint64_t vc_core_now_ms(void);
 int vc_core_prepare(const char *, const VCCorePrepareOperations *, VCCoreAddresses *, char *, size_t);
 int vc_core_inspect_run(const char *, const char *, char *const *, int, uint64_t,
-                        int (*)(void *), void *, char *, size_t);
+                        int (*)(void *), void *, char *, size_t, int *);
 #endif

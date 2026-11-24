@@ -91,11 +91,13 @@ static int child_fixture(void) {
 static void processes(const char *binary) {
     int baseline=descriptor_count(); char output[1024];
     for (unsigned i=0;i<8;i++) {
-        char *env[]={i%4 == 0 ? "VC_CORE_TEST_MODE=normal" : i%4 == 1 ? "VC_CORE_TEST_MODE=slow" : i%4 == 2 ? "VC_CORE_TEST_MODE=crash" : "VC_CORE_TEST_MODE=large",NULL};
+        char *env[]={i%4 == 0 ? "VC_CORE_TEST_MODE=normal" : i%4 == 1 ? "VC_CORE_TEST_MODE=slow" : i%4 == 2 ? "VC_CORE_TEST_MODE=crash" : "VC_CORE_TEST_MODE=large",getenv("ASAN_OPTIONS") ? "ASAN_OPTIONS=detect_leaks=0" : NULL,NULL};
         uint64_t start=vc_core_now_ms();
-        int result=vc_core_inspect_run(binary,"private-vless-core",env,-1,start+(i%4 == 1 ? 150 : 2000),NULL,NULL,output,sizeof(output));
+        int child_status;
+        int result=vc_core_inspect_run(binary,"private-vless-core",env,-1,start+(i%4 == 1 ? 150 : 2000),NULL,NULL,output,sizeof(output),&child_status);
         CHECK("inspect/process-results",i%4 == 0 ? !result && !strcmp(output,"CONFIG\t1\nPRIMARY\tprimary.test\t443\nEND\n") : i%4 == 1 ? result == -2 : result == -1);
         CHECK("inspect/absolute-process-deadline",vc_core_now_ms()-start < (i%4 == 1 ? 1000 : 4000));
+        if (i%4 == 2) CHECK("inspect/record-crash-signal",child_status>=0 && WIFSIGNALED(child_status) && WTERMSIG(child_status)==SIGKILL);
         CHECK("inspect/no-descriptor-leak",descriptor_count() == baseline);
         CHECK("inspect/no-zombie",waitpid(-1,NULL,WNOHANG) < 0 && errno == ECHILD);
     }
@@ -108,7 +110,7 @@ int main(int argc, char **argv) {
         if (count < 0) return 1;
         uri[used]=0;
         char *env[]={"PATH=/usr/bin:/bin",NULL};
-        int result=vc_core_inspect_run(argv[2],uri,env,STDERR_FILENO,vc_core_now_ms()+2000,NULL,NULL,output,sizeof(output));
+        int result=vc_core_inspect_run(argv[2],uri,env,STDERR_FILENO,vc_core_now_ms()+2000,NULL,NULL,output,sizeof(output),NULL);
         memset(uri,0,sizeof(uri));
         if (!result) fputs(output,stdout);
         return result ? 1 : 0;

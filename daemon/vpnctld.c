@@ -36,6 +36,7 @@
 #include "vpnctld_protocol.h"
 #include "system_proxy.h"
 #include "core_config.h"
+#include "diagnostic_report.h"
 #include "socket_peer_pid.h"
 #include "legacy_loopback.h"
 #include "legacy_dns.h"
@@ -191,7 +192,7 @@ static int g_pf_recovery_pending = 0;
 static uid_t g_helper_uid = (uid_t)-1;
 static gid_t g_helper_gid = (gid_t)-1;
 
-#define DIAGNOSTIC_EVENT_CAPACITY 48
+#define DIAGNOSTIC_EVENT_CAPACITY 128
 #define DIAGNOSTIC_EVENT_MESSAGE_CAPACITY 128
 
 typedef struct {
@@ -202,6 +203,12 @@ typedef struct {
 static diagnostic_event_t g_diagnostic_events[DIAGNOSTIC_EVENT_CAPACITY];
 static size_t g_diagnostic_event_next = 0;
 static size_t g_diagnostic_event_count = 0;
+static int g_diagnostic_history_available;
+static int g_started_by_launchd;
+static long long g_daemon_started;
+static const char kDiagnosticHistoryPath[] = "/var/db/vless-core/diagnostic-events-v1";
+static int write_all_fd(int fd, const void *data, size_t length);
+static int save_diagnostic_history(void);
 
 static void diagnostic_event(const char *fmt, ...) {
     if (!fmt) return;
@@ -222,6 +229,7 @@ static void diagnostic_event(const char *fmt, ...) {
 
     g_diagnostic_event_next = (g_diagnostic_event_next + 1) % DIAGNOSTIC_EVENT_CAPACITY;
     if (g_diagnostic_event_count < DIAGNOSTIC_EVENT_CAPACITY) g_diagnostic_event_count++;
+    g_diagnostic_history_available = save_diagnostic_history() == 0;
 }
 
 
@@ -353,6 +361,59 @@ static int sync_state_directory(void) {
     int result = fstat(fd, &st) == 0 && S_ISDIR(st.st_mode) && fsync(fd) == 0 ? 0 : -1;
     close(fd);
     return result;
+}
+
+static void load_diagnostic_history(void) {
+    if (ensure_state_directory() != 0) return;
+    int fd = open(kDiagnosticHistoryPath, O_RDONLY | O_NOFOLLOW | O_NONBLOCK);
+    if (fd < 0) { g_diagnostic_history_available = errno == ENOENT; return; }
+    struct stat st;
+    if (fstat(fd, &st) || !S_ISREG(st.st_mode) || st.st_uid != 0 || st.st_nlink != 1 ||
+        (st.st_mode & 0777) != 0600 || st.st_size < 0 || st.st_size > 32768) {
+        close(fd);
+        return;
+    }
+    FILE *file = fdopen(fd, "r");
+    if (!file) { close(fd); return; }
+    char line[192];
+    while (g_diagnostic_event_count < DIAGNOSTIC_EVENT_CAPACITY && fgets(line, sizeof(line), file)) {
+        char *separator;
+        errno = 0;
+        long long timestamp = strtoll(line, &separator, 10);
+        if (errno || timestamp <= 0 || *separator != '\t') break;
+        char *message = separator + 1;
+        size_t length = strcspn(message, "\r\n\t");
+        if (message[length] != '\n' || !length || length >= DIAGNOSTIC_EVENT_MESSAGE_CAPACITY || message[length + 1]) break;
+        diagnostic_event_t *event = &g_diagnostic_events[g_diagnostic_event_next++];
+        event->timestamp_ms = timestamp;
+        memcpy(event->message, message, length);
+        event->message[length] = 0;
+        g_diagnostic_event_count++;
+    }
+    g_diagnostic_event_next %= DIAGNOSTIC_EVENT_CAPACITY;
+    g_diagnostic_history_available = (g_diagnostic_event_count || st.st_size == 0) && !ferror(file);
+    fclose(file);
+}
+
+static int save_diagnostic_history(void) {
+    if (ensure_state_directory() != 0) return -1;
+    const char *path = "/var/db/vless-core/.diagnostic-events.tmp";
+    if (unlink(path) != 0 && errno != ENOENT) return -1;
+    int fd = open(path, O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW, 0600);
+    if (fd < 0) return -1;
+    int rc = fchmod(fd, 0600);
+    size_t first = (g_diagnostic_event_next + DIAGNOSTIC_EVENT_CAPACITY - g_diagnostic_event_count) % DIAGNOSTIC_EVENT_CAPACITY;
+    for (size_t i = 0; rc == 0 && i < g_diagnostic_event_count; ++i) {
+        const diagnostic_event_t *event = &g_diagnostic_events[(first + i) % DIAGNOSTIC_EVENT_CAPACITY];
+        char line[192];
+        int n = snprintf(line, sizeof(line), "%lld\t%s\n", event->timestamp_ms, event->message);
+        rc = n > 0 && (size_t)n < sizeof(line) ? write_all_fd(fd, line, (size_t)n) : -1;
+    }
+    if (rc == 0) rc = fsync(fd);
+    if (close(fd) != 0) rc = -1;
+    if (rc == 0) rc = rename(path, kDiagnosticHistoryPath);
+    if (rc != 0) (void)unlink(path);
+    return rc;
 }
 
 static int write_pf_previous_state(int was_enabled, int dispatch_installed) {
@@ -698,6 +759,20 @@ static int wait_spawned_quiet(pid_t pid) {
     return rc == pid && WIFEXITED(status) ? WEXITSTATUS(status) : -1;
 }
 
+static int spawn_stdout_capture(char *const argv[], const int fds[2], pid_t *pid) {
+    posix_spawn_file_actions_t actions;
+    int rc = posix_spawn_file_actions_init(&actions);
+    if (rc != 0) return rc;
+    if ((rc = posix_spawn_file_actions_addclose(&actions, fds[0])) == 0 &&
+        (rc = posix_spawn_file_actions_adddup2(&actions, fds[1], STDOUT_FILENO)) == 0 &&
+        (rc = posix_spawn_file_actions_addclose(&actions, fds[1])) == 0 &&
+        (rc = posix_spawn_file_actions_addopen(&actions, STDERR_FILENO, "/dev/null", O_WRONLY, 0)) == 0) {
+        rc = posix_spawn(pid, argv[0], &actions, NULL, argv, kSafeRootEnvironment);
+    }
+    posix_spawn_file_actions_destroy(&actions);
+    return rc;
+}
+
 static int run_argv_capture_impl(char *const argv[], char *out, size_t out_cap, int verbose, int complete) {
     if (!argv || !argv[0] || !out || out_cap == 0) return -1;
     out[0] = '\0';
@@ -710,16 +785,8 @@ static int run_argv_capture_impl(char *const argv[], char *out, size_t out_cap, 
         return -1;
     }
 
-    posix_spawn_file_actions_t actions;
-    posix_spawn_file_actions_init(&actions);
-    posix_spawn_file_actions_addclose(&actions, pipefd[0]);
-    posix_spawn_file_actions_adddup2(&actions, pipefd[1], STDOUT_FILENO);
-    posix_spawn_file_actions_addclose(&actions, pipefd[1]);
-    posix_spawn_file_actions_addopen(&actions, STDERR_FILENO, "/dev/null", O_WRONLY, 0);
-
     pid_t pid = 0;
-    int rc = posix_spawn(&pid, argv[0], &actions, NULL, argv, kSafeRootEnvironment);
-    posix_spawn_file_actions_destroy(&actions);
+    int rc = spawn_stdout_capture(argv, pipefd, &pid);
     close(pipefd[1]);
 
     if (rc != 0) {
@@ -1785,8 +1852,13 @@ static int inspect_connection(void *context, const char *uri, uint64_t until, ch
     int log_fd=open(g.protect_logs ? "/dev/null" : "/var/log/vless-core.log",flags,0600);
     if (log_fd < 0) return -1;
     if (!g.protect_logs) (void)fchmod(log_fd,0600);
-    int result=vc_core_inspect_run(binary,uri,kSafeHelperEnvironment,log_fd,until,core_inspection_child,NULL,output,capacity);
+    int status;
+    int result=vc_core_inspect_run(binary,uri,kSafeHelperEnvironment,log_fd,until,core_inspection_child,NULL,output,capacity,&status);
     close(log_fd);
+    if (result == -2) diagnostic_event("Core inspect timed out");
+    else if (result != 0 && status >= 0 && WIFSIGNALED(status)) diagnostic_event("Core inspect failed signal=%d", WTERMSIG(status));
+    else if (result != 0 && status >= 0 && WIFEXITED(status)) diagnostic_event("Core inspect failed exit=%d", WEXITSTATUS(status));
+    else if (result != 0) diagnostic_event("Core inspect failed");
     return result;
 }
 
@@ -1858,8 +1930,10 @@ static int child_process_running(pid_t *pid, const char *name) {
             } else {
                 log_error("%s pid=%d exited, status=%d", name, (int)*pid, exit_status);
             }
+            diagnostic_event("%s stopped exit=%d", name, exit_status);
         } else if (WIFSIGNALED(status)) {
             log_error("%s pid=%d terminated by signal=%d", name, (int)*pid, WTERMSIG(status));
+            diagnostic_event("%s stopped signal=%d", name, WTERMSIG(status));
         } else {
             log_warning("%s pid=%d exited with an unrecognized wait status", name, (int)*pid);
         }
@@ -1867,7 +1941,9 @@ static int child_process_running(pid_t *pid, const char *name) {
         return 0;
     }
 
-    log_error("%s pid=%d waitpid failed errno=%d", name, (int)*pid, errno);
+    int error = errno;
+    log_error("%s pid=%d waitpid failed errno=%d", name, (int)*pid, error);
+    diagnostic_event("%s wait failed errno=%d", name, error);
     *pid = 0;
     return 0;
 }
@@ -2279,6 +2355,12 @@ static int write_pf_conf(const char *server_ips, char ifnames[][32], size_t if_c
     return vc_write_pf_conf("/var/run/vlesscore-pf.conf", g.routing_bypass_lan, server_ips, ifnames, if_count, redir_port, dns_port, mode);
 }
 
+static pf_enabled_state_t pf_enabled_state_from_output(const char *output) {
+    if (contains_ci(output, "Status: Enabled")) return PF_ENABLED;
+    if (contains_ci(output, "Status: Disabled")) return PF_DISABLED;
+    return PF_ENABLED_ERROR;
+}
+
 static pf_enabled_state_t pf_enabled_state_query(const char *pfctl, int verbose) {
     if (!pfctl) return PF_ENABLED_ERROR;
     char output[4096];
@@ -2293,10 +2375,9 @@ static pf_enabled_state_t pf_enabled_state_query(const char *pfctl, int verbose)
         if (verbose) log_warning("pf status query failed");
         return PF_ENABLED_ERROR;
     }
-    if (contains_ci(output, "Status: Enabled")) return PF_ENABLED;
-    if (contains_ci(output, "Status: Disabled")) return PF_DISABLED;
-    if (verbose) log_warning("pf status query returned an unknown state");
-    return PF_ENABLED_ERROR;
+    pf_enabled_state_t state = pf_enabled_state_from_output(output);
+    if (verbose && state == PF_ENABLED_ERROR) log_warning("pf status query returned an unknown state");
+    return state;
 }
 
 static pf_enabled_state_t pf_enabled_state(const char *pfctl) {
@@ -3078,13 +3159,16 @@ static const char *pac_state_name(void) {
 #endif
 }
 
-static void send_safe_diagnostics(int client_fd) {
-    const char *pfctl = find_pfctl_bin();
-    pf_enabled_state_t enabled = pfctl ? pf_enabled_state_quiet(pfctl) : PF_ENABLED_ERROR;
-    pf_root_state_t root = pfctl ? pf_root_state_quiet(pfctl) : PF_ROOT_ERROR;
-    char response[2048];
-    int length = snprintf(response,
-                          sizeof(response),
+static const char *pf_dispatch_name(pf_root_state_t root) {
+    if (root == PF_ROOT_OWN_DISPATCH) return "vlesscore";
+    if (root == PF_ROOT_SHARED_DISPATCH) return "shared";
+    if (root == PF_ROOT_PARTIAL_DISPATCH) return "partial";
+    return root == PF_ROOT_ERROR ? "unknown" : "absent";
+}
+
+static int diagnostic_state_text(char *response, size_t capacity, pf_enabled_state_t enabled, pf_root_state_t root) {
+    return snprintf(response,
+                          capacity,
                           "OK diagnostics=1\n"
                           "connected=%d\n"
                           "mode=%s\n"
@@ -3092,10 +3176,15 @@ static void send_safe_diagnostics(int client_fd) {
                           "socks_port=%d\n"
                           "pf=%s\n"
                           "pf_routing=%s\n"
+                          "pf_dispatch=%s\n"
                           "pac=%s\n"
                           "core=%s\n"
                           "redsocks=%s\n"
                           "dns=%s\n"
+                          "daemon_launch=%s\n"
+                          "daemon_started=%lld\n"
+                          "connected_since=%lld\n"
+                          "history_persistent=%d\n"
                           "protected_logs=%d\n",
                           g.connected ? 1 : 0,
                           mode_name(g.mode),
@@ -3107,11 +3196,22 @@ static void send_safe_diagnostics(int client_fd) {
                           g.socks_port,
                           pf_enabled_state_name(enabled),
                           pf_routing_state_name(enabled, root),
+                          pf_dispatch_name(root),
                           pac_state_name(),
                           child_process_alive_snapshot(g.core_pid) ? "running" : "stopped",
                           child_process_alive_snapshot(g.redsocks_pid) ? "running" : "stopped",
                           child_process_alive_snapshot(g.dns_pid) ? "running" : "stopped",
+                          g_started_by_launchd ? "launchd" : "direct",
+                          g_daemon_started, (long long)g.connected_since, g_diagnostic_history_available,
                           g.protect_logs ? 1 : 0);
+}
+
+static void send_safe_diagnostics(int client_fd) {
+    const char *pfctl = find_pfctl_bin();
+    pf_enabled_state_t enabled = pfctl ? pf_enabled_state_quiet(pfctl) : PF_ENABLED_ERROR;
+    pf_root_state_t root = pfctl ? pf_root_state_quiet(pfctl) : PF_ROOT_ERROR;
+    char response[2048];
+    int length = diagnostic_state_text(response, sizeof(response), enabled, root);
     if (length <= 0 || (size_t)length >= sizeof(response)) {
         static const char error[] = "ERR diagnostics unavailable\n";
         (void)write_all_fd(client_fd, error, sizeof(error) - 1);
@@ -3120,15 +3220,14 @@ static void send_safe_diagnostics(int client_fd) {
     (void)write_all_fd(client_fd, response, (size_t)length);
 }
 
-static void send_diagnostic_events(int client_fd) {
+static int send_diagnostic_events(int client_fd) {
     char header[64];
     int header_length = snprintf(header,
                                  sizeof(header),
                                  "OK events=%u\n",
                                  (unsigned)g_diagnostic_event_count);
-    if (header_length > 0 && (size_t)header_length < sizeof(header)) {
-        (void)write_all_fd(client_fd, header, (size_t)header_length);
-    }
+    if (header_length <= 0 || (size_t)header_length >= sizeof(header) ||
+        write_all_fd(client_fd, header, (size_t)header_length)) return -1;
 
     size_t first = (g_diagnostic_event_next + DIAGNOSTIC_EVENT_CAPACITY -
                     g_diagnostic_event_count) % DIAGNOSTIC_EVENT_CAPACITY;
@@ -3141,18 +3240,176 @@ static void send_diagnostic_events(int client_fd) {
                               "EVENT\t%lld\t%s\n",
                               event->timestamp_ms,
                               event->message);
-        if (length > 0 && (size_t)length < sizeof(line)) {
-            (void)write_all_fd(client_fd, line, (size_t)length);
+        if (length <= 0 || (size_t)length >= sizeof(line) ||
+            write_all_fd(client_fd, line, (size_t)length)) return -1;
+    }
+    return 0;
+}
+
+static int report_text(int fd, const char *text) {
+    return write_all_fd(fd, text, strlen(text));
+}
+
+static int report_section(int fd, const char *name, const char *text) {
+    return report_text(fd, "SECTION ") || report_text(fd, name) || report_text(fd, "\n") ||
+           report_text(fd, text) || report_text(fd, "\nEND\n");
+}
+
+static const char *diagnostic_pf_query(const char *pfctl, const char *query, char *output, size_t capacity,
+                                       uint64_t deadline, char error_buffer[64]) {
+    output[0] = 0;
+    if (!pfctl) return "(pfctl not available)";
+    if (vc_core_now_ms() >= deadline) return "(PF query timed out)";
+    int fds[2];
+    if (pipe(fds)) return "(cannot open PF query pipe)";
+    char *argv[] = {(char *)pfctl, "-s", (char *)query, NULL};
+    pid_t pid = -1;
+    int rc = spawn_stdout_capture(argv, fds, &pid);
+    close(fds[1]);
+    if (rc != 0) {
+        close(fds[0]);
+        snprintf(error_buffer, 64, "(cannot launch pfctl: errno=%d)", rc);
+        return error_buffer;
+    }
+    size_t used = 0;
+    const char *error = "(PF query read failed)";
+    int status, eof = 0, reaped = 0;
+    for (;;) {
+        uint64_t now = vc_core_now_ms();
+        if (now >= deadline) { error = "(PF query timed out)"; break; }
+        if (!reaped) {
+            pid_t result = waitpid(pid, &status, WNOHANG);
+            if (result == pid) reaped = 1;
+            else if (result < 0 && errno != EINTR) { reaped = errno == ECHILD; break; }
+        }
+        if (eof && reaped) {
+            if (WIFEXITED(status) && WEXITSTATUS(status) == 0) error = NULL;
+            else if (WIFEXITED(status) || WIFSIGNALED(status)) {
+                snprintf(error_buffer, 64, "(pfctl query failed: %s=%d)",
+                         WIFEXITED(status) ? "exit" : "signal", WIFEXITED(status) ? WEXITSTATUS(status) : WTERMSIG(status));
+                error = error_buffer;
+            } else error = "(pfctl query failed)";
+            break;
+        }
+        struct pollfd p = {eof ? -1 : fds[0], POLLIN, 0};
+        int wait = deadline - now > 20 ? 20 : (int)(deadline - now);
+        int ready = poll(&p, 1, wait);
+        if (ready < 0) { if (errno == EINTR) continue; break; }
+        if (ready == 0) continue;
+        char buf[1024];
+        ssize_t n = read(fds[0], buf, sizeof(buf));
+        if (n < 0) { if (errno == EINTR) continue; break; }
+        if (n == 0) { eof = 1; continue; }
+        if ((size_t)n >= capacity - used || memchr(buf, 0, (size_t)n)) {
+            error = "(PF output too large or invalid)";
+            break;
+        }
+        memcpy(output + used, buf, (size_t)n);
+        used += (size_t)n;
+    }
+    if (!reaped) {
+        (void)kill(pid, SIGKILL);
+        while (waitpid(pid, NULL, 0) < 0 && errno == EINTR) {}
+    }
+    close(fds[0]);
+    output[error ? 0 : used] = 0;
+    return error;
+}
+
+static int report_log_section(int client_fd, const char *name, const char *path) {
+    int fd = open(path, O_RDONLY | O_NOFOLLOW | O_NONBLOCK);
+    struct stat st;
+    if (fd < 0 || fstat(fd, &st) != 0 || !S_ISREG(st.st_mode) || st.st_uid != 0 || st.st_nlink != 1) {
+        if (fd >= 0) close(fd);
+        return report_section(client_fd, name, "(cannot read log)");
+    }
+    char input[VC_DIAGNOSTIC_LOG_TAIL_BYTES], output[VC_DIAGNOSTIC_LOG_BASE64_BYTES + 1];
+    off_t offset = st.st_size > (off_t)sizeof(input) ? st.st_size - (off_t)sizeof(input) : 0;
+    char previous = '\n';
+    ssize_t n;
+    if (offset) {
+        do { n = pread(fd, &previous, 1, offset - 1); } while (n < 0 && errno == EINTR);
+        if (n != 1) {
+            close(fd);
+            return report_section(client_fd, name, n < 0 ? "(cannot read log)" : "(empty)");
         }
     }
+    do { n = pread(fd, input, sizeof(input), offset); } while (n < 0 && errno == EINTR);
+    close(fd);
+    if (n < 0) return report_section(client_fd, name, "(cannot read log)");
+    if (!n) return report_section(client_fd, name, "(empty)");
+    const char *start = input;
+    if (previous != '\n') {
+        const char *newline = memchr(input, '\n', (size_t)n);
+        if (!newline || newline + 1 == input + n) return report_section(client_fd, name, "(no complete log records)");
+        start = newline + 1;
+    }
+    const char *end = input + n;
+    while (end > start && end[-1] != '\n') --end;
+    if (end == start) return report_section(client_fd, name, "(no complete log records)");
+    if (VCDiagnosticEncodeLog(start, (size_t)(end - start), output, sizeof(output)))
+        return report_section(client_fd, name, "(output limit exceeded)");
+    return report_text(client_fd, "SECTION ") || report_text(client_fd, name) ||
+           report_text(client_fd, offset ? "\n" VC_DIAGNOSTIC_LOG_TAIL_PREFIX : "\n" VC_DIAGNOSTIC_LOG_PREFIX) ||
+           report_text(client_fd, output) || report_text(client_fd, "\nEND\n");
+}
+
+static int report_installation(int client_fd) {
+    const char *paths[] = {VC_APP_EXECUTABLE_PATH, "/usr/bin/vpnctld", VC_BOOTSTRAP_EXECUTABLE_PATH,
+                           VC_CORE_EXECUTABLE_PATH, "/usr/bin/vless-core-curl", VC_REDSOCKS_EXECUTABLE_PATH};
+    if (report_text(client_fd, "SECTION installation\n")) return -1;
+    for (size_t i = 0; i < sizeof(paths) / sizeof(paths[0]); ++i) {
+        char canonical[PATH_MAX], line[512];
+        struct stat st;
+        int exists = stat(paths[i], &st) == 0;
+        int executable = exists && S_ISREG(st.st_mode) && (st.st_mode & 0111);
+        const char *class = realpath(paths[i], canonical) ? control_executable_class(canonical) : "unavailable";
+        const char *resolved = !strcmp(class, "unavailable") ? "unknown" : !strcmp(canonical, paths[i]) ? paths[i] : "(resolved location differs)";
+        snprintf(line, sizeof(line), "%s | resolved=%s | class=%s | present=%s | executable bits=%s\n",
+                 paths[i], resolved, class, exists ? "yes" : "no or unreadable", executable ? "yes" : "no");
+        if (report_text(client_fd, line)) return -1;
+    }
+    return report_text(client_fd, "END\n");
+}
+
+static void send_diagnostic_report(int client_fd, int permit_logs) {
+    if (report_text(client_fd, VC_DIAGNOSTIC_REPORT_HEADER)) return;
+    const char *pfctl = find_pfctl_bin();
+    char info[4096], nat[16384], filter[16384], output[8192];
+    char errors[3][64];
+    uint64_t deadline = vc_core_now_ms() + 900;
+    const char *info_error = diagnostic_pf_query(pfctl, "info", info, sizeof(info), deadline, errors[0]);
+    const char *nat_error = diagnostic_pf_query(pfctl, "nat", nat, sizeof(nat), deadline, errors[1]);
+    const char *filter_error = diagnostic_pf_query(pfctl, "rules", filter, sizeof(filter), deadline, errors[2]);
+    pf_enabled_state_t engine = info_error ? PF_ENABLED_ERROR : pf_enabled_state_from_output(info);
+    pf_root_state_t root = nat_error || filter_error ? PF_ROOT_ERROR : pf_classify_root_rules(nat, filter);
+    diagnostic_state_text(output, sizeof(output), engine, root);
+    if (report_section(client_fd, "state", output) || report_installation(client_fd)) return;
+    if (report_section(client_fd, "pf_status", info_error ? info_error : pf_enabled_state_name(engine))) return;
+    VCDiagnosticPFNames names = {{0}, 0};
+    if (report_section(client_fd, "pf_nat", nat_error ? nat_error : VCDiagnosticPFText(&names, nat, output, sizeof(output))) ||
+        report_section(client_fd, "pf_filter", filter_error ? filter_error : VCDiagnosticPFText(&names, filter, output, sizeof(output)))) return;
+    if (report_text(client_fd, "SECTION events\n") || send_diagnostic_events(client_fd) || report_text(client_fd, "END\n")) return;
+    if (!permit_logs || g.protect_logs) {
+        if (report_section(client_fd, "daemon", "(hidden for protected subscriptions)") ||
+            report_section(client_fd, "core", "(hidden for protected subscriptions)")) return;
+    } else if (report_log_section(client_fd, "daemon", "/var/log/vpnctld.log") ||
+               report_log_section(client_fd, "core", "/var/log/vless-core.log")) return;
+    (void)report_text(client_fd, "DONE\n");
 }
 
 static void clear_diagnostic_events(int client_fd) {
     memset(g_diagnostic_events, 0, sizeof(g_diagnostic_events));
     g_diagnostic_event_next = 0;
     g_diagnostic_event_count = 0;
+    g_diagnostic_history_available = save_diagnostic_history() == 0;
     static const char response[] = "OK cleared\n";
-    (void)write_all_fd(client_fd, response, sizeof(response) - 1);
+    if (!g_diagnostic_history_available && unlink(kDiagnosticHistoryPath) != 0 && errno != ENOENT) {
+        static const char error[] = "ERR cannot clear diagnostic history\n";
+        (void)write_all_fd(client_fd, error, sizeof(error) - 1);
+    } else {
+        (void)write_all_fd(client_fd, response, sizeof(response) - 1);
+    }
 }
 
 static void handle_client(int cfd, control_client_t client_type) {
@@ -3202,8 +3459,12 @@ static void handle_client(int cfd, control_client_t client_type) {
         send_safe_diagnostics(cfd);
         return;
     }
+    if (client_type == CONTROL_CLIENT_APP && (!strcmp(buf, "REPORT\t0\n") || !strcmp(buf, "REPORT\t1\n"))) {
+        send_diagnostic_report(cfd, buf[7] == '1');
+        return;
+    }
     if (client_type == CONTROL_CLIENT_APP && strcmp(buf, "EVENTS\n") == 0) {
-        send_diagnostic_events(cfd);
+        (void)send_diagnostic_events(cfd);
         return;
     }
     if (client_type == CONTROL_CLIENT_APP && strcmp(buf, "CLEAR_EVENTS\n") == 0) {
@@ -3365,6 +3626,10 @@ int main(int argc, char **argv) {
         return 1;
     }
     if (load_helper_identity() != 0) return 1;
+    g_started_by_launchd = launched_by_launchd;
+    g_daemon_started = (long long)time(NULL);
+    load_diagnostic_history();
+    diagnostic_event("Daemon starting (%s)", g_started_by_launchd ? "launchd" : "direct");
     (void)chmod("/var/log/vpnctld.log", 0600);
     (void)chmod("/var/log/vless-core.log", 0600);
 

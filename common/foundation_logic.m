@@ -1,6 +1,7 @@
 #import "foundation_logic.h"
 #import "app_constants.h"
 #include "daemon_policy.h"
+#include "../daemon/vpnctld_protocol.h"
 #include "../integrations/happ/happ_crypto.h"
 #include <openssl/evp.h>
 #include <openssl/rand.h>
@@ -734,9 +735,12 @@ BOOL VCIsOptionalAppDiagnosticEvent(NSString *category, NSString *action) {
     if ([category isEqualToString:@"connection"] ||
         [category isEqualToString:@"daemon"] ||
         [category isEqualToString:@"diagnostics"] ||
-        [category isEqualToString:@"ping"]) return NO;
+        [category isEqualToString:@"ping"] ||
+        [category isEqualToString:@"lifecycle"]) return NO;
     if ([category isEqualToString:@"subscription"] &&
-        [action rangeOfString:@"update" options:NSCaseInsensitiveSearch].location != NSNotFound) return NO;
+        ([action rangeOfString:@"update" options:NSCaseInsensitiveSearch].location != NSNotFound ||
+         [action hasPrefix:@"Subscription fetch "] || [action hasPrefix:@"Subscription parse "] ||
+         [action isEqualToString:@"Subscription curl stopped"])) return NO;
     return YES;
 }
 
@@ -798,6 +802,109 @@ NSArray *VCParseDaemonEvents(NSString *response) {
                            nil]];
     }
     return events;
+}
+
+static NSArray *VCDiagnosticLogRedactionRules(void) {
+    static NSArray *rules;
+    @synchronized([NSRegularExpression class]) {
+        if (rules) return rules;
+        NSArray *patterns = @[
+            @[@"\\x1b\\[[0-?]*[ -/]*[@-~]|[\\x00-\\x08\\x0b\\x0c\\x0e-\\x1f\\x7f]", @""],
+            @[@"(?i)-----BEGIN [^-\\r\\n]*KEY-----[\\s\\S]*?(?:-----END [^-\\r\\n]*KEY-----|\\z)", @"<redacted>"],
+            @[@"(?im)(?:^[A-Za-z0-9+/=]{32,}[ \\t]*\\r?\\n)+-----END [^-\\r\\n]*KEY-----", @"<redacted>"],
+            @[@"(?i)(\\b(?:proxy-authorization|authorization|set-cookie|cookie)\\b[\"']?[ \\t]*[:=][ \\t]*)[^\\r\\n]+", @"$1<redacted>"],
+            @[@"(?i)\\b[A-Z][A-Z0-9+.-]*(?::|%3a)(?:\\\\?/|%2f){2}[^\\s<>\"']+", @"<redacted>"],
+            @[@"(?i)(?<![\\w./-])[A-Z0-9._%+-]+:[^\\s@/?#<>\"']+@(?=\\[[0-9a-f:.]+\\]|[A-Z0-9.-]+)", @"<redacted>@"],
+            @[@"(?i)(\\b(?:x-hwid|hwid|uuid|username|password|passwd|passphrase|api[_-]?key|access[_-]?token|refresh[_-]?token|token|secret|credentials?|private[_-]?key|public[_-]?key|key|pbk|sid|short[_-]?id|subscription[_-]?(?:url|link)|config(?:uration)?[_-]?(?:uri|url|link))\\b[\"']?[ \\t]*[:=][ \\t]*)(?:\"(?:\\\\.|[^\"\\\\\\r\\n])*(?:\"|(?=[\\r\\n]|\\z))|'(?:\\\\.|[^'\\\\\\r\\n])*(?:'|(?=[\\r\\n]|\\z))|[^\\s<>\"',;&}\\]]+)", @"$1<redacted>"],
+            @[@"(?i)\\b(?:Bearer[ \\t]+[A-Z0-9_+./=-]{12,}|Basic[ \\t]+(?:[A-Z0-9+/]{16,}={0,2}|[A-Z0-9+/]{4,}={1,2}))(?=[ \\t\\r\\n,;]|\\z)", @"<redacted>"],
+            @[@"(?i)\\b[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\\b", @"<redacted>"],
+            @[@"(?i)(?<![0-9a-z.])(?:[0-9a-f:.]*::[0-9a-f:.]*|(?:[0-9a-f]{1,4}:){7}[0-9a-f]{1,4}|(?:[0-9a-f]{1,4}:){6}(?:[0-9]{1,3}\\.){3}[0-9]{1,3})(?:%[0-9a-z_.-]+)?(?![0-9a-z:])", @"<redacted>"],
+            @[@"(?<![0-9.])(?:[0-9]{1,3}\\.){3}[0-9]{1,3}(?![0-9]|\\.[0-9])", @"<redacted>"],
+            @[@"(?i)(?<![\\p{L}\\p{N}_.-])(?:[\\p{L}\\p{N}-]+\\.)+[\\p{L}][\\p{L}\\p{N}-]*\\.?(?![\\p{L}\\p{N}_.-])", @"<redacted>"],
+            @[@"(?i)(\\b(?:host|hostname|server|server[_-]?name|sni|authority|address|upstream)\\b[\"']?[ \\t]*[:=][ \\t]*[\"']?)[A-Z0-9-]+(?![A-Z0-9_.-])", @"$1<redacted>"]
+        ];
+        NSMutableArray *compiled = [NSMutableArray arrayWithCapacity:[patterns count]];
+        for (NSArray *pattern in patterns) {
+            NSRegularExpression *expression = [NSRegularExpression regularExpressionWithPattern:[pattern objectAtIndex:0] options:0 error:NULL];
+            if (!expression) return nil;
+            [compiled addObject:@[expression, [pattern objectAtIndex:1]]];
+        }
+        rules = [compiled copy];
+    }
+    return rules;
+}
+
+static NSString *VCRenderDiagnosticLog(NSString *source, BOOL hideSensitiveData, BOOL truncated) {
+    if (!source) return @"(cannot read log)";
+    NSMutableString *text = [NSMutableString stringWithString:source];
+    if (hideSensitiveData) {
+        NSArray *rules = VCDiagnosticLogRedactionRules();
+        if (!rules) return @"(cannot safely render log)";
+        for (NSArray *rule in rules) {
+            NSRegularExpression *expression = [rule objectAtIndex:0];
+            [expression replaceMatchesInString:text options:0 range:NSMakeRange(0, [text length]) withTemplate:[rule objectAtIndex:1]];
+        }
+    }
+    while ([text hasSuffix:@"\n"] || [text hasSuffix:@"\r"]) [text deleteCharactersInRange:NSMakeRange([text length] - 1, 1)];
+    if (![text length]) return @"(empty)";
+    return truncated ? [@"(output truncated: earlier entries omitted)\n" stringByAppendingString:text] : text;
+}
+
+static NSString *VCDecodeDiagnosticLog(NSString *body, BOOL hideSensitiveData) {
+    BOOL truncated = [body hasPrefix:@VC_DIAGNOSTIC_LOG_TAIL_PREFIX];
+    NSString *prefix = truncated ? @VC_DIAGNOSTIC_LOG_TAIL_PREFIX : @VC_DIAGNOSTIC_LOG_PREFIX;
+    if (![body hasPrefix:prefix]) {
+        for (NSString *marker in @[@"(empty)", @"(cannot read log)", @"(no complete log records)",
+                                   @"(output limit exceeded)", @"(hidden for protected subscriptions)"]) {
+            if ([body isEqualToString:marker]) return marker;
+        }
+        return @"(cannot read log)";
+    }
+    NSUInteger prefixLength = [prefix length];
+    if ([body length] - prefixLength > VC_DIAGNOSTIC_LOG_BASE64_BYTES) return @"(cannot read log)";
+    NSData *data = DecodeBase64String([body substringFromIndex:prefixLength]);
+    if (![data length] || [data length] > VC_DIAGNOSTIC_LOG_TAIL_BYTES) return @"(cannot read log)";
+    NSString *decoded = [[[NSString alloc] initWithData:data encoding:NSUTF8StringEncoding] autorelease];
+    if (!decoded) decoded = [[[NSString alloc] initWithData:data encoding:NSISOLatin1StringEncoding] autorelease];
+    return VCRenderDiagnosticLog(decoded, hideSensitiveData, truncated);
+}
+
+NSDictionary *VCParseDiagnosticReport(NSString *response, BOOL hideSensitiveData) {
+    if (![response hasPrefix:@VC_DIAGNOSTIC_REPORT_HEADER]) {
+        NSString *reason = [response hasPrefix:@"ERR unauthorized client"] ? VCSanitizeDiagnosticText(response, 192) :
+                           [response hasPrefix:@"ERR"] || [response hasPrefix:@"OK"] ? @"diagnostic snapshot unsupported" :
+                           [response hasPrefix:@"daemon offline"] ? @"daemon offline" :
+                           @"daemon did not return a diagnostic snapshot";
+        return @{ @"error": reason };
+    }
+    NSMutableDictionary *result = [NSMutableDictionary dictionary];
+    NSArray *valid = @[@"state", @"installation", @"pf_status", @"pf_nat", @"pf_filter", @"events", @"daemon", @"core"];
+    NSString *section = nil;
+    NSMutableString *body = [NSMutableString string];
+    NSArray *lines = [response componentsSeparatedByString:@"\n"];
+    for (NSUInteger i = 1; i + 1 < [lines count]; i++) {
+        NSString *line = [lines objectAtIndex:i];
+        if ([line isEqualToString:@"DONE"] && !section) return result;
+        if ([line hasPrefix:@"SECTION "]) {
+            if (section) break;
+            section = [line substringFromIndex:8];
+            if (![valid containsObject:section] || [result objectForKey:section]) break;
+            [body setString:@""];
+        } else if ([line isEqualToString:@"END"] && section) {
+            while ([body hasSuffix:@"\n"]) [body deleteCharactersInRange:NSMakeRange([body length] - 1, 1)];
+            BOOL log = [section isEqualToString:@"daemon"] || [section isEqualToString:@"core"];
+            NSString *value = log ? VCDecodeDiagnosticLog(body, hideSensitiveData) : [[body copy] autorelease];
+            [result setObject:value forKey:section];
+            section = nil;
+        } else if (section) {
+            [body appendString:line];
+            [body appendString:@"\n"];
+        } else {
+            break;
+        }
+    }
+    [result setObject:@"incomplete diagnostic snapshot" forKey:@"partial"];
+    return result;
 }
 
 NSString *VCNormalizedIPAddress(NSString *value) {

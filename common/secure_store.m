@@ -374,8 +374,9 @@ void VCPurgeOptionalDiagnosticEventsAtPaths(const VCStoragePaths *paths) {
     if (!VCOpenDiagnosticEventDatabaseAtPaths(&database, paths)) return;
     sqlite3_exec(database,
                  "DELETE FROM events "
-                 "WHERE category NOT IN ('connection','diagnostics','ping') "
-                 "AND NOT (category='subscription' AND action LIKE '%update%');",
+                 "WHERE category NOT IN ('connection','daemon','diagnostics','ping','lifecycle') "
+                 "AND NOT (category='subscription' AND (action LIKE '%update%' OR action LIKE 'Subscription fetch %' "
+                 "OR action LIKE 'Subscription parse %' OR action='Subscription curl stopped'));",
                  NULL, NULL, NULL);
     sqlite3_close(database);
 }

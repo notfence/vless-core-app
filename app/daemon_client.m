@@ -224,7 +224,7 @@ static ssize_t SendRawCommand(NSData *outData, const struct timeval *rw_tv, int 
     return (ssize_t)used;
 }
 
-NSString *SendCommand(NSString *cmdLine) {
+static NSString *VCSendDaemonCommand(NSString *cmdLine, BOOL allowBootstrap) {
     BOOL isConnectCommand = [cmdLine hasPrefix:@"CONNECT\t"] ||
                             [cmdLine hasPrefix:@"CONNECT_PRIVATE\t"];
 
@@ -234,9 +234,8 @@ NSString *SendCommand(NSString *cmdLine) {
 
     NSData *outData = [cmdLine dataUsingEncoding:NSUTF8StringEncoding];
     int last_errno = 0;
-    NSString *last_io_error = nil;
 
-    for (int phase = 0; phase < 2; phase++) {
+    for (int phase = 0; phase < (allowBootstrap ? 2 : 1); phase++) {
         if (phase == 1) {
             (void)TryBootstrapDaemon();
         }
@@ -253,22 +252,26 @@ NSString *SendCommand(NSString *cmdLine) {
             }
 
             if (connected) {
-                last_io_error = (last_errno == EPIPE || last_errno == ECONNRESET) ?
+                return (last_errno == EPIPE || last_errno == ECONNRESET) ?
                     @"no response from daemon" :
                     [NSString stringWithFormat:@"write/read failed: %s", strerror(last_errno)];
-                return last_io_error;
             }
             if (attempt + 1 < ready_attempts) usleep(120 * 1000);
         }
     }
 
-    if (last_io_error) {
-        return last_io_error;
-    }
     if (last_errno == 0) {
         last_errno = ECONNREFUSED;
     }
     return [NSString stringWithFormat:@"daemon offline (%s)", strerror(last_errno)];
+}
+
+NSString *SendCommand(NSString *cmdLine) {
+    return VCSendDaemonCommand(cmdLine, YES);
+}
+
+NSString *VCReadDiagnosticReport(BOOL includeTechnicalLogs) {
+    return VCSendDaemonCommand(includeTechnicalLogs ? @"REPORT\t1\n" : @"REPORT\t0\n", NO);
 }
 
 NSString *ConnectCommandForURI(NSString *uri, BOOL protectLogs) {

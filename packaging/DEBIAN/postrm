@@ -13,6 +13,8 @@ case "$1" in
     rm -f /usr/share/vless-core/runtime-architecture
     rm -f /var/db/vless-core/system-proxy-backup.plist.tmp \
           /var/db/vless-core/system-proxy-backup.corrupt.plist \
+          /var/db/vless-core/diagnostic-events-v1 \
+          /var/db/vless-core/.diagnostic-events.tmp \
           /var/db/vless-core/pf-state.tmp \
           /var/run/vlesscore-pf-previous-state \
           /var/run/vlesscore-pf-previous-state.tmp

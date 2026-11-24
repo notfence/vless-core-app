@@ -22,6 +22,7 @@ APP_OBJECTS += $(HOST_BUILD_DIR)/core-parser/fingerprint.o
 HOST_TESTS := $(HOST_BUILD_DIR)/test_app_logic $(HOST_BUILD_DIR)/test_legacy_loopback_host $(HOST_BUILD_DIR)/test_legacy_dns_host
 HOST_TESTS += $(HOST_BUILD_DIR)/test_main_geometry $(HOST_BUILD_DIR)/test_daemon_policy
 HOST_TESTS += $(HOST_BUILD_DIR)/test_daemon_pf
+HOST_TESTS += $(HOST_BUILD_DIR)/test_diagnostic_report
 HOST_TESTS += $(HOST_BUILD_DIR)/test_control_auth $(HOST_BUILD_DIR)/test_socket_peer
 HOST_TESTS += $(HOST_BUILD_DIR)/test_system_proxy
 HOST_TESTS += $(HOST_BUILD_DIR)/test_qr $(HOST_BUILD_DIR)/test_import_formats
@@ -82,6 +83,7 @@ test: requirements $(HOST_TESTS)
 	$(HOST_BUILD_DIR)/test_main_geometry
 	$(HOST_BUILD_DIR)/test_daemon_policy
 	$(HOST_BUILD_DIR)/test_daemon_pf
+	$(HOST_BUILD_DIR)/test_diagnostic_report
 	$(HOST_BUILD_DIR)/test_control_auth
 	$(HOST_BUILD_DIR)/test_socket_peer
 	$(HOST_BUILD_DIR)/test_system_proxy
@@ -159,7 +161,7 @@ $(HOST_BUILD_DIR)/test_app_logic: $(APP_OBJECTS)
 UI_SOURCE_ROOT ?= $(ROOT)
 $(HOST_BUILD_DIR)/subscription_update.inc: ../app/main_subscriptions.m extract_ui_methods.py Makefile
 	mkdir -p $(dir $@)
-	python3 extract_ui_methods.py $< $@ 'static BOOL SubscriptionResponseIsForbidden(' '- (NSDictionary *)updatedSubscriptionDictionaryFromSource:(NSDictionary *)sub errorText:(NSString **)errorTextOut insecureRetryAvailable:' '- (BOOL)subscriptionNeedsPlainHTTPApproval:' '- (BOOL)subscriptionsMatchSnapshotForLaunchAutoUpdate:' '- (void)startBackgroundSubscriptionRefreshAllowPlainHTTP:'
+	python3 extract_ui_methods.py $< $@ 'static NSInteger SubscriptionResponseStatus(' '- (NSDictionary *)updatedSubscriptionDictionaryFromSource:(NSDictionary *)sub errorText:(NSString **)errorTextOut insecureRetryAvailable:' '- (BOOL)subscriptionNeedsPlainHTTPApproval:' '- (BOOL)subscriptionsMatchSnapshotForLaunchAutoUpdate:' '- (void)startBackgroundSubscriptionRefreshAllowPlainHTTP:'
 
 $(HOST_BUILD_DIR)/subscription_compatibility.inc: ../app/main_import.m extract_ui_methods.py Makefile
 	mkdir -p $(dir $@)
@@ -448,14 +450,17 @@ $(HOST_BUILD_DIR)/daemon_pf_state.inc: ../daemon/vpnctld.c Makefile
 
 $(HOST_BUILD_DIR)/daemon_pf_calls.inc: ../daemon/vpnctld.c extract_ui_methods.py Makefile
 	mkdir -p $(dir $@)
-	python3 extract_ui_methods.py $< $@ 'static pf_enabled_state_t pf_enabled_state_query(' 'static pf_enabled_state_t pf_enabled_state(' 'static int flush_pf_states(' 'static pf_root_state_t pf_root_state_query(' 'static pf_root_state_t pf_root_state(' 'static pf_root_state_t pf_root_state_quiet(' 'static int check_pf_for_connection(' 'static int install_pf_dispatch(' 'static int remove_owned_pf_dispatch(' 'static int apply_pf_rules(' 'static int flush_owned_pf_states(' 'static int restore_owned_pf_engine(' 'static int clear_pf_rules(' 'static int recover_stale_pf_state(' 'static int disconnect_all(void) {' 'static int try_connect_pf(' 'static void finish_failed_protected_connect(' 'static void report_pf_connect_failure(' 'static int connect_all(' 'static const char *pf_routing_state_name('
+	python3 extract_ui_methods.py $< $@ 'static pf_enabled_state_t pf_enabled_state_from_output(' 'static pf_enabled_state_t pf_enabled_state_query(' 'static pf_enabled_state_t pf_enabled_state(' 'static int flush_pf_states(' 'static pf_root_state_t pf_root_state_query(' 'static pf_root_state_t pf_root_state(' 'static pf_root_state_t pf_root_state_quiet(' 'static int check_pf_for_connection(' 'static int install_pf_dispatch(' 'static int remove_owned_pf_dispatch(' 'static int apply_pf_rules(' 'static int flush_owned_pf_states(' 'static int restore_owned_pf_engine(' 'static int clear_pf_rules(' 'static int recover_stale_pf_state(' 'static int disconnect_all(void) {' 'static int try_connect_pf(' 'static void finish_failed_protected_connect(' 'static void report_pf_connect_failure(' 'static int connect_all(' 'static const char *pf_routing_state_name('
 
 $(HOST_BUILD_DIR)/daemon_pf_capture.inc: ../daemon/vpnctld.c extract_ui_methods.py Makefile
 	mkdir -p $(dir $@)
-	python3 extract_ui_methods.py $< $@ 'static int run_argv_capture_impl('
+	python3 extract_ui_methods.py $< $@ 'static int spawn_stdout_capture(' 'static int run_argv_capture_impl(' 'static const char *diagnostic_pf_query('
 
 $(HOST_BUILD_DIR)/test_daemon_pf: test_daemon_pf.c $(HOST_BUILD_DIR)/daemon_pf_state.inc $(HOST_BUILD_DIR)/daemon_pf_calls.inc $(HOST_BUILD_DIR)/daemon_pf_capture.inc ../common/daemon_policy.c ../common/helper_monitor.c ../daemon/vpnctld_protocol.h check.h | requirements
 	$(HOST_CC) $(HOST_CPPFLAGS) $(HOST_CFLAGS) -I$(HOST_BUILD_DIR) test_daemon_pf.c ../common/daemon_policy.c ../common/helper_monitor.c -o $@ $(SANITIZE)
+
+$(HOST_BUILD_DIR)/test_diagnostic_report: test_diagnostic_report.c ../daemon/diagnostic_report.c ../daemon/diagnostic_report.h ../daemon/vpnctld_protocol.h check.h | requirements
+	$(HOST_CC) $(HOST_CPPFLAGS) $(HOST_CFLAGS) test_diagnostic_report.c ../daemon/diagnostic_report.c -o $@ $(SANITIZE)
 
 $(HOST_BUILD_DIR)/test_control_auth: test_control_auth.c ../common/control_auth.c ../common/control_auth.h check.h | requirements
 	mkdir -p $(dir $@)

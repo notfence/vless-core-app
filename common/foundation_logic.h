@@ -65,6 +65,7 @@ NSArray *VCCombinedDiagnosticEvents(NSArray *daemonEvents,
                                            NSArray *appEvents,
                                            NSArray *localEvents);
 NSDictionary *VCParseDaemonDiagnostics(NSString *response);
+NSDictionary *VCParseDiagnosticReport(NSString *response, BOOL hideSensitiveData);
 NSArray *VCParseDaemonEvents(NSString *response);
 NSString *VCNormalizedIPAddress(NSString *value);
 

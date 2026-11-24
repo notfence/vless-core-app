@@ -1,5 +1,6 @@
 #import <Foundation/Foundation.h>
 #import "../common/connection_logic.h"
+#include "../daemon/vpnctld_protocol.h"
 #include "support/objc/blocks_runtime.h"
 #include "check.h"
 #include "../common/main_geometry.h"

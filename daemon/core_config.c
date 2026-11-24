@@ -111,7 +111,8 @@ invalid:
 }
 
 int vc_core_inspect_run(const char *binary, const char *uri, char *const *environment, int log_fd, uint64_t until,
-                       int (*prepare_child)(void *), void *context, char *output, size_t capacity) {
+                       int (*prepare_child)(void *), void *context, char *output, size_t capacity, int *child_status) {
+    if (child_status) *child_status=-1;
     if (!binary || !uri || !output || capacity < 2 || strlen(uri) > 4095) return -1;
     output[0]=0;
     int input[2]={-1,-1},reply[2]={-1,-1},result=-1,status=0,reaped=0,eof=0;
@@ -171,6 +172,12 @@ int vc_core_inspect_run(const char *binary, const char *uri, char *const *enviro
     result=sent == length && WIFEXITED(status) && WEXITSTATUS(status) == 0 && *output ? 0 : -1;
 cleanup:
     for (unsigned i=0;i<2;i++) { if (input[i] >= 0) close(input[i]); if (reply[i] >= 0) close(reply[i]); }
+    if (pid > 0 && !reaped) {
+        pid_t waited;
+        do { waited=waitpid(pid,&status,WNOHANG); } while (waited < 0 && errno == EINTR);
+        reaped=waited == pid;
+    }
+    if (reaped && child_status) *child_status=status;
     if (pid > 0 && !reaped) { kill(pid,SIGKILL); while (waitpid(pid,NULL,0) < 0 && errno == EINTR) {} }
     if (result) output[0]=0;
     return result;

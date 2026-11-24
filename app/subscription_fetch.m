@@ -305,6 +305,10 @@ NSData *FetchURLViaVlessCoreCurl(NSString *urlString,
     }
 
     if (!WIFEXITED(status) || WEXITSTATUS(status) != 0) {
+        if (task && WIFSIGNALED(status)) {
+            VCRecordAppEvent(@"subscription", @"Subscription curl stopped",
+                             [NSString stringWithFormat:@"signal=%d", WTERMSIG(status)]);
+        }
         if (exitCodeOut && WIFEXITED(status)) {
             *exitCodeOut = WEXITSTATUS(status);
         }
